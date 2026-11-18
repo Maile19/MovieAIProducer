@@ -1,9 +1,9 @@
 # Task Checklist - MovieAIProducer
 
 ## PHASE 0: REPOSITORY DISCOVERY (P0)
-- [ ] TASK-001: Repository Audit (Map structure, backend/frontend/db)
-- [ ] TASK-002: Dependency Audit (Manifests, risks, runtime)
-- [ ] TASK-003: Architecture Gap Analysis (Compare vs ARCHITECTURE.md)
+- [x] TASK-001: Repository Audit (Map structure, backend/frontend/db)
+- [x] TASK-002: Dependency Audit (Manifests, risks, runtime)
+- [x] TASK-003: Architecture Gap Analysis (Compare vs ARCHITECTURE.md)
 
 ## PHASE 1: FOUNDATION (P0)
 - [ ] TASK-004: Application Bootstrap (Entry point, config, logging)
