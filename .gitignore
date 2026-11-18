@@ -1,0 +1,78 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets/
+.secret/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+build/
+dist/
+.eggs/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+.next/
+out/
+dist/
+.npm/
+.turbo/
+coverage/
+*.tsbuildinfo
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Databases and local data
+*.sqlite
+*.sqlite3
+*.db
+instance/
+
+# Media and generated production artifacts
+media/
+generated/
+artifacts/
+renders/
+exports/
+uploads/
+temp/
+tmp/
+
+# Runtime and cache
+.cache/
+.cache-*/
+.pycache/
+*.pid
+
+# Local backup archives
+*.bak
+*.backup
+backups/
