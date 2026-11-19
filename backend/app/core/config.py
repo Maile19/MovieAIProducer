@@ -32,6 +32,33 @@ class Settings(BaseSettings):
         "localhost,127.0.0.1,testserver,producer.apologets.com"
     )
 
+    # Google OAuth 2.0 Credentials
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_redirect_uri: str = "https://producer.apologets.com/api/v1/auth/google/callback"
+
+    # Frontend & Session Security
+    frontend_url: str = "https://producer.apologets.com"
+    jwt_secret_key: str = "temporary-dev-jwt-secret-key-32-chars-long"
+    jwt_algorithm: str = "HS256"
+    jwt_expires_in_hours: int = 168
+    cookie_domain: str | None = None
+    cookie_secure: bool = False
+    cookie_name: str = "movieai_session"
+    cookie_samesite: str = "lax"
+
+    # Access Control: "whitelist" or "open"
+    auth_access_mode: str = "whitelist"
+    allowed_gmail_users: str = "needgenius19@gmail.com"
+
+    @property
+    def allowed_users_list(self) -> list[str]:
+        return [
+            email.strip().lower()
+            for email in self.allowed_gmail_users.split(",")
+            if email.strip()
+        ]
+
     @property
     def async_database_url(self) -> str:
         if self.database_url:

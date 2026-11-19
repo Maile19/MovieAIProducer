@@ -1,12 +1,14 @@
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from backend.app.api.deps import delete_session_cookie
 from backend.app.api.health import router as health_router
+from backend.app.api.v1 import v1_router
 from backend.app.core.config import get_settings
 from backend.app.core.logging import configure_logging
 from backend.app.core.middleware import RequestIDMiddleware
@@ -69,6 +71,34 @@ def create_app() -> FastAPI:
 
     app.add_middleware(RequestIDMiddleware)
 
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(
+        request: Request,
+        exc: HTTPException,
+    ):
+        request_id = getattr(request.state, "request_id", None)
+        headers = dict(exc.headers or {})
+        if request_id:
+            headers["X-Request-ID"] = request_id
+
+        response = JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error": {
+                    "code": "unauthorized" if exc.status_code == 401 else "http_error",
+                    "message": exc.detail,
+                    "request_id": request_id,
+                }
+            },
+            headers=headers,
+        )
+
+        # Anti-loop guarantee: automatically clear session cookie on any 401 response
+        if exc.status_code == 401:
+            delete_session_cookie(response, settings)
+
+        return response
+
     @app.exception_handler(Exception)
     async def unexpected_exception(
         request: Request,
@@ -99,6 +129,7 @@ def create_app() -> FastAPI:
         )
 
     app.include_router(health_router)
+    app.include_router(v1_router)
 
     return app
 
