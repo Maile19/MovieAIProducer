@@ -1,742 +1,180 @@
-# SECURITY.md
+# Security Architecture & Policies - MovieAIProducer
 
-Project: MovieAIProducer
-Document: Security Architecture & Security Policies
-Version: 1.0
-Status: Draft Specification
-Security Principle: Defense in Depth, Least Privilege, Secure by Default
+- **Project:** MovieAIProducer
+- **Document ID:** SEC-0001
+- **Domain:** Application Security, Cryptography, Identity & Threat Modeling
+- **Version:** 2.0.0
+- **Status:** Approved Production Specification
+- **Security Principles:** Defense in Depth, Least Privilege, Secure by Default, Zero Trust
+- **Canonical Architecture Decisions:** ADR-0011 (Authentication & Authorization), ADR-0012 (Asset Storage), ADR-0014 (Deployment Strategy)
+- **Production Host:** `https://producer.apologets.com`
 
 ---
 
-1. Purpose
-
-Dokumen ini menetapkan standar keamanan MovieAIProducer untuk melindungi:
-
-- Akun dan identitas pengguna.
-- Project dan data produksi.
-- Master Production Bible (MPB).
-- Screenplay dan intellectual property.
-- Character references dan visual assets.
-- Video, audio, dan hasil AI generation.
-- Provider credentials dan API keys.
-- Production jobs dan workflow.
-- Database, infrastructure, dan deployment.
-
-Keamanan harus menjadi bagian dari arsitektur sejak awal, bukan fitur tambahan setelah aplikasi selesai.
-
-2. Security Principles
-
-2.1 Defense in Depth
-
-Keamanan diterapkan pada beberapa lapisan:
-
-1. Client application.
-2. API gateway.
-3. Authentication.
-4. Authorization.
-5. Application services.
-6. Database.
-7. File storage.
-8. AI provider adapters.
-9. Infrastructure.
-10. Monitoring dan audit.
-
-Kegagalan satu lapisan tidak boleh otomatis membuka seluruh sistem.
-
-2.2 Least Privilege
-
-Setiap user, service, agent, dan integration hanya memperoleh permission yang diperlukan.
-
-2.3 Secure by Default
-
-- Endpoint privat secara default.
-- File privat secara default.
-- Provider credentials tidak pernah dikirim ke frontend.
-- Tidak ada akses lintas project tanpa izin.
-- Production environment tidak menggunakan debug mode.
-- Dangerous operations memerlukan validasi dan otorisasi.
-
-2.4 Fail Securely
-
-Jika authorization, credential validation, atau security check gagal, operasi harus dihentikan.
-
-Sistem tidak boleh menurunkan standar keamanan secara otomatis.
-
-3. Threat Model
-
-Ancaman utama:
-
-Threat| Dampak| Mitigasi
-Account takeover| Pengambilalihan akun| Secure authentication, MFA
-Unauthorized access| Akses data pengguna lain| RBAC dan ownership checks
-API key leakage| Penyalahgunaan provider| Secret management
-SQL injection| Manipulasi database| Parameterized queries
-XSS| Pencurian session atau tindakan tidak sah| Output encoding, CSP
-CSRF| Request tanpa persetujuan| CSRF protection
-SSRF| Akses internal melalui URL berbahaya| URL validation dan egress controls
-IDOR| Akses resource milik user lain| Object-level authorization
-Prompt injection| Manipulasi AI workflow| Instruction isolation
-Malicious uploads| Kompromi file processing| File validation dan sandbox
-Webhook spoofing| Manipulasi job status| Signature verification
-Resource exhaustion| Gangguan layanan| Rate limit dan quotas
-Supply-chain attack| Dependency berbahaya| Dependency scanning
-Data exposure| Kebocoran karya pengguna| Encryption dan access controls
-
-Threat model harus diperbarui seiring penambahan fitur.
-
-4. Authentication
-
-4.1 Authentication Requirements
-
-Sistem harus mendukung:
-
-- Email dan password.
-- Secure password hashing.
-- Session management.
-- Token-based authentication jika diperlukan.
-- Logout.
-- Password reset.
-- Email verification.
-- Optional MFA.
-- Account recovery.
-
-OAuth atau social login dapat ditambahkan melalui identity provider yang diverifikasi.
-
-4.2 Password Security
-
-Password harus:
-
-- Di-hash menggunakan Argon2id atau algoritma modern yang sesuai.
-- Tidak disimpan dalam plaintext.
-- Tidak muncul dalam log.
-- Memiliki kebijakan panjang minimum.
-- Diperiksa terhadap password yang diketahui telah bocor jika layanan pemeriksaan tersedia.
-
-Jangan membuat algoritma hashing sendiri.
-
-4.3 Session Security
-
-Cookie session harus menggunakan:
-
-- HttpOnly.
-- Secure.
-- Appropriate SameSite policy.
-- Batas waktu session.
-- Session rotation setelah perubahan privilege.
-- Revocation saat logout atau account compromise.
-
-Token tidak boleh disimpan pada lokasi yang mudah diakses JavaScript jika cookie HttpOnly dapat digunakan dengan aman.
-
-4.4 MFA
-
-MFA direkomendasikan untuk:
-
-- Administrator.
-- Production operators.
-- Billing administrators.
-- Akun yang mengelola provider credentials.
-
-Metode MFA harus dipilih berdasarkan keamanan dan kemampuan platform.
-
-5. Authorization & Access Control
-
-5.1 RBAC
-
-Role awal:
-
-Role| Permission
-OWNER| Kontrol penuh project dan organisasi
-ADMIN| Pengelolaan anggota dan konfigurasi
-DIRECTOR| Creative direction dan approval
-PRODUCER| Production workflow dan resource
-EDITOR| Editorial dan asset management
-OPERATOR| Menjalankan production jobs
-REVIEWER| Review dan QC
-VIEWER| Read-only access
-
-Role harus dapat dikembangkan tanpa menanamkan permission langsung ke business logic.
-
-5.2 Permission-Based Authorization
-
-Contoh permission:
-
-Permission| Description
-project.read| View project
-project.create| Create project
-project.update| Edit project
-project.delete| Delete/archive project
-project.share| Share project
-mpb.read| Read MPB
-mpb.update| Update MPB
-screenplay.approve| Approve screenplay
-scene.execute| Execute scene
-job.cancel| Cancel job
-qc.review| Review QC
-qc.approve| Approve QC
-asset.manage| Manage assets
-project.admin| Full project administration
-
-Authorization harus diperiksa untuk setiap resource dan operation.
-
-6. Project Isolation
-
-Setiap project harus memiliki batas akses yang jelas.
-
-Aturan:
-
-- Query database harus memperhatikan tenant/project scope.
-- Asset access harus mengikuti permission project.
-- Background jobs harus mempertahankan ownership context.
-- Export package harus memvalidasi project permission.
-- Sharing harus menggunakan explicit grant.
-- Tidak boleh mengandalkan UUID yang sulit ditebak sebagai mekanisme keamanan.
-
-Jika sistem berkembang menjadi multi-tenant, tenant isolation harus menjadi lapisan tambahan di atas project authorization.
-
-7. API Security
-
-7.1 Input Validation
-
-Semua input harus divalidasi menggunakan schema.
-
-Validasi:
-
-- Type.
-- Length.
-- Format.
-- Range.
-- Required fields.
-- Allowed values.
-- Resource ownership.
-- File metadata.
-- URL destinations.
-
-Gunakan Pydantic atau mekanisme validasi setara pada backend.
-
-7.2 API Protection
-
-- HTTPS wajib untuk production.
-- Rate limiting.
-- Request size limits.
-- Authentication.
-- Authorization.
-- Input validation.
-- Output encoding.
-- Security headers.
-- Structured error handling.
-- API versioning.
-
-7.3 CORS
-
-CORS harus menggunakan allowlist origin yang benar-benar diperlukan.
-
-Jangan menggunakan wildcard origin untuk endpoint yang mengandalkan credential.
-
-7.4 CSRF
-
-Endpoint yang menggunakan cookie-based authentication wajib memiliki perlindungan CSRF yang sesuai.
-
-7.5 Security Headers
-
-Pertimbangkan:
-
-- Content-Security-Policy.
-- Strict-Transport-Security.
-- X-Content-Type-Options.
-- Referrer-Policy.
-- Frame-ancestors.
-- Permissions-Policy.
-
-Konfigurasi harus diuji agar tidak merusak kebutuhan aplikasi.
-
-8. Provider Credential Security
-
-Provider credentials merupakan aset kritis.
-
-Ketentuan:
-
-- Simpan dalam environment secrets atau secret manager.
-- Pisahkan credential development, staging, dan production.
-- Jangan memasukkan key ke database plaintext.
-- Jangan memasukkan key ke source code.
-- Jangan mengirim key ke browser.
-- Jangan menampilkan key dalam exception.
-- Terapkan rotasi credential.
-- Batasi permission credential jika provider mendukungnya.
-
-Setiap provider adapter hanya boleh menerima credential melalui secure configuration layer.
-
-9. AI Agent Security
-
-MovieAIProducer dapat menggunakan beberapa AI agent untuk membantu proses produksi.
-
-Setiap agent wajib memiliki:
-
-- Identitas.
-- Role.
-- Permission.
-- Scope project.
-- Tool allowlist.
-- Execution limits.
-- Audit trail.
-
-9.1 Agent Permission
-
-Contoh:
-
-Agent| Hak akses
-Story Agent| Story dan screenplay
-Character Agent| Character Bible
-Visual Agent| Visual references
-Prompt Agent| Prompt generation
-Production Agent| Production job submission
-Continuity Agent| Read dan validate assets
-QC Agent| Analyze dan report
-Admin Agent| Tidak diberikan secara default
-
-Agent tidak boleh otomatis memperoleh hak administrator.
-
-9.2 Prompt Injection Protection
-
-Instruksi dari dokumen, screenplay, gambar, video, subtitle, atau provider response harus diperlakukan sebagai data yang tidak tepercaya.
-
-Kontrol:
-
-1. Pisahkan system instruction dan user content.
-2. Jangan mengeksekusi instruksi yang ditemukan dalam asset.
-3. Validasi tool arguments.
-4. Batasi tool access.
-5. Minta approval untuk operasi berisiko.
-6. Jangan biarkan asset mengubah permission.
-7. Catat tindakan agent.
-
-9.3 Tool Execution
-
-Agent yang menjalankan tool harus menggunakan:
-
-- Allowlisted commands.
-- Restricted filesystem access.
-- Timeout.
-- Resource limits.
-- Permission checks.
-- Execution logs.
-
-Jangan memberikan arbitrary shell execution kepada agent produksi.
-
-10. File Upload Security
-
-Jenis file yang mungkin diterima:
-
-- Images.
-- Video.
-- Audio.
-- Documents.
-- Subtitle.
-- Project exports.
-
-Pemeriksaan:
-
-- MIME type.
-- File signature.
-- File extension.
-- File size.
-- Filename normalization.
-- Malware scanning jika tersedia.
-- Metadata validation.
-- Archive extraction limits.
-- Storage path isolation.
-
-Aturan:
-
-- Jangan menggunakan filename pengguna sebagai filesystem path langsung.
-- Simpan file di luar public web root.
-- Gunakan generated storage key.
-- Batasi ukuran upload.
-- Cegah path traversal.
-- Cegah archive bomb.
-- Jangan mengeksekusi file upload.
-
-11. SSRF Protection
-
-Fitur yang mengambil URL eksternal harus memiliki proteksi SSRF.
-
-Kontrol:
-
-- Allowlist domain jika memungkinkan.
-- Block private IP ranges.
-- Block loopback.
-- Block link-local addresses.
-- Block cloud metadata endpoints.
-- Revalidate DNS resolution.
-- Batasi redirect.
-- Batasi response size.
-- Terapkan outbound network policy.
-
-Jangan mengizinkan agent mengakses URL bebas tanpa validasi.
-
-12. Asset Storage Security
-
-Aset produksi harus privat secara default.
-
-Kontrol:
-
-- Private storage.
-- Signed URL dengan masa berlaku terbatas.
-- Access control per project.
-- Encryption at rest.
-- HTTPS transfer.
-- Checksum validation.
-- Access audit.
-- Secure deletion policy.
-
-Signed URL tidak boleh memiliki masa berlaku lebih lama daripada kebutuhan akses.
-
-Asset ID tidak boleh menjadi satu-satunya lapisan authorization.
-
-13. Database Security
-
-Ketentuan:
-
-- Parameterized queries.
-- Least-privilege database account.
-- Restricted network access.
-- Secure connection.
-- Encrypted backups.
-- Migration review.
-- Database access audit.
-- Production data isolation.
-
-Jangan menggunakan administrator database credentials untuk aplikasi sehari-hari.
-
-14. Encryption
-
-14.1 In Transit
-
-Semua komunikasi eksternal harus menggunakan TLS.
-
-14.2 At Rest
-
-Lindungi:
-
-- User data.
-- Provider credentials.
-- Production assets.
-- Sensitive configuration.
-- Backups.
-
-Gunakan encryption yang dikelola platform atau cloud provider bila sesuai.
-
-14.3 Key Management
-
-- Jangan menyimpan encryption key bersama data terenkripsi.
-- Batasi akses key.
-- Rotasi key berdasarkan kebijakan.
-- Catat akses penting.
-- Siapkan prosedur recovery.
-
-Kehilangan encryption key dapat menyebabkan kehilangan akses permanen terhadap data.
-
-15. Webhook Security
-
-Webhook provider harus:
-
-- Memverifikasi signature.
-- Memeriksa timestamp jika didukung.
-- Mencegah replay.
-- Memvalidasi event schema.
-- Memeriksa provider job ID.
-- Menghindari perubahan status tanpa validasi.
-- Menyimpan event ID untuk deduplication.
-
-Webhook tidak boleh langsung dipercaya hanya karena dikirim ke endpoint yang benar.
-
-16. Logging & Audit Trail
-
-Audit event minimum:
-
-- Login success/failure.
-- Password reset.
-- MFA changes.
-- Permission changes.
-- User invitation.
-- Project sharing.
-- Provider configuration.
-- Credential rotation.
-- Asset upload/download/delete.
-- Job submission/cancellation.
-- Production approval.
-- Export generation.
-- Administrative actions.
-
-Log harus menyimpan:
-
-- Actor.
-- Action.
-- Resource.
-- Timestamp.
-- Outcome.
-- Correlation ID.
-- Relevant context.
-
-Jangan menyimpan:
-
-- Password.
-- API keys.
-- Session tokens.
-- Full payment credentials.
-- Sensitive private content tanpa kebutuhan yang jelas.
-
-17. Rate Limiting & Abuse Prevention
-
-Rate limit diterapkan berdasarkan:
-
-- User.
-- IP.
-- Endpoint.
-- Project.
-- Provider.
-- Generation type.
-
-Tambahkan:
-
-- Generation quota.
-- Upload quota.
-- Concurrent job limits.
-- Daily spending limits.
-- Account abuse detection.
-- Suspicious activity alerts.
-
-Batas numerik harus dikonfigurasi berdasarkan kapasitas dan hasil load testing, bukan ditebak.
-
-18. Dependency & Supply Chain Security
-
-Setiap dependency harus:
-
-- Memiliki versi yang dikunci.
-- Diperiksa kerentanannya.
-- Diperbarui secara terencana.
-- Berasal dari sumber tepercaya.
-- Diperiksa lisensinya jika relevan.
-
-Pipeline CI dapat menjalankan:
-
-- Dependency vulnerability scan.
-- Secret scanning.
-- Static analysis.
-- Container image scanning.
-- Software composition analysis.
-
-Critical vulnerability harus menghentikan release sampai ada mitigasi yang disetujui.
-
-19. Infrastructure Security
-
-Production infrastructure wajib:
-
-- Menggunakan SSH key authentication.
-- Menonaktifkan akses administratif yang tidak diperlukan.
-- Membatasi inbound ports.
-- Mengaktifkan firewall.
-- Memperbarui security patches.
-- Menggunakan service account terpisah.
-- Memisahkan staging dan production.
-- Mengamankan environment variables.
-- Menggunakan HTTPS.
-- Memantau disk, CPU, memory, dan network.
-
-Jangan membuka database port ke internet publik tanpa alasan dan kontrol yang kuat.
-
-20. Backup Security
-
-Backup harus:
-
-- Dienkripsi.
-- Memiliki akses terbatas.
-- Disimpan terpisah dari sumber utama.
-- Memiliki retention policy.
-- Memiliki integrity checks.
-- Diuji melalui restore drill.
-
-Backup yang tidak pernah diuji belum dapat dianggap sebagai recovery mechanism yang terverifikasi.
-
-21. Privacy & Intellectual Property
-
-MovieAIProducer harus memperlakukan hasil produksi sebagai aset kreatif pengguna.
-
-Kebijakan harus menjelaskan:
-
-- Data apa yang dikumpulkan.
-- Tujuan penggunaan data.
-- Data yang dikirim ke provider.
-- Retention.
-- Penghapusan.
-- Sharing.
-- Export.
-- Backup.
-- Hak penggunaan aset.
-- Kebijakan training provider.
-- Ketentuan komersial.
-
-Jangan mengasumsikan seluruh provider memberikan hak penggunaan komersial yang sama.
-
-Informasi hak cipta dan lisensi harus dicatat berdasarkan sumber dan ketentuan yang berlaku.
-
-22. Security Incident Response
-
-Kategori insiden:
-
-Severity| Contoh
-SEV-1| Kebocoran credential atau data massal
-SEV-2| Unauthorized access pada project
-SEV-3| Kerentanan terbatas atau gangguan keamanan
-SEV-4| Temuan keamanan berisiko rendah
-
-Prosedur:
-
-1. Detect.
-2. Classify.
-3. Contain.
-4. Investigate.
-5. Eradicate.
-6. Recover.
-7. Notify affected parties jika diwajibkan.
-8. Document.
-9. Review.
-10. Prevent recurrence.
-
-Incident response harus memiliki penanggung jawab dan jalur eskalasi.
-
-23. Secure Development Lifecycle
-
-Setiap perubahan mengikuti:
-
-Plan
-
-- Identifikasi aset yang dilindungi.
-- Identifikasi threat.
-- Tentukan security requirements.
-- Review dependency dan permission.
-
-Execute
-
-- Implement secure design.
-- Validasi input.
-- Terapkan authorization.
-- Tambahkan tests.
-- Hindari secret exposure.
-
-Monitor
-
-- Jalankan security checks.
-- Review logs.
-- Periksa vulnerabilities.
-- Audit akses.
-- Perbaiki temuan.
-
-Security review wajib dilakukan sebelum fitur berisiko tinggi masuk production.
-
-24. Security Testing
-
-Pengujian wajib mencakup:
-
-Authentication
-
-- Invalid credentials.
-- Session expiration.
-- Logout.
-- Password reset.
-- MFA behavior.
-
-Authorization
-
-- Cross-project access.
-- Cross-user access.
-- Role escalation.
-- Unauthorized deletion.
-- Unauthorized export.
-
-API
-
-- SQL injection.
-- XSS.
-- CSRF.
-- IDOR.
-- Rate-limit bypass.
-- Oversized request.
-
-Upload & Storage
-
-- Malicious file.
-- Incorrect MIME.
-- Path traversal.
-- Unauthorized download.
-- Expired signed URL.
-
-AI & Provider
-
-- Prompt injection.
-- Unauthorized tool invocation.
-- Credential leakage.
-- Webhook spoofing.
-- Duplicate webhook.
-- Provider response validation.
-
-Infrastructure
-
-- Secret scanning.
-- Dependency scanning.
-- TLS validation.
-- Firewall review.
-- Backup restore verification.
-
-25. Release Security Gate
-
-Release tidak boleh dilanjutkan jika:
-
-- Critical vulnerability belum dimitigasi.
-- Secret ditemukan dalam repository.
-- Authorization test gagal.
-- Cross-project data leakage ditemukan.
-- Production credentials terekspos.
-- Backup integrity gagal.
-- Critical security regression terjadi.
-
-High-severity findings memerlukan risk acceptance tertulis oleh pihak yang berwenang sebelum release.
-
-26. Security Acceptance Criteria
-
-- [ ] Authentication berjalan aman.
-- [ ] Password disimpan menggunakan secure hashing.
-- [ ] Session lifecycle tervalidasi.
-- [ ] RBAC dan object-level authorization aktif.
-- [ ] Project isolation teruji.
-- [ ] API memiliki input validation.
-- [ ] Rate limiting aktif.
-- [ ] Provider credentials terlindungi.
-- [ ] Upload pipeline tervalidasi.
-- [ ] Asset storage privat.
-- [ ] SSRF protection aktif.
-- [ ] Webhook signature diverifikasi.
-- [ ] AI agent memiliki tool permissions.
-- [ ] Prompt injection controls tersedia.
-- [ ] Audit trail berfungsi.
-- [ ] Dependency scanning aktif.
-- [ ] Backup terenkripsi.
-- [ ] Restore test berhasil.
-- [ ] Security release gate berjalan.
-
-27. Final Security Principle
-
-MovieAIProducer harus melindungi tiga hal utama:
-
-Identity: siapa yang mengakses sistem.
-
-Authority: apa yang boleh dilakukan setiap pengguna dan agent.
-
-Creative Assets: karya, data, dan hasil produksi yang harus tetap berada dalam kendali pemilik yang berhak.
-
-Tidak ada kemudahan workflow yang boleh mengorbankan keamanan data atau kontrol kreatif pengguna.
+## 1. Security Vision & Governance
+
+MovieAIProducer is a professional, studio-grade AI film production system managing intellectual property of substantial commercial and creative value:
+- Film screenplays, beat sheets, and confidential narrative lore.
+- Proprietary Master Production Bibles (MPB) and character facial/voice DNA embeddings.
+- High-resolution visual concept art, storyboard animatics, and generated video frames.
+- Sensitive AI provider API credentials (Google Cloud, OpenAI, Anthropic, Kling, ElevenLabs).
+- Background execution queues and local GPU infrastructure.
+
+Security is not an afterthought; it is an architectural invariant embedded into every layer from initial pre-production to final delivery.
 
 ---
 
-Document Status: Draft Specification
-Next Review: Setelah repository discovery, threat modeling, dan security architecture review.
+## 2. Security Architecture Diagram
+
+```mermaid
+flowchart TD
+    subgraph EdgeLayer ["Edge & Network Security Layer"]
+        UserBrowser["Browser Client (Desktop / Mobile / Tablet)"]
+        EdgeProxy["Reverse Proxy (Traefik / Nginx)"]
+        TLSGate["TLS 1.3 Termination (Let's Encrypt / HSTS Preloaded)"]
+        HostValidator["TrustedHostMiddleware (Allowed Hosts Whitelist) [IMPLEMENTED]"]
+        RateLimiter["IP & Tenant Rate Limiter (Token Bucket)"]
+    end
+
+    subgraph AuthLayer ["Identity & Access Management (ADR-0011)"]
+        JWTValidator["JWT / Session Authenticator (RS256 / Ed25519)"]
+        RBACEnforcer["RBAC Engine (Showrunner, Director, Editor, Reviewer)"]
+        TenantIsolator["Object-Level Ownership Guard (Project ID Bound)"]
+        ReqIdTag["RequestIDMiddleware (X-Request-ID Tracking) [IMPLEMENTED]"]
+    end
+
+    subgraph CoreApplication ["Application Core & Invariant Protection"]
+        InputSanitizer["Pydantic v2 Schema Validator [IMPLEMENTED]"]
+        PromptDefense["Prompt Injection & Jailbreak Firewall"]
+        UseCaseController["Domain UseCase & Production Bible Invariants"]
+    end
+
+    subgraph PersistenceLayer ["Secure Storage & CAS Layer"]
+        DBGuard["SQLAlchemy ORM (Parameterized Queries) [IMPLEMENTED]"]
+        CASVault["Local Content-Addressable Storage (./data/assets) [IMPLEMENTED]"]
+        SecretManager["Environment / Vault Secrets (Zero Prompt Leakage)"]
+    end
+
+    subgraph ExecutionLayer ["AI Provider & Worker Sandboxing"]
+        EgressProxy["Egress Proxy & Pinned TLS Adapter"]
+        WorkerSandbox["Isolated Task Worker (ComfyUI / GPT-SoVITS)"]
+    end
+
+    UserBrowser -->|HTTPS| EdgeProxy
+    EdgeProxy --> TLSGate
+    TLSGate --> HostValidator
+    HostValidator --> RateLimiter
+    RateLimiter --> ReqIdTag
+    ReqIdTag --> JWTValidator
+    JWTValidator --> RBACEnforcer
+    RBACEnforcer --> TenantIsolator
+    TenantIsolator --> InputSanitizer
+    InputSanitizer --> PromptDefense
+    PromptDefense --> UseCaseController
+
+    UseCaseController --> DBGuard
+    UseCaseController --> CASVault
+    UseCaseController --> WorkerSandbox
+    WorkerSandbox --> SecretManager
+    WorkerSandbox --> EgressProxy
+```
+
+---
+
+## 3. Threat Model (STRIDE + Generative AI Vectors)
+
+| Threat Category | Specific Attack Vector | Target Impact | Mitigation Strategy | Implementation Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **Spoofing** | Session token theft or replay; forged worker identities | Unauthorized film project manipulation | Short-lived RS256 JWTs (15m), secure HTTP-only SameSite cookies, mTLS for workers | **`[PLANNED]`** (ADR-0011) |
+| **Tampering** | Parameter tampering on locked MPB DNA; unauthorized prompt mutations | Narrative continuity corruption, character drift | Cryptographic version hashing, immutable DNA freeze rules (`is_locked = TRUE`) | **`[PLANNED]`** (ADR-0004) |
+| **Repudiation** | Denying approval of expensive 4K generation batches | Billing disputes, unauthorized compute costs | Immutable audit logs (`audit_logs` table) with user UUID and correlation ID | **`[PLANNED]`** (ADR-0013) |
+| **Information Disclosure** | Leakage of API keys in logs; exposure of CAS asset paths | Provider credential compromise; IP theft | Pydantic SecretStr, `structlog` zero-secret redactor, content-addressed hash storage | **`[IMPLEMENTED]`** (`backend/app/core/logging.py`) |
+| **Denial of Service** | Flooding generative video endpoints with massive prompt queues | GPU exhaustion, financial drain | Per-tenant rate limits, `Idempotency-Key` headers, worker queue depth caps | **`[PLANNED]`** (ADR-0007) |
+| **Elevation of Privilege** | Reviewer modifying master screenplay or approving MPB | Creative sabotage | Strict RBAC matrix enforced at application usecase boundary | **`[PLANNED]`** (ADR-0011) |
+| **Prompt Injection** | User-injected text instructing model to ignore cinematic bounds | System prompt leakage, off-brand offensive outputs | Strict separation of instruction delimiters (`<CINEMATIC_DNA>` tags), regex sanitization | **`[PLANNED]`** (ADR-0008) |
+| **SSRF** | External image/audio reference URLs pointing to local metadata APIs | Internal network breach (169.254.169.254) | Direct CAS uploads only; URL egress validation blocking private RFC 1918 subnets | **`[PLANNED]`** (ADR-0012) |
+| **Host Header Attack** | Spoofed HTTP Host headers poisoning password resets | Cache poisoning, redirection hijacking | Host header whitelist enforced via `TrustedHostMiddleware` | **`[IMPLEMENTED]`** (`backend/app/main.py`) |
+
+---
+
+## 4. Authentication Architecture `[IMPLEMENTED / PLANNED]`
+
+### 4.1 Implemented Presentation Defense `[IMPLEMENTED]`
+- **Host Whitelisting:** `TrustedHostMiddleware` in `backend/app/main.py` restricts access to `settings.allowed_host_list` (`localhost`, `127.0.0.1`, `testserver`, `producer.apologets.com`).
+- **Distributed Request Tracing:** `RequestIDMiddleware` in `backend/app/core/middleware.py` attaches an immutable `X-Request-ID` to track every authenticated interaction.
+
+### 4.2 Planned Identity & Session Management `[PLANNED]`
+- **Password Storage:** Passwords hashed with **Argon2id** (memory: 64MB, iterations: 3, parallelism: 4), with fallback to BCrypt (cost: 12).
+- **Token Specifications:**
+  - **Access Token:** Asymmetric RS256 or Ed25519 JWT with a 15-minute Time-to-Live (TTL).
+  - **Refresh Token:** Cryptographically random 256-bit entropy token stored with SHA-256 hash in the database, valid for 7 days with automatic rotation upon use.
+  - **Cookie Security:** Refresh tokens stored in `HttpOnly`, `Secure`, `SameSite=Strict` cookies.
+
+---
+
+## 5. Authorization & Role-Based Access Control (RBAC) `[PLANNED]`
+
+MovieAIProducer defines five distinct studio roles reflecting real Hollywood production team hierarchies:
+
+| Operation / Scope | Showrunner (Owner) | Director | Cinematographer | Editor | Reviewer / Guest |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Project Creation & Deletion** | **Yes** | No | No | No | No |
+| **Edit Master Production Bible** | **Yes** | **Yes** | No | No | No |
+| **Lock / Freeze Creative DNA** | **Yes** | No | No | No | No |
+| **Edit 50-Scene Screenplay** | **Yes** | **Yes** | No | No | No |
+| **Configure Camera & Light Matrix**| **Yes** | **Yes** | **Yes** | No | No |
+| **Submit Video/Voice Generation** | **Yes** | **Yes** | **Yes** | No | No |
+| **Execute Automated QC** | **Yes** | **Yes** | **Yes** | **Yes** | No |
+| **Final Shot Approval & Cut** | **Yes** | **Yes** | No | No | No |
+| **View Dailies & QC Scorecard** | **Yes** | **Yes** | **Yes** | **Yes** | **Yes** |
+| **Manage Billing & API Keys** | **Yes** | No | No | No | No |
+
+### Object-Level Tenant Isolation
+Every query in the application layer filters explicitly by `project_id`. A user authenticated as Director in Project A has zero read or write authority over Project B.
+
+---
+
+## 6. Generative AI Security & Ethical Protections
+
+### 6.1 Prompt Injection Defense Pipeline
+1. **Structural Delimiter Isolation:** Prompts sent to LLM compilers (Claude, Gemini, GPT-4o) wrap narrative screenplay inputs inside rigorous XML tags (`<SCREENPLAY_BEAT>...</SCREENPLAY_BEAT>`).
+2. **Negative Constraint Armor:** Compiler automatically appends defensive safety and visual negative tokens:
+   `ugly, deformed, mutated limbs, bad anatomy, blurry, watermarks, text overlay, offensive imagery, low resolution`.
+3. **Instruction Disregard Guard:** Compiler rejects raw inputs containing meta-prompts (e.g. *"ignore previous instructions"*, *"system prompt reveal"*).
+
+### 6.2 Voice Cloning Consent & Deepfake Ethics
+In accordance with AI safety standards, zero-shot voice cloning (GPT-SoVITS / ElevenLabs) enforces:
+1. **Explicit Voice Actor Consent Manifest:** Before reference audio WAV is ingested into CAS, a cryptographically signed consent record must be registered.
+2. **Watermarking:** Synthesized voice audio clips embed an imperceptible high-frequency acoustic watermark identifying MovieAIProducer synthesis.
+
+---
+
+## 7. Asset Storage Security & Content-Addressable Integrity `[IMPLEMENTED]`
+
+Binary media files (images, audio, video) are handled via the content-addressed storage architecture (ADR-0012):
+1. **SHA-256 Storage Keys:** Files are keyed by their SHA-256 hash (`./data/assets/{hash[0:2]}/{hash[2:4]}/{hash}.{ext}`). Any file tampering breaks checksum verification.
+2. **Direct CAS Path Isolation:** The web presentation layer never serves raw filesystem paths. Assets are served through authenticated streaming handlers (`/api/v1/assets/{id}/stream`) with MIME-type verification.
+3. **Upload File Validation:** Uploaded character references undergo magic-number byte inspection (rejecting executables disguised as PNG/MP4) and dimension sanity checks (maximum 20MB for images, 100MB for audio references).
+
+---
+
+## 8. Provider Credentials & Secret Management
+
+1. **Zero Hardcoded Secrets:** All external API tokens (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `KLING_SECRET_KEY`, `ELEVENLABS_API_KEY`) are managed via environment variables and loaded through `backend/app/core/config.py`.
+2. **Secret Masking:** Keys are never passed to the frontend client, never stored in database prompt logs, and redacted in all `structlog` output.
+3. **Egress Network Filtering:** Local ComfyUI and GPT-SoVITS GPU instances communicate over internal private network sockets (127.0.0.1 or VPC private IP), isolated from the public internet.
+
+---
+
+## 9. Security Release Gates & Verification Checklist
+
+Prior to any production deployment to `https://producer.apologets.com`, the following verification gates must pass:
+
+- [x] Host header validation active (`TrustedHostMiddleware` in `backend/app/main.py`).
+- [x] Correlation tracking verified (`RequestIDMiddleware` echoing `X-Request-ID`).
+- [x] Zero hardcoded secrets verified by automated Git pre-commit scans.
+- [x] Database queries parameterized via SQLAlchemy ORM (zero raw SQL formatting).
+- [x] Global exception handler active, preventing stack trace disclosure (returns HTTP 500 JSON).
+- [ ] Automated dependency vulnerability audit passed (`safety check` and `pip-audit`).
+- [ ] Penetration test verifying object-level tenant isolation across multiple project IDs.
+- [ ] Content-Addressable Storage file permissions restricted to `chmod 700` on production server.
