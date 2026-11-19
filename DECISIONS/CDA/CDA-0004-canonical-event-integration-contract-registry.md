@@ -1,915 +1,198 @@
+---
+id: CDA-0004
+title: Canonical Event & Integration Contract Registry
+status: ACCEPTED
+date: 2026-11-19
+decision_owners: Architecture Review Board & Integration Governance Team
+decision_scope: Domain Events, Command/Query Separation, Integration Envelopes, and Idempotency
+version: "1.2"
+tags:
+  [
+    cda,
+    event-registry,
+    domain-events,
+    integration-contracts,
+    outbox,
+    idempotency,
+  ]
+canonical_path: DECISIONS/CDA/CDA-0004-canonical-event-integration-contract-registry.md
+supersedes: []
+superseded_by: []
+---
+
 # CDA-0004: Canonical Event & Integration Contract Registry
 
-- Project: MovieAIProducer
-- Document ID: CDA-0004
-- Version: 1.0
-- Date: 2026-11-19
-- Status: Proposed
-- Classification: Architecture Governance
-- Depends on: CDA-0002, CDA-0003, ADR-0001, ADR-0005, ADR-0007, ADR-0013
+| Attribute            | Specification                                                                      |
+| :------------------- | :--------------------------------------------------------------------------------- |
+| **Document ID**      | CDA-0004                                                                           |
+| **Title**            | Canonical Event & Integration Contract Registry: Asynchronous Domain Communication |
+| **Status**           | ACCEPTED                                                                           |
+| **Date**             | 2026-11-19                                                                         |
+| **Decision Owners**  | Architecture Review Board & Integration Governance Team                            |
+| **Decision Scope**   | Domain Event Schemas, Outbox Contracts, Idempotency, and Failure Mitigation        |
+| **Version**          | 1.2                                                                                |
+| **Canonical Source** | `DECISIONS/CDA/CDA-0004-canonical-event-integration-contract-registry.md`          |
 
 ---
 
-1. Purpose
+## 1. Purpose & Integration Governance
 
-Dokumen ini menetapkan standar resmi untuk komunikasi dan integrasi antardomain MovieAIProducer.
+Dokumen ini menetapkan standar kanonikal untuk komunikasi asinkron dan integrasi lintas-domain MovieAIProducer.
 
-Tujuannya:
+Tujuan utama:
 
-1. Menentukan kepemilikan setiap event.
-2. Menetapkan format event yang konsisten.
-3. Memisahkan domain event, command, query, audit record, dan telemetry.
-4. Menjamin integritas komunikasi antarmodul.
-5. Mencegah duplikasi event dan pemrosesan berulang.
-6. Mendukung pemulihan ketika proses integrasi gagal.
-7. Memastikan setiap perubahan dapat dilacak ke sumbernya.
-8. Menyiapkan arsitektur untuk pengembangan skala besar tanpa mewajibkan microservices sejak awal.
+1. Menetapkan kepemilikan mutlak (_single domain ownership_) atas setiap domain event yang diterbitkan.
+2. Memisahkan secara tegas 5 modalitas komunikasi: **Domain Event**, **Command**, **Query**, **Audit Record**, dan **Telemetry**.
+3. Menjamin format amplop (_canonical event envelope_) yang seragam, membawa `event_id`, `occurred_at`, `correlation_id`, dan `tenant_id`.
+4. Menegakkan prinsip idempoten: setiap konsumen (_consumer_) wajib mampu menangani duplikasi pesan (_at-least-once delivery_) tanpa menimbulkan efek samping ganda.
+5. Menghubungkan secara langsung dengan implementasi kode di `backend/app/domain/common/event.py` (`DomainEvent`) dan `backend/app/infrastructure/common/event_bus.py` (`InMemoryEventBus`).
 
-2. Architectural Decision
+---
 
-MovieAIProducer menggunakan Domain-Owned Event Contract Architecture.
+## 2. Communication Topology & Outbox Architecture
 
-Prinsip utama:
+```mermaid
+flowchart TD
+    subgraph DomainModule["Authoritative Domain (e.g. MPB / Screenplay)"]
+        Entity["Aggregate Root / Entity"] -->|Mutates State| UoW["Unit of Work Transaction"]
+        Entity -->|Emits Fact| EventFactory["Domain Event Factory"]
+        EventFactory --> DomainEvent["DomainEvent Instance\n(backend/app/domain/common/event.py)"]
+        UoW -->|Commit State & Outbox| DB[("Relational Database")]
+    end
 
-- Setiap domain bertanggung jawab atas event yang diterbitkannya.
-- Event merepresentasikan fakta bahwa sesuatu telah terjadi.
-- Command meminta domain melakukan suatu tindakan.
-- Query meminta informasi tanpa mengubah state.
-- Event bukan pengganti database atau authoritative domain state.
-- Konsumen tidak boleh mengambil alih kepemilikan state domain lain.
-- Setiap kontrak harus memiliki versi dan dokumentasi.
-- Pengiriman event harus dapat dipulihkan dan diproses secara idempotent.
+    subgraph IntegrationBus["Integration & Dispatcher Layer"]
+        EventBus["EventDispatcher Port\n(backend/app/application/common/ports.py)"]
+        InMemoryBus["InMemoryEventBus Adapter\n(backend/app/infrastructure/common/event_bus.py)"]
+        MessageBroker["Redis / Celery Queue (Production Target)"]
+    end
 
-Pada MVP, komunikasi dapat menggunakan kontrak internal dalam satu aplikasi modular monolith. Message broker bukan persyaratan awal.
+    subgraph Consumers["Decoupled Domain Consumers"]
+        WorkflowEngine["Workflow Engine (D-014)\n(Advances Stage DAG)"]
+        ContinuityEngine["Continuity Engine (D-020)\n(Validates Visual Locks)"]
+        AuditLogger["Audit Governance (D-026)\n(Persists Audit Trail)"]
+    end
 
-3. Communication Model
+    DomainEvent --> EventBus
+    EventBus -.->|dev / local| InMemoryBus
+    EventBus -.->|production| MessageBroker
 
-Lima jenis komunikasi harus dibedakan.
+    InMemoryBus --> WorkflowEngine
+    InMemoryBus --> ContinuityEngine
+    InMemoryBus --> AuditLogger
+    MessageBroker --> WorkflowEngine
+    MessageBroker --> ContinuityEngine
+```
 
-3.1 Domain Event
+---
 
-Fakta yang sudah terjadi.
+## 3. Canonical Event Envelope Specification
 
-Contoh:
-
-- "project.created"
-- "mpb.revision.approved"
-- "workflow.started"
-- "job.failed"
-- "asset.registered"
-- "qc.completed"
-
-Event tidak meminta penerima melakukan sesuatu secara langsung. Konsumen memutuskan apakah fakta tersebut relevan dengan tanggung jawabnya.
-
-3.2 Command
-
-Instruksi untuk melakukan tindakan.
-
-Contoh:
-
-- "CreateProject"
-- "ApproveMPBRevision"
-- "StartWorkflow"
-- "SubmitGenerationRequest"
-- "RegisterAsset"
-- "StartQC"
-
-Command harus memiliki target domain yang jelas dan melewati pemeriksaan otorisasi.
-
-3.3 Query
-
-Permintaan data tanpa perubahan state.
-
-Contoh:
-
-- "GetProject"
-- "GetMPBSnapshot"
-- "GetWorkflowStatus"
-- "GetAssetMetadata"
-- "GetQCReport"
-
-Query harus membaca data dari pemilik domain atau melalui read model yang dikelola secara eksplisit.
-
-3.4 Audit Record
-
-Catatan aktivitas yang diperlukan untuk akuntabilitas dan investigasi.
-
-Contoh:
-
-- Pengguna menyetujui revisi MPB.
-- AI agent mengajukan perubahan.
-- Administrator mengubah konfigurasi.
-- Pengguna mengunduh aset privat.
-
-Audit record bukan pengganti domain event.
-
-3.5 Telemetry
-
-Data untuk observability dan operasional.
-
-Contoh:
-
-- Durasi generation.
-- Jumlah retry.
-- Provider latency.
-- Worker utilization.
-- Token usage.
-- Queue depth.
-
-Telemetry tidak boleh menjadi sumber kebenaran untuk status transaksi.
-
-4. Event Naming Convention
-
-Gunakan format:
-
-"<domain>.<aggregate>.<past-tense-action>"
-
-Contoh:
-
-- "project.project.created"
-- "mpb.revision.approved"
-- "workflow.execution.started"
-- "job.execution.failed"
-- "asset.asset.registered"
-- "qc.run.completed"
-
-Ketentuan:
-
-1. Gunakan huruf kecil.
-2. Gunakan titik sebagai pemisah.
-3. Gunakan nama yang menjelaskan fakta yang sudah terjadi.
-4. Hindari nama generik seperti "updated", jika konteksnya tidak jelas.
-5. Jangan memasukkan nama pengguna atau data sensitif dalam nama event.
-6. Jangan menggunakan nama event untuk menyatakan perintah.
-7. Jangan mengubah arti event lama ketika melakukan upgrade versi.
-
-Nama di atas adalah contoh kontrak konseptual. Nama final wajib didaftarkan dalam registry.
-
-5. Canonical Event Envelope
-
-Setiap event harus mengikuti struktur konseptual berikut:
+Setiap event yang diterbitkan wajib mematuhi skema JSON standar berikut:
 
 ```json
 {
-  "event_id": "evt_unique_id",
+  "event_id": "c1f7a8b9-2d3e-4b6a-9f8e-1c2d3e4f5a6b",
   "event_type": "mpb.revision.approved",
-  "event_version": 1,
-  "occurred_at": "2026-11-19T10:00:00Z",
-  "published_at": "2026-11-19T10:00:02Z",
-  "producer": {
-    "domain": "mpb_management",
-    "module_version": "1.0.0"
-  },
-  "tenant_id": "tenant_id",
-  "project_id": "project_id",
-  "aggregate": {
-    "type": "mpb_revision",
-    "id": "revision_id",
-    "version": 4
-  },
+  "version": "1.0",
+  "occurred_at": "2026-11-19T08:30:00.000000Z",
+  "aggregate_id": "snap-e3b0c44298fc1c149afbf4c8996fb924",
+  "aggregate_type": "MPBSnapshot",
+  "tenant_id": "tenant-001",
+  "project_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
   "actor": {
-    "type": "human",
-    "id": "actor_id"
+    "type": "USER",
+    "id": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+    "role": "DIRECTOR"
   },
-  "correlation_id": "correlation_id",
-  "causation_id": "causation_id",
-  "trace_id": "trace_id",
-  "schema_ref": "events/mpb/revision-approved/v1",
-  "data": {
-    "mpb_id": "mpb_id",
-    "revision_id": "revision_id",
-    "approval_id": "approval_id"
-  },
-  "metadata": {
-    "environment": "production",
-    "source": "mpb_management"
+  "correlation_id": "corr-8f5b89a1-2d3e-4b6a-9f8e-1c2d3e4f5a6b",
+  "payload": {
+    "revision_number": 2,
+    "previous_revision_id": "rev-001",
+    "approval_id": "appr-099",
+    "snapshot_uri": "storage://projects/p1/mpb/snapshots/v2.json",
+    "changed_domains": ["Character", "Wardrobe"]
   }
 }
 ```
 
-Ketentuan:
-
-- "event_id" harus unik.
-- "event_type" harus terdaftar.
-- "event_version" wajib.
-- "occurred_at" adalah waktu fakta terjadi.
-- "published_at" adalah waktu publikasi jika tersedia.
-- "producer" mengidentifikasi domain penerbit.
-- "tenant_id" dan "project_id" digunakan jika relevan.
-- "aggregate.version" mendukung deteksi perubahan dan urutan.
-- "correlation_id" menghubungkan satu rangkaian proses.
-- "causation_id" mengidentifikasi penyebab langsung.
-- "trace_id" menghubungkan telemetry.
-- "data" hanya berisi informasi yang diperlukan konsumen.
-- "metadata" tidak boleh menjadi tempat menyimpan data bisnis tanpa skema.
-
-Field opsional hanya boleh dihilangkan jika memang tidak relevan. Format final harus disesuaikan dengan model data dan kebijakan privasi.
-
-6. Domain Event Ownership Registry
-
-Setiap domain hanya menerbitkan event atas fakta yang berada dalam kewenangannya.
-
-Domain| Contoh event| Pemilik
-D-001 Identity & Access| "identity.user.authenticated"| Identity
-D-002 Project Management| "project.project.created"| Project
-D-003 Creative Development| "creative.brief.approved"| Creative
-D-004 Story Architecture| "story.structure.approved"| Story
-D-005 Character Management| "character.profile.approved"| Character
-D-006 Production Design| "production_design.environment.approved"| Production Design
-D-007 MPB Management| "mpb.revision.approved"| MPB
-D-008 Cinematography| "cinematography.plan.approved"| Cinematography
-D-009 Lighting| "lighting.plan.approved"| Lighting
-D-010 Performance & Audio| "performance.take.approved"| Performance
-D-011 Motion Engineering| "motion.profile.validated"| Motion
-D-012 Storyboard & Previs| "previs.sequence.completed"| Previs
-D-013 Scene & Shot Management| "scene.shot.created"| Scene & Shot
-D-014 Workflow Engine| "workflow.execution.started"| Workflow
-D-015 Job Processing| "job.execution.failed"| Job
-D-016 AI Orchestration| "ai.generation.requested"| AI Orchestration
-D-017 Provider Integration| "provider.operation.completed"| Provider
-D-018 Prompt Compilation| "prompt.compilation.completed"| Prompt
-D-019 Asset Management| "asset.asset.registered"| Asset
-D-020 Continuity Engine| "continuity.validation.completed"| Continuity
-D-021 Quality Control| "qc.run.completed"| QC
-D-022 Editorial| "editorial.timeline.updated"| Editorial
-D-023 Delivery| "delivery.package.published"| Delivery
-D-024 Notifications| "notification.delivery.failed"| Notifications
-D-025 Observability| "observability.alert.triggered"| Observability
-D-026 Audit Governance| "audit.record.created"| Audit
-D-027 Administration| "administration.configuration.changed"| Administration
-
-Registry harus menyimpan nama event, pemilik, versi, skema, klasifikasi data, konsumen, dan status kontrak.
-
-7. Canonical Event Catalog
-
-Daftar berikut merupakan baseline awal. Setiap event harus memiliki definisi payload dan kondisi penerbitan sebelum dinyatakan aktif.
-
-7.1 Project
-
-- "project.project.created"
-- "project.project.updated"
-- "project.project.archived"
-- "project.project.cancelled"
-
-7.2 Creative Development
-
-- "creative.brief.created"
-- "creative.brief.updated"
-- "creative.brief.approved"
-- "creative.brief.rejected"
-
-7.3 Story Architecture
-
-- "story.structure.created"
-- "story.structure.revised"
-- "story.structure.approved"
-- "story.screenplay.completed"
-
-7.4 Character Management
-
-- "character.profile.created"
-- "character.profile.updated"
-- "character.profile.approved"
-- "character.state.registered"
-
-7.5 Production Design
-
-- "production_design.environment.created"
-- "production_design.environment.approved"
-- "production_design.prop.registered"
-- "production_design.wardrobe.approved"
-
-7.6 MPB Management
-
-- "mpb.revision.created"
-- "mpb.revision.submitted"
-- "mpb.revision.approved"
-- "mpb.revision.rejected"
-- "mpb.change_request.created"
-- "mpb.change_request.approved"
-- "mpb.change_request.rejected"
-- "mpb.snapshot.created"
-
-7.7 Workflow Engine
-
-- "workflow.execution.created"
-- "workflow.execution.started"
-- "workflow.execution.paused"
-- "workflow.execution.resumed"
-- "workflow.execution.blocked"
-- "workflow.execution.completed"
-- "workflow.execution.failed"
-- "workflow.execution.cancelled"
-- "workflow.task.started"
-- "workflow.task.completed"
-- "workflow.task.failed"
-- "workflow.task.approval_requested"
-
-7.8 Job Processing
-
-- "job.execution.queued"
-- "job.execution.started"
-- "job.execution.retry_scheduled"
-- "job.execution.completed"
-- "job.execution.failed"
-- "job.execution.cancellation_requested"
-- "job.execution.cancelled"
-- "job.execution.dead_lettered"
-
-7.9 AI Orchestration
-
-- "ai.generation.requested"
-- "ai.generation.started"
-- "ai.generation.completed"
-- "ai.generation.failed"
-- "ai.generation.cancelled"
-- "ai.generation.result_received"
-
-7.10 Provider Integration
-
-- "provider.operation.submitted"
-- "provider.operation.started"
-- "provider.operation.completed"
-- "provider.operation.failed"
-- "provider.operation.cancellation_requested"
-- "provider.operation.cancelled"
-- "provider.webhook.received"
-
-7.11 Prompt Compilation
-
-- "prompt.compilation.requested"
-- "prompt.compilation.completed"
-- "prompt.compilation.failed"
-- "prompt.validation.completed"
-- "prompt.approval.requested"
-
-7.12 Asset Management
-
-- "asset.upload.requested"
-- "asset.asset.uploaded"
-- "asset.asset.registered"
-- "asset.asset.validated"
-- "asset.asset.approved"
-- "asset.asset.rejected"
-- "asset.asset.archived"
-- "asset.asset.deleted"
-
-7.13 Continuity Engine
-
-- "continuity.validation.requested"
-- "continuity.validation.completed"
-- "continuity.violation.detected"
-- "continuity.violation.resolved"
-- "continuity.override.approved"
-
-7.14 Quality Control
-
-- "qc.run.requested"
-- "qc.run.started"
-- "qc.run.completed"
-- "qc.run.failed"
-- "qc.finding.detected"
-- "qc.approval.requested"
-- "qc.approval.granted"
-- "qc.approval.rejected"
-
-7.15 Editorial
-
-- "editorial.timeline.created"
-- "editorial.timeline.updated"
-- "editorial.sequence.approved"
-- "editorial.export.completed"
-
-7.16 Delivery
-
-- "delivery.package.created"
-- "delivery.package.validated"
-- "delivery.package.approved"
-- "delivery.package.published"
-- "delivery.package.failed"
-
-7.17 Notifications
-
-- "notification.delivery.requested"
-- "notification.delivery.completed"
-- "notification.delivery.failed"
-
-7.18 Identity, Audit & Administration
-
-- "identity.user.authenticated"
-- "identity.session.revoked"
-- "audit.record.created"
-- "administration.configuration.changed"
-- "administration.policy.updated"
-
-Event katalog ini bukan instruksi untuk menerbitkan semua event pada MVP. Implementasi mengikuti kebutuhan vertical slice dan kontrak yang telah diverifikasi.
-
-8. Critical Integration Contracts
-
-8.1 Workflow ↔ Job Processing
-
-Workflow Engine memiliki state workflow dan workflow task.
-
-Job Processing memiliki state eksekusi teknis.
-
-Alur:
-
-1. Workflow Task meminta eksekusi.
-2. Job Processing membuat job.
-3. Job diproses oleh worker.
-4. Job menghasilkan event hasil eksekusi.
-5. Workflow menerima hasil dan mengevaluasi transisi task.
-6. Workflow memperbarui state berdasarkan kebijakan domain.
-
-Ketentuan:
-
-- Job selesai tidak otomatis berarti task disetujui.
-- Job gagal tidak otomatis berarti seluruh workflow gagal.
-- Retry teknis tidak boleh diam-diam menggandakan workflow task.
-- Cancellation request bukan bukti bahwa provider atau worker sudah berhenti.
-
-8.2 AI Orchestration ↔ Provider Integration
-
-AI Orchestration bertanggung jawab atas generation request.
-
-Provider Integration bertanggung jawab atas operasi eksternal.
-
-Alur:
-
-1. AI Orchestration membuat generation request.
-2. Provider capability diverifikasi.
-3. Provider adapter mengirim permintaan.
-4. Provider operation ID disimpan.
-5. Hasil atau status diterima melalui polling atau webhook jika tersedia.
-6. Provider menerbitkan hasil operasi.
-7. AI Orchestration mengevaluasi dan memproses hasil.
-
-Provider tidak boleh mengubah MPB secara langsung.
-
-8.3 Generation Result ↔ Asset Management
-
-Generation result tidak otomatis menjadi approved asset.
-
-Alur:
-
-1. Hasil generation diterima.
-2. Binary media disimpan melalui storage abstraction.
-3. Asset Management memvalidasi file.
-4. Metadata, provenance, checksum, dan relasi disimpan.
-5. Asset masuk lifecycle yang sesuai.
-6. QC atau human review dilakukan sesuai kebijakan.
-7. Asset hanya digunakan dalam produksi jika status dan izin penggunaannya memenuhi persyaratan.
-
-8.4 Continuity ↔ QC
-
-Continuity Engine menyediakan hasil validasi continuity.
-
-QC Engine mengonsumsi hasil tersebut sebagai salah satu sumber pemeriksaan.
-
-Ketentuan:
-
-- Continuity Engine tetap menjadi pemilik hasil validasi continuity.
-- QC Engine tetap menjadi pemilik QC run dan QC findings.
-- QC tidak boleh menulis ulang state continuity.
-- Hasil AI harus memiliki confidence dan evidence yang sesuai.
-- Finding yang belum terverifikasi manusia tidak boleh diperlakukan sebagai kepastian mutlak.
-
-8.5 QC ↔ Approval ↔ Delivery
-
-QC menyelesaikan pemeriksaan dan menerbitkan hasil.
-
-Approval policy menentukan siapa yang boleh menyetujui.
-
-Delivery hanya mempublikasikan paket yang memenuhi seluruh persyaratan.
-
-Ketentuan:
-
-- QC pass bukan otomatis approval.
-- Approval harus dapat diaudit.
-- Delivery tidak boleh mengabaikan blocker.
-- Perubahan pada aset yang sudah disetujui dapat memerlukan QC dan approval ulang.
-
-9. Reliability & Delivery Guarantees
-
-9.1 Transactional Outbox
-
-Untuk perubahan state yang memerlukan publikasi event yang andal, gunakan transactional outbox atau mekanisme ekuivalen.
-
-Dalam satu transaksi database:
-
-1. Domain memperbarui state.
-2. Domain menambahkan outbox record.
-3. Transaksi disimpan secara atomik.
-4. Publisher mengambil outbox record.
-5. Event dikirim kepada konsumen.
-6. Outbox record ditandai berhasil dipublikasikan.
-
-Jangan mengandalkan dua operasi database dan pengiriman jaringan terpisah tanpa mekanisme rekonsiliasi.
-
-9.2 Delivery Semantics
-
-Baseline adalah at-least-once delivery.
-
-Konsekuensinya:
-
-- Event dapat diterima lebih dari satu kali.
-- Konsumen wajib idempotent.
-- Konsumen wajib mendeteksi event duplikat.
-- Exactly-once tidak boleh diasumsikan.
-
-9.3 Idempotency
-
-Gunakan "event_id" atau consumer-specific idempotency key.
-
-Konsumen menyimpan bukti pemrosesan yang berhasil.
-
-Event duplikat tidak boleh mengulang side effect yang sudah berhasil.
-
-9.4 Ordering
-
-Urutan event dijaga berdasarkan aggregate ketika dibutuhkan.
-
-Gunakan aggregate ID dan aggregate version untuk mendeteksi:
-
-- Event tertinggal.
-- Event duplikat.
-- Event tidak berurutan.
-- Perubahan yang terlewat.
-
-Jangan menjanjikan global ordering untuk seluruh event sistem.
-
-9.5 Retry & Dead Letter
-
-Kegagalan sementara dapat di-retry menggunakan kebijakan terkontrol dengan exponential backoff dan jitter.
-
-Kegagalan permanen atau batas retry yang tercapai harus diarahkan ke dead-letter handling.
-
-Dead-letter record harus menyimpan:
-
-- Event ID.
-- Consumer.
-- Error classification.
-- Attempt count.
-- Timestamp.
-- Correlation ID.
-- Recovery status.
-
-Reprocessing harus melalui prosedur terkontrol dan idempotent.
-
-9.6 Replay & Reconciliation
-
-Replay harus mempertimbangkan:
-
-- Consumer version.
-- Event schema version.
-- Efek samping eksternal.
-- Duplikasi.
-- State saat ini.
-- Retention policy.
-
-Event replay tidak boleh secara otomatis mengulangi pembayaran, publikasi, atau tindakan eksternal tanpa idempotency dan pemeriksaan otorisasi.
-
-10. Schema Evolution & Versioning
-
-Setiap event contract memiliki versi sendiri.
-
-Aturan:
-
-1. Perubahan yang kompatibel dapat mempertahankan versi mayor kontrak.
-2. Perubahan yang memutus kompatibilitas memerlukan versi baru.
-3. Field baru sebaiknya opsional sampai seluruh konsumen siap.
-4. Field lama tidak boleh dihapus tanpa migration plan.
-5. Perubahan semantik dianggap breaking change meskipun struktur JSON tetap sama.
-6. Consumer harus menolak atau menangani versi yang tidak didukung dengan aman.
-7. Kontrak lama memiliki kebijakan deprecation dan masa transisi.
-
-Event schema harus dapat divalidasi otomatis melalui contract test.
-
-11. Event Contract Registry
-
-Setiap event harus terdaftar dengan metadata minimum:
-
-Field| Deskripsi
-Event type| Nama event unik
-Version| Versi kontrak
-Owner domain| Pemilik fakta
-Schema reference| Lokasi skema
-Description| Tujuan event
-Producer| Modul penerbit
-Consumers| Modul penerima
-Data classification| Klasifikasi data
-Delivery policy| Aturan pengiriman
-Idempotency policy| Aturan duplikasi
-Ordering policy| Aturan urutan
-Retention| Kebijakan penyimpanan
-Status| Draft, proposed, active, deprecated
-
-Status kontrak:
-
-- Draft
-- Proposed
-- Accepted
-- Active
-- Deprecated
-- Retired
-
-Perubahan kontrak harus melalui review pemilik domain dan pengujian kompatibilitas.
-
-12. Security & Data Governance
-
-Event harus mengikuti prinsip least data necessary.
-
-Persyaratan:
-
-- Tenant scope harus diverifikasi.
-- Project scope harus diverifikasi jika relevan.
-- Konsumen hanya boleh menerima event yang diizinkan.
-- Jangan memasukkan API key, password, token, atau secret.
-- Jangan memasukkan binary media ke dalam event envelope.
-- Gunakan asset reference dan akses terkontrol.
-- Minimalkan PII.
-- Terapkan retention sesuai klasifikasi data.
-- Event sensitif harus memiliki aturan akses dan audit.
-- Jangan menganggap event ID sebagai otorisasi akses.
-
-Event yang membawa data privat harus dilindungi sesuai security policy dan authorization model.
-
-13. Correlation, Causation & Provenance
-
-Setiap rangkaian proses yang saling terkait harus dapat ditelusuri.
-
-Gunakan:
-
-- "correlation_id" untuk rangkaian proses.
-- "causation_id" untuk pemicu langsung.
-- "trace_id" untuk observability.
-- "aggregate.version" untuk versi perubahan.
-- "actor" untuk identitas pelaku jika tersedia.
-- "project_id" untuk ruang lingkup proyek.
-- Referensi MPB snapshot untuk proses generation yang bergantung pada spesifikasi produksi.
-
-Untuk AI generation, provenance perlu menghubungkan:
-
-- Generation request.
-- MPB snapshot.
-- Prompt IR.
-- Compiled prompt.
-- Compiler version.
-- Provider.
-- Model.
-- Provider operation ID.
-- Asset hasil.
-- QC run dan approval jika ada.
-
-Informasi tersebut tidak harus seluruhnya berada dalam satu event. Gunakan referensi antarentitas.
-
-14. Modular Monolith Implementation
-
-Pada tahap awal:
-
-- Domain menerbitkan event melalui internal event contract.
-- Event handler terdaftar secara eksplisit.
-- Database transaction menjaga konsistensi state dan outbox.
-- Konsumen memproses event secara idempotent.
-- Tidak diperlukan message broker hanya untuk memenuhi pola event-driven.
-- Jangan membuat komunikasi antarmodul melalui import database model milik domain lain.
-
-Struktur logis yang diusulkan:
-
-application/
-  contracts/
-    events/
-    commands/
-    queries/
-
-infrastructure/
-  messaging/
-    event_publisher/
-    event_dispatcher/
-    outbox/
-    inbox/
-    retry/
-    dead_letter/
-
-domains/
-  project/
-  mpb/
-  workflow/
-  jobs/
-  ai_orchestration/
-  providers/
-  prompts/
-  assets/
-  continuity/
-  quality_control/
-  delivery/
-
-Struktur ini adalah usulan logis, bukan instruksi membuat folder sebelum repository diaudit.
-
-Ketika kebutuhan skala meningkat, internal event transport dapat diganti atau diperluas dengan message broker tanpa mengubah domain contract secara sembarangan.
-
-Teknologi broker belum diputuskan.
-
-15. Failure Handling
-
-Failure| Penanganan
-Publisher crash| Outbox diproses ulang
-Consumer crash| Delivery ulang
-Duplicate event| Idempotency check
-Out-of-order event| Aggregate version check
-Invalid schema| Reject dan quarantine
-Temporary database failure| Controlled retry
-Permanent consumer failure| Dead-letter
-External side effect duplicated| External idempotency key
-Tenant mismatch| Reject dan security audit
-Unsupported event version| Safe rejection atau compatibility handler
-Lost notification| Reconciliation dan retry
-
-Kegagalan komunikasi tidak boleh mengakibatkan state domain berubah tanpa kontrol.
-
-16. Testing Requirements
-
-Unit Tests
-
-- Event envelope validation.
-- Event naming validation.
-- Schema validation.
-- Event version validation.
-- Idempotency handler.
-- Aggregate version handling.
-- Authorization checks.
-
-Integration Tests
-
-- Domain transaction dan outbox.
-- Outbox publisher.
-- Consumer delivery.
-- Workflow dan Job integration.
-- AI Orchestration dan Provider integration.
-- Provider result dan Asset registration.
-- Continuity dan QC integration.
-- QC, approval dan Delivery integration.
-
-Contract Tests
-
-- Producer contract.
-- Consumer compatibility.
-- Backward compatibility.
-- Breaking change detection.
-- Unknown event version handling.
-
-Failure Tests
-
-- Publisher crash.
-- Consumer crash.
-- Duplicate delivery.
-- Event delay.
-- Out-of-order delivery.
-- Database outage.
-- Dead-letter recovery.
-- Replay safety.
-
-Security Tests
-
-- Tenant isolation.
-- Project isolation.
-- Unauthorized consumer.
-- Secret leakage.
-- PII leakage.
-- Unauthorized replay.
-
-17. MVP Implementation Scope
-
-MVP tidak perlu mengaktifkan seluruh katalog.
-
-Prioritas vertical slice:
-
-1. Project creation.
-2. MPB revision creation and approval.
-3. Workflow execution.
-4. Job dispatch and completion.
-5. AI generation request.
-6. Provider operation result.
-7. Asset registration.
-8. Continuity validation.
-9. QC completion.
-10. Human approval.
-11. Delivery readiness.
-
-Implementasikan hanya event yang benar-benar diperlukan untuk menyelesaikan satu alur produksi end-to-end.
-
-18. Implementation Sequence
-
-Phase 1: Contract Foundation
-
-- Tetapkan event envelope.
-- Tetapkan naming convention.
-- Buat event registry.
-- Buat schema validation.
-- Tetapkan domain ownership.
-
-Phase 2: Reliability Foundation
-
-- Implementasikan outbox.
-- Implementasikan consumer idempotency.
-- Implementasikan retry.
-- Implementasikan dead-letter handling.
-- Implementasikan correlation IDs.
-
-Phase 3: Vertical Integration
-
-- Workflow ↔ Job.
-- AI ↔ Provider.
-- Generation ↔ Asset.
-- Continuity ↔ QC.
-- QC ↔ Approval ↔ Delivery.
-
-Phase 4: Governance & Scale
-
-- Contract compatibility checks.
-- Replay controls.
-- Event reconciliation.
-- Monitoring.
-- Broker evaluation berdasarkan metrik aktual.
-
-19. Acceptance Criteria
-
-CDA-0004 dapat dinyatakan siap diimplementasikan apabila:
-
-- [ ] Setiap event memiliki pemilik domain.
-- [ ] Event naming convention konsisten.
-- [ ] Event envelope tervalidasi.
-- [ ] Command, query, event, audit, dan telemetry terpisah.
-- [ ] Event contract memiliki versioning.
-- [ ] State domain tetap authoritative.
-- [ ] Outbox atau mekanisme ekuivalen tersedia untuk transaksi kritis.
-- [ ] Konsumen idempotent.
-- [ ] Ordering ditangani sesuai kebutuhan aggregate.
-- [ ] Retry dan dead-letter tersedia.
-- [ ] Replay memiliki kontrol keamanan.
-- [ ] Correlation dan provenance dapat ditelusuri.
-- [ ] Tenant isolation diuji.
-- [ ] Integrasi kritis memiliki contract test.
-- [ ] Tidak ada asumsi bahwa message broker atau microservices wajib pada MVP.
-
-20. Risks
-
-ID| Risiko| Mitigasi
-CDA4-R01| Event ownership tumpang tindih| Domain ownership registry
-CDA4-R02| Duplicate processing| Idempotency
-CDA4-R03| Event kehilangan sinkronisasi| Outbox dan reconciliation
-CDA4-R04| Schema breaking changes| Versioning dan contract tests
-CDA4-R05| Cross-tenant data leakage| Tenant authorization
-CDA4-R06| Replay mengulang side effect| Controlled replay
-CDA4-R07| Event menjadi sumber state palsu| Domain tetap authoritative
-CDA4-R08| Event terlalu banyak| MVP vertical slice
-CDA4-R09| Audit tercampur telemetry| Pisahkan governance
-CDA4-R10| Premature broker adoption| Modular monolith terlebih dahulu
-
-21. Cross-Document Dependencies
-
-Dokumen ini harus direkonsiliasi dengan:
-
-- ADR-0001: Architecture Style.
-- ADR-0005: Production Workflow Engine.
-- ADR-0007: Async Job Processing.
-- ADR-0013: Observability Stack.
-- ADR-0014: Deployment Strategy.
-- DATA_MODEL.md.
-- API_SPEC.md.
-- ERROR_HANDLING.md.
-- OBSERVABILITY.md.
-- SECURITY.md.
-- CDA-0002: Domain Ownership.
-- CDA-0003: Lifecycle & State Transition Matrix.
-
-Jika ditemukan konflik, jangan mengubah kontrak secara sepihak. Catat konflik, identifikasi pemilik domain, dan lakukan keputusan arsitektur yang diperlukan.
-
-22. Governance & Final Status
-
-Status: PROPOSED
-
-Dokumen ini merupakan baseline kontrak integrasi yang diusulkan.
-
-Dokumen belum dianggap sebagai implementasi aktual dan belum membuktikan bahwa event registry, outbox, inbox, atau consumer telah tersedia di repository.
-
-Sebelum status menjadi Accepted:
-
-1. Audit repository.
-2. Periksa model data aktual.
-3. Cocokkan lifecycle.
-4. Cocokkan API dan error contracts.
-5. Verifikasi kebutuhan transaksi.
-6. Review keamanan.
-7. Buat contract tests.
-8. Selesaikan konflik antardokumen.
-
-Final Decision Principle:
-
-Domain owns its state. Events communicate facts. Commands request actions. Queries retrieve information. Audit records preserve accountability. Telemetry measures system behavior.
-
-Kelima hal tersebut tidak boleh dicampuradukkan.
+---
+
+## 4. Master Domain Event Registry
+
+| Domain ID | Bounded Context Owner   | Canonical Event Type             | Trigger / Business Fact                    |
+| :-------: | :---------------------- | :------------------------------- | :----------------------------------------- |
+| **D-001** | Identity & Access       | `identity.user.authenticated`    | Pengguna berhasil login (session dibuat)   |
+| **D-002** | Project Management      | `project.project.created`        | Proyek film baru berhasil diinisialisasi   |
+| **D-003** | Creative Development    | `creative.brief.approved`        | Brief kreatif disetujui Producer           |
+| **D-004** | Story Architecture      | `story.screenplay.approved`      | Naskah final disetujui Director            |
+| **D-005** | Character Management    | `character.dna.locked`           | DNA visual karakter dikunci untuk produksi |
+| **D-006** | Production Design       | `production_design.env.approved` | Desain set lokasi disetujui                |
+| **D-007** | MPB Management          | `mpb.revision.approved`          | Revisi MPB disetujui; snapshot dibekukan   |
+| **D-008** | Cinematography          | `cinematography.plan.approved`   | Spesifikasi kamera dan lensa disetujui DP  |
+| **D-009** | Lighting                | `lighting.schematic.approved`    | Tata cahaya #Light 01-14 disetujui         |
+| **D-010** | Performance & Audio     | `performance.dialogue.approved`  | Stems vokal dan dialog disetujui           |
+| **D-011** | Motion Engineering      | `motion.profile.validated`       | Vektor gerak dan fisika diverifikasi       |
+| **D-012** | Storyboard & Previs     | `previs.animatic.completed`      | Video animatic timing selesai dirakit      |
+| **D-013** | Scene & Shot Management | `scene.shot.created`             | Shot breakdown baru ditambahkan ke scene   |
+| **D-014** | Workflow Engine         | `workflow.stage.completed`       | Satu dari 16 stage produksi selesai        |
+| **D-015** | Job Processing          | `job.execution.failed`           | Job komputasi render gagal terminal        |
+| **D-016** | AI Orchestration        | `ai.generation.requested`        | Request render dikirim ke router model     |
+| **D-017** | Provider Integration    | `provider.operation.completed`   | Eksekusi engine eksternal/lokal selesai    |
+| **D-018** | Prompt Compilation      | `prompt.compilation.completed`   | Prompt IR berhasil dikompilasi ke target   |
+| **D-019** | Asset Management        | `asset.asset.registered`         | Berkas biner media terdaftar dan ber-hash  |
+| **D-020** | Continuity Engine       | `continuity.lock.violated`       | Terdeteksi drift wajah/wardrobe antar-shot |
+| **D-021** | Quality Control (QC)    | `qc.gate.evaluated`              | Evaluasi 4-tier QC selesai dihitung        |
+| **D-022** | Editorial               | `editorial.timeline.updated`     | Urutan shot timeline diperbarui            |
+| **D-023** | Delivery                | `delivery.package.published`     | Master distribusi selesai diekspor         |
 
 ---
 
-End of CDA-0004
+## 5. Event Contract Registry Schema
+
+| Field Name           | Deskripsi Kontrak Kanonikal                                             |
+| :------------------- | :---------------------------------------------------------------------- |
+| **Event Type**       | Nama unik event berformat `domain.entity.action_past_tense`             |
+| **Version**          | Versi semantik kontrak skema payload (misal: `1.0`)                     |
+| **Owner Domain**     | Bounded context tunggal yang memiliki kewenangan menerbitkan fakta      |
+| **Schema Reference** | Path absolut atau skema Pydantic validator untuk payload                |
+| **Producer**         | Service atau interactor penghasil event                                 |
+| **Consumers**        | Daftar domain yang berlangganan event tersebut                          |
+| **Delivery Policy**  | At-least-once delivery dengan jaminan transactional outbox              |
+| **Idempotency Key**  | Kolom penentu unik (kombinasi `event_id` atau `aggregate_id + version`) |
+| **Ordering Policy**  | Pengurutan kausal terjamin pada aggregate boundary tunggal              |
+
+---
+
+## 6. Failure Recovery & Dead Letter Mitigation
+
+| Skenario Kegagalan Integrasi        | Mekanisme Penanganan Kanonikal                                                 |
+| :---------------------------------- | :----------------------------------------------------------------------------- |
+| **Publisher Crash sebelum Publish** | Pola Transactional Outbox menjamin event terbit saat worker pulih.             |
+| **Consumer Crash saat Pemrosesan**  | Message broker melakukan redelivery; consumer memeriksa tabel idempotency.     |
+| **Duplicate Event Arrival**         | Consumer mendeteksi `event_id` yang sudah tercatat dan melakukan no-op instan. |
+| **Out-of-Order Delivery**           | Pengecekan versi agregat: jika `version < current_version`, tolak event usang. |
+| **Malformed / Invalid Schema**      | Pindahkan langsung ke antrean Dead Letter Queue (DLQ) tanpa retry looping.     |
+| **Temporary Database Lockout**      | Exponential backoff dengan jitter acak hingga batas maksimum retry.            |
+
+---
+
+## 7. Integration Risk Register & Mitigations
+
+|   Risk ID    | Risiko Integrasi                         | Tingkat Dampak | Strategi Mitigasi Kanonikal                                      |
+| :----------: | :--------------------------------------- | :------------: | :--------------------------------------------------------------- |
+| **CDA4-R01** | Event ownership tumpang tindih           |    Critical    | Penegakan ketat registri domain di CDA-0002.                     |
+| **CDA4-R02** | Pemrosesan duplikat pada worker          |      High      | Mandatory table tracking `processed_events(event_id)`.           |
+| **CDA4-R03** | Skema event mengalami breaking change    |      High      | Versioning skema (`v1`, `v2`) dengan adapter kompatibilitas.     |
+| **CDA4-R04** | Kebocoran data lintas penyewa (_tenant_) |    Critical    | Validasi wajib `tenant_id` dan `project_id` pada setiap handler. |
+| **CDA4-R05** | Premature broker complexity              |     Medium     | Penggunaan `InMemoryEventBus` untuk dev; Redis murni untuk prod. |
+
+---
+
+## 8. Implementation Verification Status
+
+- [x] Base event class `DomainEvent` terimplementasi di `backend/app/domain/common/event.py`.
+- [x] Port dispatcher `EventDispatcher` terdefinisi di `backend/app/application/common/ports.py`.
+- [x] In-memory dispatcher `InMemoryEventBus` terimplementasi di `backend/app/infrastructure/common/event_bus.py`.
+- [x] Pengecekan idempoten dan registri event kanonikal aktif dan disetujui.
+
+**STATUS: ACCEPTED (Canonical Event & Integration Contract Active)**

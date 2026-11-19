@@ -1,65 +1,190 @@
 # Product Requirements Document (PRD) - MovieAIProducer
 
-## 1. Product Overview
-### 1.1 Product Vision
-MovieAIProducer is an intelligent virtual film production environment that transforms creative concepts into structured, executable, and quality-controlled cinematic production workflows. It combines creative intelligence, production planning, visual continuity management, AI provider orchestration, and quality assurance into one unified system.
+> Technical product specifications, functional architecture, data contracts, and quality acceptance criteria for MovieAIProducer.
 
-### 1.2 Core Product Philosophy
-The system operates as a production management system, not merely a prompt generator. It maintains the relationship between story, characters, locations, cinematography, lighting, acting, motion, audio, and scene continuity, with all decisions traceable to the Master Production Bible.
+---
 
-### 1.3 Product Principles
-1. Story before visuals.
-2. Consistency before generation volume.
-3. Production specifications before execution.
-4. Platform-independent production data.
-5. Human approval for important creative decisions.
-6. Automated validation wherever practical.
+## 1. Product Vision & Philosophy
 
-## 2. User Roles
-- **Project Owner:** Manages projects.
-- **Director:** Controls creative decisions and approvals.
-- **Production Manager:** Manages stages, assets, and scene status.
-- **AI Production Agent:** Assists with story, prompt engineering, and QC.
+MovieAIProducer is an intelligent virtual film production environment that transforms creative ideas into structured, continuous, and quality-controlled cinematic workflows. It replaces unstructured text-to-video prompting with an automated virtual film studio governed by the **Master Production Bible (MPB)** and the **12-Step Cinematic Pipeline**.
 
-## 3. Product Modes
-- **Director Mode:** AI proposes work and waits for approval.
-- **Hybrid Mode (Default):** AI handles routine tasks; requests approval for creative/structural decisions.
-- **Autopilot Mode:** Maximum automation with mandatory safety/validation checks.
+### 1.1 Core Principles
 
-## 4. Application Structure
-- **Dashboard:** Project overview.
-- **Project/Creative Studio:** Concept and story.
-- **Character/World Studio:** DNA and asset management.
-- **Visual Studio:** Cinematography, lighting, acting.
-- **Storyboard/Prompt/Production Studio:** Execution and tracking.
-- **Continuity/QC Studio:** Consistency and quality validation.
+1. **Story Before Visuals:** Visual assets derive from narrative beats, character motivations, and dramatic structure, never from arbitrary style exploration.
+2. **Consistency Before Volume:** Generating one continuous 50-scene narrative with zero character or lighting drift is prioritized over generating hundreds of disconnected clips.
+3. **Specifications Before Execution:** All camera, lighting, acting, and environment parameters must be compiled into deterministic schemas before dispatching provider inference calls.
+4. **Provider-Independent Data Contracts:** Production specifications exist in an abstract domain layer, decoupled from the syntax of external AI generation platforms.
+5. **Human-in-the-Loop Governance:** Autonomous agents prepare options and compile parameters, while the human director retains approval authority at designated creative gates.
+6. **Automated Quality Verification:** Every generated frame and shot is audited against objective continuity and optical criteria prior to timeline assembly.
 
-## 5. Core Production Methodology (The 12-Step Framework)
-1. Genre, Emotion, Language, and Aspect Definition.
-2. Visual Style Catalog (#Style 01–#Style 18).
-3. Story Architecture and Scene Blueprint.
-4. Character DNA, Voice DNA, and State Evolution (#State 01–#State 05).
-5. Extras/Figurant Management (#Extras 01–#Extras 08).
-6. Environment Bible & Prop DNA (#Env 01–#Env 05, #Prop 01–#Prop 05).
-7. Audio/Script Calibration (J/L-Cut, #Audio 01–#Audio 05).
-8. Camera, Lens, and Composition Matrix (#Lens 01-#06, #Comp 01-#08).
-9. Cinematic Lighting Matrix (#Light 01–#Light 14).
-10. Acting, Expression, and Action Matrix (#Act 01–#Act 24).
-11. Multi-Layer Scene Motion & Speed (#Speed 01–#Speed 05).
-12. Executable Studio-Grade Production (Master Execution).
+---
 
-## 6. Functional Requirements Summary
-- **Project Mgmt:** Create/Manage multi-scene projects.
-- **Creative Dev:** Storyboard, screenplay, and concept generation.
-- **Consistency:** Character DNA, Voice DNA, and Environment DNA locking.
-- **Production Specs:** Camera, Lighting, Action, and Composition matrices.
-- **Orchestration:** Platform-specific prompt generation.
-- **QC:** Status tracking (Planned -> Locked) and continuity validation.
+## 2. Operating Modes & User Journeys
 
-## 7. MVP Prioritization (P0 Foundation)
-- Project management.
-- Creative Brief & Master Production Bible.
-- Character/Environment/Prop DNA.
-- Scene breakdown.
-- Prompt Studio (Platform-specific output).
-- Production status tracking.
+MovieAIProducer adapts its agent autonomy based on director preference:
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│                      Operational Execution Modes                       │
+└──────────────────────────────────┬─────────────────────────────────────┘
+                                   │
+         ┌─────────────────────────┼─────────────────────────┐
+         │                         │                         │
+         ▼                         ▼                         ▼
+┌──────────────────┐      ┌──────────────────┐      ┌──────────────────┐
+│  Director Mode   │      │   Hybrid Mode    │      │  Autopilot Mode  │
+│  (100% Approval) │      │ (Default Studio) │      │  (Batch Render)  │
+└──────────────────┘      └──────────────────┘      └──────────────────┘
+```
+
+| Operational Mode          | Agent Autonomy                                                                                   | Human Intervention Points                                                                         | Primary Use Case                                                                    |
+| :------------------------ | :----------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------ | :---------------------------------------------------------------------------------- |
+| **Director Mode**         | Low: AI acts strictly as an assistant, drafting candidate options for every matrix selection.    | Human must approve every step (Genre, Style, Scene list, Character DNA, Shot list, Render).       | High-stakes auteur filmmaking and masterclass cinematography projects.              |
+| **Hybrid Mode (Default)** | Balanced: AI automates routine breakdowns, prompt compilation, and retry loops.                  | Human confirms creative gates: Creative Brief, Character DNA lock, Script approval, and Final QC. | Standard indie film production, episodic series development, and commercial pilots. |
+| **Autopilot Mode**        | High: Autonomous execution of pre-approved bibles through rendering, QC auditing, and packaging. | Human is only alerted if a scene fails QC score thresholds three consecutive times.               | High-throughput content syndication, concept testing, and rapid previsualization.   |
+
+---
+
+## 3. Application Architecture & Studio Workspaces
+
+MovieAIProducer organizes film production into six dedicated studio workspaces:
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│                     MovieAIProducer Studio Suite                       │
+├───────────────────┬────────────────────┬───────────────────────────────┤
+│ 1. Creative Studio│ 2. World Studio    │ 3. Cinematography Studio      │
+│ (Story, Screenplay│ (Character DNA,    │ (Optics, Lighting, Acting,   │
+│  & Scene Lists)   │  Environments)     │  Composition & Motion)        │
+├───────────────────┼────────────────────┼───────────────────────────────┤
+│ 4. Previs Studio  │ 5. Engine Studio   │ 6. Continuity & QC Studio     │
+│ (Storyboards,     │ (Prompt Compilation│ (Frame Drift Audit, 180° Rule,│
+│  Animatics)       │  & Provider Dispatch) Color Grade Verification)     │
+└───────────────────┴────────────────────┴───────────────────────────────┘
+```
+
+### 3.1 Studio 1: Creative & Story Studio
+
+- **Scope:** Steps 1, 3, and 7 of the cinematic pipeline.
+- **Capabilities:**
+  - Ingests project loglines and generates a 4-act dramatic curve (Setup, Rising Action, Descent, Climax).
+  - Decomposes narrative into exactly 50 scenes, each calibrated to a 5.0-second temporal pacing window.
+  - Generates scene sluglines (`INT/EXT`, `LOCATION`, `TIME OF DAY`), dramatic objectives, and dialogue blocks.
+  - Implements audio cut planning (J-cut audio anticipation and L-cut dialogue overhang).
+
+### 3.2 Studio 2: Character & World Studio
+
+- **Scope:** Steps 4, 5, and 6 of the cinematic pipeline.
+- **Capabilities:**
+  - Generates immutable Character DNA profiles (synthetic facial seeds, eye color, bone structure, voice timbre).
+  - Tracks Character State Evolution across five stages:
+    - `#State 01`: Pristine / Baseline
+    - `#State 02`: Fatigued / Strained
+    - `#State 03`: Battle-Damaged / Wounded
+    - `#State 04`: Disheveled / Exhausted
+    - `#State 05`: Climax / Transcendent
+  - Compiles Environment Bibles (`#Env 01-05`), hero props (`#Prop 01-05`), and extras clusters (`#Extras 01-08`).
+
+### 3.3 Studio 3: Cinematography & Visual Studio
+
+- **Scope:** Steps 2, 8, 9, 10, and 11 of the cinematic pipeline.
+- **Capabilities:**
+  - Visual Style Selection: Manages catalog of 18 visual aesthetics (`#Style 01` Michael Bay through `#Style 18` Vintage Film).
+  - Optical Physics Engine: Assigns lens characteristics (`#Lens 01-06`), depth of field, and bokeh geometries.
+  - Camera & Composition Matrix: Assigns 34 camera angles (`#Cam 01-34`) and 8 composition geometries (`#Comp 01-08`).
+  - Lighting Matrix: Manages 14 photometric setups (`#Light 01-14`), Kelvin color temperatures, and key-to-fill ratios.
+  - Acting & Emotion Matrix: Assigns 24 psychological performance cues (`#Act 01-24`).
+  - Motion Dynamics: Configures velocity profiles (`#Speed 01-05`) and multi-layer foreground/background parallax.
+
+### 3.4 Studio 4: Storyboard & Previsualization Studio
+
+- **Scope:** Operational Stage 09.
+- **Capabilities:**
+  - Generates visual keyframes for all 50 scenes using rapid text-to-image inference.
+  - Assembles temporal animatics with rough scratch audio to evaluate narrative pacing before video generation.
+  - Evaluates spatial camera blocking and visualizes the 180-degree line of action.
+
+### 3.5 Studio 5: Prompt Compilation & Provider Studio
+
+- **Scope:** Step 12 and Operational Stage 15.
+- **Capabilities:**
+  - Translates Master Production Bible entities into platform-native prompt syntax.
+  - Supports provider adapters:
+    - **Runway Gen-3 Alpha:** Text-to-Video and Image-to-Video camera control prompts.
+    - **Kling 1.5:** Motion brush and high-dynamic-range video generation.
+    - **Google Veo:** Photorealistic physics-compliant cinematic clips.
+    - **Midjourney v6 / Flux:** Ultra-high-resolution keyframe character anchors.
+    - **ElevenLabs:** Character voice cloning and dialogue audio synthesis.
+  - Manages asynchronous job dispatching, exponential backoff retries, and quota limits.
+
+### 3.6 Studio 6: Continuity & Quality Assurance Studio
+
+- **Scope:** Operational Stage 16.
+- **Capabilities:**
+  - Computes automated continuity scorecards evaluating facial similarity, wardrobe condition, and lighting balance.
+  - Flags continuity defects:
+    - _Spatial Inversion:_ Crossing the 180-degree line of action.
+    - _Character Drift:_ Cosine similarity between character facial embeddings `< 0.90`.
+    - _Photometric Mismatch:_ Sudden Kelvin jumps between sequential shots within the same scene.
+  - Triggers automated regeneration workflows for scenes failing quality thresholds.
+
+---
+
+## 4. Master Production Bible (MPB) State Machine
+
+Every scene and production entity transitions through an explicit state machine:
+
+```text
+[Draft] ──> [Planned] ──> [Ready] ──> [Generating] ──> [QC_Evaluating] ──> [Approved] ──> [Locked]
+                                            │                 │
+                                            └── [Failed] <────┘ (Score < 85%)
+                                                    │
+                                                    └──> [Re-queued]
+```
+
+### State Definitions & Transition Criteria
+
+| State               | Prerequisites to Enter                               | Permissions & Mutation Rules                             |
+| :------------------ | :--------------------------------------------------- | :------------------------------------------------------- |
+| **`Draft`**         | Project initialization.                              | Unrestricted edits to narrative parameters.              |
+| **`Planned`**       | Story beat and scene slugline confirmed.             | Scene parameters locked; visual direction can be edited. |
+| **`Ready`**         | All 11 pre-production steps completed and validated. | MPB variables become read-only; prompt compiled.         |
+| **`Generating`**    | Provider job dispatched to generation API.           | Entity locked against all modifications.                 |
+| **`QC_Evaluating`** | Rendered video binary returned by provider.          | Automated scoring algorithms analyze video frames.       |
+| **`Approved`**      | Continuity Score `>= 85%` and human review passed.   | Video asset linked to timeline.                          |
+| **`Locked`**        | Final film assembly approved by Showrunner.          | Permanent immutable snapshot; cannot be altered.         |
+| **`Failed`**        | Provider timeout, inference error, or QC `< 85%`.    | Job tagged with failure reason; moved to retry queue.    |
+
+---
+
+## 5. Non-Functional Requirements
+
+### 5.1 Performance & Latency
+
+- **Prompt Compilation:** The prompt compiler service must resolve and compile an MPB scene prompt in `<= 200ms`.
+- **System Health Checks:** The `/health` endpoint must return database and engine status in `<= 50ms`.
+- **Concurrent Job Dispatching:** The background task supervisor must manage at least 10 parallel video generation jobs without database lock contention.
+
+### 5.2 Reliability & Fault Tolerance
+
+- **Provider Resilience:** Generation requests encountering HTTP 429 (Rate Limit) or 503 (Provider Unavailable) must retry with exponential backoff (initial delay: 2.0s, backoff factor: 2.0, max attempts: 4).
+- **Circuit Breaker:** If a provider fails 5 consecutive generation requests within a 3-minute window, the provider is temporarily paused, and jobs route to an alternate configured provider.
+- **Transaction Atomicity:** All multi-entity database mutations must execute within ACID transaction blocks managed by the Unit of Work.
+
+### 5.3 Security & Secret Isolation
+
+- **Credential Storage:** AI provider API keys (Runway, Kling, OpenAI, ElevenLabs) must never be stored in plain text in the database. Keys must be sourced via environment variables (`.env`) or secure secret managers.
+- **Scrubbing:** Generated prompts and logs must automatically scrub internal secrets, authorization headers, and personal identifying information before saving.
+
+---
+
+## 6. Acceptance Criteria
+
+A production release of MovieAIProducer satisfies this PRD when:
+
+1. All 12 steps of the cinematic pipeline can be configured, validated, and stored in the database.
+2. The 50-scene structural breakdown successfully generates across 4 acts with 5.0-second scene pacing.
+3. DNA tokens for characters, environments, and props remain immutable across all 50 scenes once locked.
+4. Generative video prompts compile deterministically with correct matrix codes (`#Style`, `#Light`, `#Act`, `#Lens`, `#Comp`, `#Speed`).
+5. Background worker jobs complete asynchronously with full error tracking and status reporting.
+6. The test suite passes with 100% success on all architecture boundary, domain invariant, and database tests.

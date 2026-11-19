@@ -1,600 +1,298 @@
-# CDA-0002: CANONICAL GLOSSARY & DOMAIN OWNERSHIP MATRIX
+---
+id: CDA-0002
+title: Canonical Glossary & Domain Ownership Matrix
+status: ACCEPTED
+date: 2026-11-19
+decision_owners: Architecture Review Board & Governance Team
+decision_scope: Canonical Terminology, Domain Taxonomy, Entity Identifiers, and System Boundaries
+version: "1.2"
+tags: [cda, glossary, domain-ownership, taxonomy, identifiers, boundaries]
+canonical_path: DECISIONS/CDA/CDA-0002-canonical-glossary-domain-ownership-matrix.md
+supersedes: []
+superseded_by: []
+---
 
-- Project: MovieAIProducer
-- Document ID: CDA-0002
-- Version: 1.0
-- Date: 2026-11-19
-- Status: Proposed
-- Category: Architecture Governance
-- Related Documents: ARCHITECTURE.md, DATA_MODEL.md, API_SPEC.md, AI_PIPELINE.md, AGENTS.md
-- Related ADRs: ADR-0001 through ADR-0015
+# CDA-0002: Canonical Glossary & Domain Ownership Matrix
+
+| Attribute            | Specification                                                                         |
+| :------------------- | :------------------------------------------------------------------------------------ |
+| **Document ID**      | CDA-0002                                                                              |
+| **Title**            | Canonical Glossary & Domain Ownership Matrix: Systemic Terminology & Bounded Contexts |
+| **Status**           | ACCEPTED                                                                              |
+| **Date**             | 2026-11-19                                                                            |
+| **Decision Owners**  | Architecture Review Board & Governance Team                                           |
+| **Decision Scope**   | System-wide Terminology, 27 Domain Contexts, Identifier Formats, and Provenance       |
+| **Version**          | 1.2                                                                                   |
+| **Canonical Source** | `DECISIONS/CDA/CDA-0002-canonical-glossary-domain-ownership-matrix.md`                |
 
 ---
 
-PART A: CANONICAL GLOSSARY
+## PART A: CANONICAL GLOSSARY
 
-1. Governance Rules
+### 1. Governance Rules
 
-1. Setiap konsep utama memiliki satu istilah kanonis.
-2. Istilah kanonis digunakan dalam dokumentasi, API, database, event, dan source code.
+1. Setiap konsep utama memiliki tepat satu istilah kanonis resmi (_canonical term_).
+2. Istilah kanonis wajib digunakan secara konsisten dalam dokumentasi, API routes, database schemas, domain events, dan source code.
 3. Sinonim tidak boleh digunakan sebagai nama entity yang berbeda.
-4. Istilah domain tidak boleh berubah hanya karena perbedaan UI wording.
-5. Perubahan istilah harus melalui dokumentasi dan migration review.
-6. Istilah yang belum memiliki definisi harus dianggap provisional.
-7. Istilah teknis harus dibedakan dari istilah bisnis.
+4. Istilah domain tidak boleh berubah hanya karena variasi penamaan pada antarmuka pengguna (UI).
+5. Perubahan istilah wajib melalui proses RFC dokumentasi dan review migrasi data.
+6. Pemisahan ketat antara istilah bisnis/kreatif film dan istilah teknis komputasi.
 
-2. Product and Production Terminology
+### 2. Product & Production Terminology
 
-Canonical Term| Definition| Avoid Confusion With
-Project| Kontainer utama seluruh pekerjaan film| Production
-Production| Aktivitas dan proses pembuatan film| Project
-Production Brief| Ringkasan kebutuhan produksi| Creative Brief
-Creative Brief| Arahan kreatif awal proyek| Production Brief
-Master Production Bible (MPB)| Sistem referensi otoritatif untuk spesifikasi produksi yang disetujui| Single document
-Production Stage| Tahap besar dalam workflow produksi| Workflow Task
-Workflow| Struktur dan status proses kerja| Job
-Scene| Unit naratif dalam cerita| Shot
-Shot| Unit pengambilan gambar atau visualisasi produksi| Scene
-Sequence| Kelompok scene yang memiliki hubungan naratif atau editorial| Workflow
-Storyboard| Representasi visual rencana scene atau shot| Final video
-Animatic| Representasi temporal storyboard dengan timing dan media pendukung| Final edit
-Previsualization (Previs)| Simulasi visual awal sebelum produksi final| Final render
-Asset| Media atau resource digital yang dikelola sistem| File
-Production Artifact| Hasil atau dokumen yang dihasilkan dalam proses produksi| Asset
-Final Delivery| Paket hasil produksi yang disiapkan untuk distribusi| Internal preview
+| Canonical Term                    | Definition                                                                   | Avoid Confusion With |
+| :-------------------------------- | :--------------------------------------------------------------------------- | :------------------- |
+| **Project**                       | Kontainer utama seluruh pekerjaan film, aset, anggota, dan konfigurasi       | Production           |
+| **Production**                    | Aktivitas dan proses pembuatan film secara keseluruhan                       | Project              |
+| **Production Brief**              | Ringkasan kebutuhan teknis dan logistik produksi                             | Creative Brief       |
+| **Creative Brief**                | Arahan kreatif awal proyek (genre, emosi, premis, audiens)                   | Production Brief     |
+| **Master Production Bible (MPB)** | Sistem referensi otoritatif untuk spesifikasi produksi yang disetujui (SSOT) | Single document      |
+| **Production Stage**              | Satu dari 16 tahap besar dalam alur kerja produksi film                      | Workflow Task        |
+| **Workflow**                      | Struktur graf dependensi (DAG) dan status proses kerja                       | Job                  |
+| **Scene**                         | Unit naratif dalam cerita yang terikat lokasi dan waktu                      | Shot                 |
+| **Shot**                          | Unit pengambilan gambar atau visualisasi kontinu tunggal                     | Scene                |
+| **Sequence**                      | Kelompok scene yang membentuk satu kesatuan dramatis                         | Workflow             |
+| **Storyboard**                    | Representasi visual grafis rencana shot                                      | Final video          |
+| **Animatic**                      | Representasi temporal storyboard dengan durasi, scratch audio, dan timing    | Final edit           |
+| **Previsualization (Previs)**     | Simulasi visual 2D/3D awal pergerakan kamera dan blocking                    | Final render         |
+| **Asset**                         | Media atau resource digital biner yang dikelola sistem dengan hash SHA-256   | Raw File             |
+| **Production Artifact**           | Dokumen atau manifest yang dihasilkan dalam proses produksi                  | Binary Asset         |
+| **Final Delivery**                | Paket master hasil produksi yang disiapkan untuk distribusi/siar             | Internal preview     |
 
-3. MPB Terminology
+### 3. Master Production Bible (MPB) Terminology
 
-Canonical Term| Definition
-Bible| Kumpulan spesifikasi terstruktur untuk suatu domain produksi
-Bible Entry| Satu record spesifikasi di dalam Bible
-Canonical Reference| Referensi stabil terhadap entity atau revision
-Revision| Versi perubahan suatu entity
-Snapshot| Rekaman immutable dari konteks produksi pada waktu tertentu
-Approval| Keputusan resmi atas suatu perubahan atau hasil
-Change Request| Permintaan perubahan terhadap spesifikasi yang telah ada
-Impact Analysis| Analisis dampak perubahan terhadap resource terkait
-Approved Specification| Spesifikasi yang telah melewati approval policy
-Production Context| Kumpulan informasi yang dibutuhkan untuk menjalankan produksi tertentu
+| Canonical Term             | Definition                                                                                |
+| :------------------------- | :---------------------------------------------------------------------------------------- |
+| **Bible**                  | Kumpulan spesifikasi terstruktur untuk suatu domain produksi (Karakter, Lingkungan, dll.) |
+| **Bible Entry**            | Satu record spesifikasi entitas di dalam Bible                                            |
+| **Canonical Reference**    | Referensi stabil terhadap entitas atau revisi tertentu                                    |
+| **Revision**               | Versi perubahan spesifik pada suatu entitas (v1.0 $\rightarrow$ v1.1)                     |
+| **Snapshot**               | Rekaman immutable dari konteks MPB pada titik waktu tertentu (terikat SHA-256)            |
+| **Approval**               | Keputusan resmi berwenang atas suatu perubahan atau hasil                                 |
+| **Change Request**         | Pengajuan modifikasi terhadap spesifikasi yang telah disetujui                            |
+| **Impact Analysis**        | Analisis penelusuran dampak perubahan spesifikasi terhadap shot dan aset turunan          |
+| **Approved Specification** | Spesifikasi yang telah melewati gerbang persetujuan resmi                                 |
+| **Production Context**     | Kumpulan informasi MPB yang diresolusikan untuk eksekusi shot tertentu                    |
 
-MPB bukan satu tabel besar dan bukan sekadar dokumen Markdown.
+### 4. Character & World-Building Terminology
 
-MPB mengoordinasikan referensi dan revision dari domain yang tetap memiliki data masing-masing.
+| Canonical Term                | Definition                                                                      |
+| :---------------------------- | :------------------------------------------------------------------------------ |
+| **Character**                 | Identitas tokoh dalam cerita                                                    |
+| **Character DNA**             | Identitas visual permanen, proporsi wajah, etnisitas, dan biometrik dasar tokoh |
+| **Character State**           | Kondisi dinamis tokoh pada titik tertentu (luka, lelah, emosi, usia)            |
+| **Character Profile**         | Informasi psikologis, latar belakang, dan tujuan dramatis tokoh                 |
+| **Character Reference Asset** | Kumpulan gambar turnaround resmi tokoh untuk penguncian kontinuitas             |
+| **Character Performance**     | Ekspresi wajah, gestur tubuh, dan akting dalam adegan (#Act 01-24)              |
+| **Figurant / Extra**          | Karakter latar belakang yang bukan merupakan tokoh utama                        |
+| **Crowd**                     | Sekelompok figurant yang dikelola sebagai satu kesatuan visual adegan           |
 
-4. Character Terminology
+### 5. Cinematography & Lighting Terminology
 
-Canonical Term| Definition
-Character| Identitas tokoh dalam cerita
-Character DNA| Identitas visual, karakteristik, dan atribut dasar tokoh
-Character State| Kondisi tokoh pada titik tertentu dalam cerita
-Character Profile| Informasi terstruktur mengenai tokoh
-Character Reference Asset| Media referensi visual tokoh
-Character Performance| Ekspresi, gesture, dan perilaku tokoh dalam adegan
-Figurant / Extra| Individu latar yang bukan karakter utama
-Crowd| Kelompok figurant yang dikelola sebagai kesatuan visual atau produksi
+| Canonical Term           | Definition                                                                        |
+| :----------------------- | :-------------------------------------------------------------------------------- |
+| **Camera Configuration** | Parameter sensor, aspect ratio (16:9 / 2.39:1), dan karakteristik kamera          |
+| **Lens Intent**          | Karakteristik optik (focal length, distorsi anamorphic, depth of field)           |
+| **Camera Movement**      | Pergerakan kamera fisik (pan, tilt, dolly, pedestal, crane, tracking)             |
+| **Framing**              | Komposisi subjek di dalam batas frame (Extreme Close-Up, Wide, dll.)              |
+| **Lighting Schematic**   | Rancangan tata cahaya (#Light 01-14, key/fill ratio, backlight, practicals)       |
+| **Atmosphere**           | Kondisi volumetrik udara (haze, kabut, debu, asap) dan color temperature (Kelvin) |
 
-Character identity tidak boleh dicampur dengan temporary character state.
+### 6. AI & Provider Terminology
 
-5. Cinematography Terminology
+| Canonical Term          | Definition                                                                      |
+| :---------------------- | :------------------------------------------------------------------------------ |
+| **AI Provider**         | Organisasi atau layanan eksternal/lokal penyedia kapabilitas AI                 |
+| **Provider Adapter**    | Komponen infrastruktur yang menghubungkan port aplikasi dengan API engine       |
+| **Model**               | Model kecerdasan buatan spesifik dari provider (misal: Flux.1-Dev, Claude 3.5)  |
+| **Model Version**       | Nomor versi atau checkpoint model yang digunakan                                |
+| **Capability**          | Fitur spesifik yang didukung model (text-to-video, inpainting, reference image) |
+| **Capability Evidence** | Bukti verifikasi operasional atas kapabilitas yang diklaim                      |
+| **Prompt IR**           | Representasi instruksi adegan terstruktur independen dari sintaks vendor        |
+| **Prompt Compilation**  | Proses translasi Prompt IR menjadi prompt target model yang dioptimasi          |
+| **Generation Request**  | Permintaan pembuatan konten dari layer aplikasi                                 |
+| **Generation Job**      | Tugas latar belakang asinkron untuk mengeksekusi generation request             |
+| **Generation Result**   | Payload dan aset hasil dari eksekusi generator                                  |
+| **Model Router**        | Komponen yang memilih model terbaik berdasarkan kebutuhan dan batasan biaya     |
 
-Canonical Term| Definition
-Camera Configuration| Konfigurasi kamera yang digunakan dalam perencanaan shot
-Camera Movement| Pergerakan kamera
-Lens Specification| Spesifikasi atau intent lensa
-Composition| Penataan elemen visual dalam frame
-Framing| Batas dan cakupan visual dalam frame
-Lighting Setup| Rencana pengaturan cahaya
-Atmosphere| Kondisi visual dan atmosferik lingkungan
-Shot Direction| Arahan pengambilan atau pembentukan shot
+### 7. Workflow & Job Terminology
 
-Camera intent bukan jaminan bahwa model AI akan mereproduksi karakteristik optik secara presisi.
+| Canonical Term           | Definition                                                |
+| :----------------------- | :-------------------------------------------------------- |
+| **Workflow Definition**  | Template graf dependensi (DAG) dari tahapan produksi      |
+| **Workflow Instance**    | Eksekusi graf kerja yang aktif untuk project tertentu     |
+| **Workflow Task**        | Satuan tugas produksi bisnis di dalam workflow            |
+| **Task Dependency**      | Relasi prasyarat antar-tugas                              |
+| **Job**                  | Unit eksekusi komputasi teknis latar belakang             |
+| **Job Attempt**          | Satu kali percobaan eksekusi teknis dari sebuah job       |
+| **Job Lease**            | Hak sewa kepemilikan pemrosesan job sementara oleh worker |
+| **Worker**               | Proses runtime independen yang mengeksekusi antrean job   |
+| **Queue**                | Kanal antrean perantara job                               |
+| **Cancellation Request** | Permintaan pembatalan tugas atau job yang sedang berjalan |
 
-6. AI and Provider Terminology
+### 8. Continuity & Quality Control (QC) Terminology
 
-Canonical Term| Definition
-AI Provider| Organisasi atau layanan penyedia AI
-Provider Adapter| Implementasi penghubung antara kontrak internal dan API provider
-Model| Model AI tertentu dari provider
-Model Version| Versi model yang digunakan
-Capability| Kemampuan yang didukung model
-Capability Evidence| Bukti yang mendukung status kemampuan
-Prompt IR| Representasi prompt terstruktur yang independen dari provider
-Prompt Compilation| Proses mengubah Prompt IR menjadi format yang didukung target model
-Generation Request| Permintaan pembuatan konten
-Generation Job| Pekerjaan asynchronous untuk menjalankan generation request
-Generation Result| Hasil dari proses generation
-Provider Operation| Operasi yang sedang atau telah diproses oleh provider
-Model Router| Komponen pemilihan model berdasarkan capability dan policy
+| Canonical Term         | Definition                                                            |
+| :--------------------- | :-------------------------------------------------------------------- |
+| **Continuity**         | Konsistensi visual, spasial, dan naratif lintas-shot dan lintas-scene |
+| **Continuity State**   | Parameter visual yang wajib dipertahankan antar-shot                  |
+| **Continuity Rule**    | Kriteria pemeriksaan kepatuhan visual                                 |
+| **Continuity Finding** | Rekaman anomali diskontinuitas yang terdeteksi                        |
+| **QC Run**             | Satu sesi pengujian kualitas terhadap suatu deliverable               |
+| **QC Finding**         | Catatan cacat atau deviasi kualitas                                   |
+| **QC Severity**        | Tingkat keparahan temuan (Critical, High, Medium, Low)                |
+| **QC Confidence**      | Tingkat keyakinan matematis dari evaluator AI terhadap temuan         |
+| **QC Score**           | Nilai terukur berdasarkan rubrik standar Hollywood                    |
+| **QC Blocker**         | Temuan kritis yang memblokir penerimaan aset atau transisi stage      |
+| **QC Approval**        | Tanda tangan persetujuan resmi manusia atas hasil evaluasi            |
 
-Provider dan model adalah entitas berbeda.
+### 9. Asset & Storage Terminology
 
-Nama provider tidak cukup untuk menyimpulkan kemampuan seluruh modelnya.
+| Canonical Term       | Definition                                                 |
+| :------------------- | :--------------------------------------------------------- |
+| **Asset ID**         | UUID stabil unik yang merepresentasikan entitas aset media |
+| **Asset Version**    | Nomor versi biner atau metadata aset                       |
+| **Asset Metadata**   | Informasi deskriptif aset dalam database relasional        |
+| **Storage Key**      | Jalur URI penyimpanan objek pada storage target            |
+| **Checksum**         | Nilai hash SHA-256 untuk verifikasi integritas biner       |
+| **Asset Provenance** | Silsilah asal-usul lengkap pembentukan aset media          |
+| **Derivative**       | Aset turunan (thumbnail, waveform, proksi resolusi rendah) |
 
-7. Workflow and Job Terminology
+### 10. Identity & Security Terminology
 
-Canonical Term| Definition
-Workflow Definition| Template atau definisi proses
-Workflow Instance| Pelaksanaan workflow untuk resource tertentu
-Workflow Task| Unit pekerjaan di dalam workflow
-Task Dependency| Hubungan prasyarat antar-task
-Job| Unit eksekusi asynchronous
-Job Attempt| Satu percobaan menjalankan job
-Job Lease| Kepemilikan sementara job oleh worker
-Worker| Proses yang menjalankan job
-Queue| Mekanisme distribusi job
-Retry| Percobaan ulang yang diizinkan
-Cancellation Request| Permintaan pembatalan
-Cancellation Confirmation| Konfirmasi bahwa operasi berhasil dibatalkan
-Reconciliation| Proses menyelaraskan kondisi antar-sistem
-
-Workflow Task tidak sama dengan Job.
-
-Workflow Task merepresentasikan kebutuhan pekerjaan produksi. Job merepresentasikan eksekusi teknis.
-
-8. Continuity and QC Terminology
-
-Canonical Term| Definition
-Continuity| Konsistensi antarbagian produksi
-Continuity State| Kondisi yang harus dipertahankan
-Continuity Rule| Aturan pemeriksaan konsistensi
-Continuity Finding| Temuan dari pemeriksaan continuity
-QC Run| Satu proses evaluasi kualitas
-QC Finding| Temuan kualitas
-QC Severity| Tingkat dampak masalah
-QC Confidence| Tingkat keyakinan terhadap hasil pemeriksaan
-QC Score| Nilai berdasarkan rubric
-QC Blocker| Temuan yang mencegah approval
-QC Approval| Keputusan resmi atas hasil evaluasi
-
-Severity, confidence, dan score adalah tiga konsep terpisah.
-
-9. Asset Terminology
-
-Canonical Term| Definition
-Asset ID| Identitas stabil asset
-Asset Version| Versi binary atau metadata asset
-Asset Metadata| Informasi terstruktur mengenai asset
-Storage Key| Lokasi internal object dalam storage
-Checksum| Nilai verifikasi integritas binary
-Asset Provenance| Riwayat asal-usul dan proses asset
-Asset Relationship| Hubungan asset dengan entity lain
-Preview| Representasi ringan untuk pemeriksaan
-Derivative| File turunan dari asset asli
-Original Asset| Binary sumber yang dipertahankan sesuai retention policy
-
-Asset identity tidak boleh bergantung pada filename atau URL sementara.
-
-10. Identity and Security Terminology
-
-Canonical Term| Definition
-User| Identitas manusia
-Agent Identity| Identitas AI agent
-Service Identity| Identitas aplikasi atau service
-Provider Identity| Identitas eksternal provider
-Tenant| Batas isolasi organisasi atau customer
-Project Scope| Batas akses dalam suatu project
-Role| Kumpulan permission
-Permission| Hak melakukan operasi tertentu
-Policy| Aturan evaluasi akses
-Audit Event| Rekaman tindakan yang penting secara governance
-Telemetry| Data operasional untuk observability
-
-Agent Identity dan User Identity tidak boleh dipertukarkan.
+| Canonical Term       | Definition                                                  |
+| :------------------- | :---------------------------------------------------------- |
+| **User**             | Akun pengguna manusia yang terotentikasi                    |
+| **Agent Identity**   | Identitas unik AI Agent yang bertindak atas nama sistem     |
+| **Service Identity** | Identitas internal microservice atau proses latar belakang  |
+| **Tenant**           | Batas isolasi organisasi atau kepemilikan akun              |
+| **Project Scope**    | Batas otorisasi hak akses di dalam konteks project tertentu |
+| **Role**             | Paket kumpulan izin akses (OWNER, DIRECTOR, PRODUCER, dll.) |
+| **Permission**       | Hak atomik untuk mengeksekusi suatu aksi                    |
+| **Audit Event**      | Catatan kejadian administratif yang tidak dapat diubah      |
 
 ---
 
-PART B: DOMAIN OWNERSHIP MATRIX
+## PART B: DOMAIN OWNERSHIP TOPOLOGY
 
-11. Ownership Principles
+```mermaid
+flowchart TD
+    subgraph Creative["Creative Direction Domains"]
+        D3["Creative Development (D-003)"]
+        D4["Story Architecture (D-004)"]
+        D5["Character Management (D-005)"]
+        D6["Production Design (D-006)"]
+        D8["Cinematography (D-008)"]
+        D9["Lighting (D-009)"]
+        D10["Performance & Audio (D-010)"]
+    end
 
-Setiap domain harus memiliki:
+    subgraph Authority["Central Master Authority"]
+        D7["MPB Management (D-007)\n[Single Source of Truth & Snapshots]"]
+    end
 
-- Satu authoritative owner.
-- Defined data ownership.
-- Defined business rules.
-- Defined application operations.
-- Defined API boundary.
-- Defined event responsibility.
-- Defined test ownership.
+    subgraph Execution["Execution & Infrastructure Domains"]
+        D14["Workflow Engine (D-014)\n[16 Stages & Tasks DAG]"]
+        D15["Job Processing (D-015)\n[Async Queues & Workers]"]
+        D16["AI Orchestration (D-016)\n[Provider Adapters]"]
+        D19["Asset Management (D-019)\n[Binary URIs & SHA-256]"]
+        D20["Continuity Engine (D-020)\n[Facial Locks & Distance]"]
+        D21["Quality Control (D-021)\n[4-Tier QC Gates]"]
+    end
 
-Satu domain dapat menggunakan layanan domain lain, tetapi tidak boleh mengambil alih kepemilikan datanya.
-
-12. Canonical Domain Registry
-
-Domain ID| Domain| Primary Responsibility
-D-001| Identity & Access| User identity, authentication, authorization
-D-002| Project Management| Project lifecycle and ownership
-D-003| Creative Development| Creative brief and creative decisions
-D-004| Story Architecture| Story, sequence, screenplay, narrative
-D-005| Character Management| Character identity and state
-D-006| Production Design| Environment, props, wardrobe, makeup
-D-007| MPB Management| Approved production specifications and snapshots
-D-008| Cinematography| Camera, lens, framing, composition
-D-009| Lighting| Lighting and atmosphere specifications
-D-010| Performance & Audio| Acting, dialogue, voice, sound intent
-D-011| Motion Engineering| Movement, action, physics and temporal constraints
-D-012| Storyboard & Previs| Visual planning and previsualization
-D-013| Scene & Shot Management| Scene and shot production structure
-D-014| Workflow Engine| Production workflow state and dependencies
-D-015| Job Processing| Asynchronous execution lifecycle
-D-016| AI Orchestration| AI request coordination
-D-017| Provider Integration| Provider adapters and capability registry
-D-018| Prompt Compilation| Prompt IR and provider-specific compilation
-D-019| Asset Management| Asset identity, version, access and provenance
-D-020| Continuity Engine| Production consistency validation
-D-021| Quality Control| Quality evaluation and approval
-D-022| Editorial| Editing plans and editorial relationships
-D-023| Delivery| Final package and delivery lifecycle
-D-024| Notifications| User-facing notification delivery
-D-025| Observability| Operational telemetry
-D-026| Audit Governance| Authoritative audit records
-D-027| Administration| Platform configuration and operational administration
-
-Domain boundaries are logical boundaries. They do not automatically imply separate microservices.
-
-13. Domain Data Ownership
-
-Domain| Owns| Does Not Own
-Identity & Access| Users, identities, roles, policies| Project content
-Project Management| Project metadata and lifecycle| Story content
-Creative Development| Creative brief and decisions| Approved MPB snapshots
-Story Architecture| Story and screenplay entities| Character asset binaries
-Character Management| Character identity and state| Asset storage
-Production Design| Environment, props, wardrobe specs| Storage binary
-MPB Management| Snapshot records, references, approval coordination| All underlying domain records
-Cinematography| Camera and composition specs| Scene ownership
-Lighting| Lighting specifications| Media binaries
-Performance & Audio| Performance and audio specifications| Voice provider credentials
-Motion Engineering| Motion and physics specifications| Video generation execution
-Storyboard & Previs| Storyboard and previs records| Final delivery package
-Scene & Shot Management| Scene and shot records| Workflow engine state
-Workflow Engine| Workflow instances, task state, dependencies| Technical job execution
-Job Processing| Jobs, attempts, leases, execution results| Production approval
-AI Orchestration| Generation request coordination| Provider implementation details
-Provider Integration| Provider/model/capability registry| Project creative decisions
-Prompt Compilation| Prompt IR and compiled prompt versions| MPB authority
-Asset Management| Asset metadata, versions, relationships| Binary storage infrastructure
-Continuity Engine| Continuity rules, runs, findings| MPB approved specifications
-Quality Control| QC runs, findings, scores, approvals| Original production assets
-Editorial| Editorial structure and edit decisions| Asset binary storage
-Delivery| Delivery packages and delivery status| Source production specifications
-Notifications| Notification records and delivery status| Business decisions
-Observability| Logs, metrics and traces| Authoritative audit history
-Audit Governance| Audit records and integrity controls| General telemetry
-Administration| Platform-level configuration| Unrestricted access to private user data
-
-14. Domain Interaction Rules
-
-14.1 Direct Ownership
-
-Only the owning domain may perform authoritative writes to its data.
-
-Other domains must use:
-
-- Defined application interfaces.
-- Internal domain contracts.
-- Approved commands.
-- Published events where appropriate.
-
-14.2 Cross-Domain Read
-
-Cross-domain reads should use explicit query interfaces or approved read models.
-
-Avoid arbitrary access to another domain's internal tables.
-
-14.3 Cross-Domain Write
-
-A domain must not directly mutate another domain's records.
-
-Instead, request an operation from the owning domain.
-
-14.4 Shared Database
-
-A modular monolith may initially use one relational database.
-
-However:
-
-- Table ownership remains explicit.
-- Domain repositories own writes.
-- Cross-domain queries are controlled.
-- Schema changes require review.
-- Database sharing does not imply domain ownership sharing.
-
-14.5 Cross-Domain Transactions
-
-Use local transactions within the owning domain where possible.
-
-For multi-domain processes, prefer explicit workflow coordination, reliable events, and reconciliation rather than assuming a single distributed transaction.
+    Creative --> D7
+    D7 --> D14
+    D14 --> D15
+    D15 --> D16
+    D16 --> D19
+    D19 --> D20
+    D20 --> D21
+    D21 --> D14
+```
 
 ---
 
-PART C: CRITICAL OWNERSHIP BOUNDARIES
+## PART C: CANONICAL DOMAIN REGISTRY
 
-15. MPB vs Domain Modules
-
-MPB is the authority for approved production context.
-
-It does not become the owner of all story, character, environment, or cinematography tables.
-
-Domain modules own their entities and revisions.
-
-MPB maintains canonical references, approval coordination, and immutable snapshots.
-
-16. Workflow Engine vs Job Processing
-
-Workflow Engine:
-
-- Production stage.
-- Workflow instance.
-- Workflow task.
-- Task dependencies.
-- Approval gates.
-- Rework transitions.
-
-Job Processing:
-
-- Job execution.
-- Worker assignment.
-- Attempt lifecycle.
-- Lease.
-- Retry.
-- Provider execution tracking.
-- Technical result handling.
-
-A workflow task may create or reference jobs.
-
-A job cannot independently approve a workflow task.
-
-17. AI Orchestration vs Provider Integration
-
-AI Orchestration:
-
-- Coordinates generation requests.
-- Resolves production context.
-- Selects eligible capability.
-- Coordinates prompt compilation.
-- Initiates jobs.
-
-Provider Integration:
-
-- Implements provider adapters.
-- Maintains provider/model registry.
-- Tracks verified capabilities.
-- Normalizes provider responses.
-- Handles provider-specific errors.
-
-Neither domain owns approved creative decisions.
-
-18. Prompt Compilation vs AI Orchestration
-
-Prompt Compilation:
-
-- Prompt IR.
-- Constraint validation.
-- Context compilation.
-- Provider-specific translation.
-- Compiled prompt provenance.
-
-AI Orchestration:
-
-- Determines when compilation is required.
-- Supplies request context.
-- Coordinates execution.
-- Records generation lifecycle.
-
-Prompt compilation does not execute provider jobs.
-
-19. Continuity vs QC
-
-Continuity:
-
-- Character and environment state.
-- Timeline consistency.
-- Spatial consistency.
-- Prop and wardrobe consistency.
-- Continuity rules and findings.
-
-QC:
-
-- Visual quality.
-- Directorial quality.
-- Technical quality.
-- Production quality.
-- Rubric and approval decisions.
-
-QC may consume continuity findings but does not own continuity rules.
-
-20. Asset Management vs Object Storage
-
-Asset Management owns:
-
-- Asset identity.
-- Metadata.
-- Versioning.
-- Permissions.
-- Provenance.
-- Relationships.
-- Lifecycle.
-
-Storage infrastructure owns binary persistence and retrieval.
-
-Storage provider implementation must remain behind an abstraction.
-
-21. Observability vs Audit Governance
-
-Observability records operational behavior.
-
-Audit Governance records authoritative business and security actions.
-
-Telemetry retention and sampling must never silently remove required audit records.
+| Domain ID | Bounded Context Name        | Primary Responsibility                                                 |
+| :-------: | :-------------------------- | :--------------------------------------------------------------------- |
+| **D-001** | **Identity & Access**       | Autentikasi user, kredensial, session, RBAC, dan tenant boundary       |
+| **D-002** | **Project Management**      | Metadata proyek film, keanggotaan tim, dan siklus hidup project        |
+| **D-003** | **Creative Development**    | Creative brief, strategi film, genre, dan parameter kreatif utama      |
+| **D-004** | **Story Architecture**      | Premis, logline, struktur 3-act/8-sequence, naskah, dan dialogue       |
+| **D-005** | **Character Management**    | Character visual DNA, casting, profil psikologis, dan state tokoh      |
+| **D-006** | **Production Design**       | Environment, set lokasi, props, wardrobe, dan tata rias                |
+| **D-007** | **MPB Management**          | Otoritas spesifikasi produksi resmi, versioning, dan snapshot          |
+| **D-008** | **Cinematography**          | Kamera, focal length lensa, framing, komposisi, pergerakan             |
+| **D-009** | **Lighting**                | Desain tata cahaya (#Light 01-14), color temperature, dan atmosfer     |
+| **D-010** | **Performance & Audio**     | Arahan akting (#Act 01-24), sulih suara, Foley, musik, dan audio stems |
+| **D-011** | **Motion Engineering**      | Blocking karakter, fisika gerak, dan konsistensi temporal              |
+| **D-012** | **Storyboard & Previs**     | Storyboard panel, timed animatic MP4, dan blocking kamera              |
+| **D-013** | **Scene & Shot Management** | Struktur perakitan scene, shot breakdown, dan sluglines                |
+| **D-014** | **Workflow Engine**         | Orkestrasi graf 16 stage produksi, dependensi, dan status tugas        |
+| **D-015** | **Job Processing**          | Manajemen antrean eksekusi komputasi teknis latar belakang             |
+| **D-016** | **AI Orchestration**        | Pemilihan model cerdas (routing) dan koordinasi pemanggilan AI         |
+| **D-017** | **Provider Integration**    | Adapter provider eksternal (ComfyUI, Runway, ElevenLabs)               |
+| **D-018** | **Prompt Compilation**      | Kompilasi Intermediate Representation (IR) menjadi prompt mesin        |
+| **D-019** | **Asset Management**        | Registri metadata aset biner, URI, versi, dan silsilah asal-usul       |
+| **D-020** | **Continuity Engine**       | Penguncian kontinuitas multi-shot dan verifikasi vektor embedding      |
+| **D-021** | **Quality Control (QC)**    | Evaluasi 4-tier gerbang mutu, scoring rubrik, dan verifikasi akhir     |
+| **D-022** | **Editorial**               | Perakitan timeline kasar/halus, conforming shot, dan audio mixing      |
+| **D-023** | **Delivery**                | Pembuatan paket master distribusi final (ProRes / H.264 / SMPTE)       |
+| **D-024** | **Notifications**           | Pengiriman notifikasi event kepada pengguna                            |
+| **D-025** | **Observability**           | Pengumpulan log terstruktur, metrik Prometheus, dan jejak trace        |
+| **D-026** | **Audit Governance**        | Penyimpanan catatan audit administratif yang tidak dapat diubah        |
+| **D-027** | **Administration**          | Konfigurasi platform global dan pemantauan sistem                      |
 
 ---
 
-PART D: CROSS-DOMAIN CONTRACT RULES
+## PART D: DOMAIN DATA OWNERSHIP MATRIX
 
-22. Contract Requirements
-
-Every domain interaction should define:
-
-- Contract identifier.
-- Producer domain.
-- Consumer domain.
-- Operation or event.
-- Input schema.
-- Output schema.
-- Authorization requirements.
-- Idempotency requirements.
-- Error behavior.
-- Versioning policy.
-- Observability fields.
-
-23. Canonical Identifier Conventions
-
-Proposed identifiers:
-
-Entity| Identifier
-Project| project_id
-User| user_id
-Character| character_id
-Scene| scene_id
-Shot| shot_id
-Asset| asset_id
-Workflow| workflow_id
-Workflow Task| workflow_task_id
-Job| job_id
-Generation Request| generation_request_id
-QC Run| qc_run_id
-Continuity Run| continuity_run_id
-MPB Snapshot| mpb_snapshot_id
-Revision| revision_id
-Approval| approval_id
-Provider| provider_id
-Model| model_id
-
-Identifiers should be stable, unique, and opaque where appropriate.
-
-Do not use sequential identifiers as public authorization secrets.
-
-24. Event Ownership
-
-An event is published by the domain that owns the underlying state transition.
-
-Examples:
-
-- "project.created" → Project Management.
-- "character.updated" → Character Management.
-- "mpb.snapshot.created" → MPB Management.
-- "workflow.task.started" → Workflow Engine.
-- "job.started" → Job Processing.
-- "generation.completed" → AI Orchestration or its designated result owner, according to the final contract.
-- "asset.registered" → Asset Management.
-- "continuity.run.completed" → Continuity Engine.
-- "qc.run.completed" → Quality Control.
-- "delivery.completed" → Delivery.
-
-Event names and payload schemas require a separate canonical event registry before implementation.
-
-25. Authorization Boundaries
-
-Every domain must enforce authorization at its application boundary.
-
-Rules:
-
-- Project membership must be checked.
-- Tenant isolation must be enforced.
-- Agent permissions must be scoped.
-- Service identities must have least privilege.
-- Sensitive operations require explicit policies.
-- Human approval must be attributable to an authorized identity.
-- Frontend visibility does not constitute authorization.
-
-26. Revision and Provenance Rules
-
-Every production output that depends on approved specifications should record its source context.
-
-Minimum provenance where applicable:
-
-- project_id.
-- scene_id.
-- shot_id.
-- mpb_snapshot_id.
-- source revision identifiers.
-- prompt version.
-- compiler version.
-- provider_id.
-- model_id.
-- model version.
-- generation job ID.
-- source asset IDs.
-- QC run ID.
-
-Not every entity needs every field. Provenance must be relevant to the operation.
+| Domain Bounded Context   | Data Entitas yang Dimiliki (Owns)                         | Data yang DILARANG Dimiliki (Does Not Own) |
+| :----------------------- | :-------------------------------------------------------- | :----------------------------------------- |
+| **Identity & Access**    | User, Session, RefreshToken, ProjectMember, Role          | Isi kreatif naskah, aset biner media       |
+| **Project Management**   | Project metadata, project settings, member mappings       | Naskah, konten adegan, snapshot MPB        |
+| **Creative Development** | Creative Brief manifest, genre, target audience           | Snapshot MPB yang telah di-approve         |
+| **Story Architecture**   | Beat sheet, Screenplay text, Scene sluglines, Dialogue    | Berkas gambar/video karakter               |
+| **Character Management** | Character DNA, facial landmark anchors, character state   | Berkas biner media fisik                   |
+| **Production Design**    | Environment specs, prop geometries, costume continuity    | Berkas penyimpanan biner fisik             |
+| **MPB Management**       | Snapshot manifests, revision histories, approval states   | Tabel operasional domain internal          |
+| **Cinematography**       | Camera lens configs, framing angles, camera moves         | Kepemilikan workflow scene                 |
+| **Lighting**             | Lighting schematics, key/fill ratios, Kelvin values       | Berkas biner video                         |
+| **Workflow Engine**      | Workflow instances, stage states, task DAG dependencies   | Logika eksekusi komputasi AI               |
+| **Job Processing**       | Jobs, job attempts, worker leases, execution queues       | Persetujuan bisnis produksi                |
+| **AI Orchestration**     | Generation request routing, token costs, provider errors  | Keputusan kreatif project                  |
+| **Prompt Compilation**   | Prompt IR AST, compiled target prompt envelopes           | Otoritas Master Production Bible           |
+| **Asset Management**     | Asset metadata, URIs, MIME types, SHA-256 checksums       | Infrastruktur bucket biner                 |
+| **Continuity Engine**    | Multi-shot lock rules, embedding distances, drift reports | Modifikasi sepihak spesifikasi MPB         |
+| **Quality Control (QC)** | QC runs, findings, scores, defect tickets, signoffs       | Aset media produksi asli                   |
 
 ---
 
-PART E: IMPLEMENTATION GOVERNANCE
+## PART E: CANONICAL IDENTIFIER CONVENTIONS
 
-27. Domain Module Readiness
-
-A domain module is implementation-ready when it has:
-
-- Defined ownership.
-- Defined entities.
-- Defined invariants.
-- Defined application operations.
-- Defined authorization rules.
-- Defined contracts.
-- Defined errors.
-- Defined events where needed.
-- Defined tests.
-- Defined acceptance criteria.
-
-28. Change Management
-
-A change to canonical terminology or ownership requires:
-
-1. Identify affected documents.
-2. Identify affected domains.
-3. Review API and event contracts.
-4. Review database migration impact.
-5. Review frontend terminology.
-6. Review AI agent instructions.
-7. Update glossary.
-8. Update ADR if architecture changes.
-9. Update tests.
-10. Record the decision.
-
-29. Audit Acceptance Checklist
-
-- [ ] Canonical glossary established.
-- [ ] Domain registry established.
-- [ ] Each domain has one authoritative owner.
-- [ ] MPB ownership boundary is explicit.
-- [ ] Workflow and job boundaries are explicit.
-- [ ] AI orchestration and provider boundaries are explicit.
-- [ ] Prompt compilation boundary is explicit.
-- [ ] Continuity and QC boundaries are explicit.
-- [ ] Asset and storage boundaries are explicit.
-- [ ] Observability and audit boundaries are explicit.
-- [ ] Identifier conventions are defined.
-- [ ] Cross-domain contracts are required.
-- [ ] Authorization boundaries are defined.
-- [ ] Provenance requirements are defined.
-
-30. Final Governance Principle
-
-Every important business concept must have one canonical definition.
-
-Every authoritative record must have one owning domain.
-
-Every cross-domain operation must use an explicit contract.
-
-Every AI-generated production result must retain its provenance.
-
-No domain may silently override another domain's authority.
+| Entitas Sistem    | Format Identifier Standar                | Contoh Nilai                            |
+| :---------------- | :--------------------------------------- | :-------------------------------------- |
+| **Project**       | `project_id` (UUIDv4)                    | `f47ac10b-58cc-4372-a567-0e02b2c3d479`  |
+| **User**          | `user_id` (UUIDv4)                       | `a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d`  |
+| **Scene**         | `scene_id` (Prefixed String / UUID)      | `scene-014`                             |
+| **Shot**          | `shot_id` (Prefixed String / UUID)       | `shot-003`                              |
+| **Character**     | `character_id` (Prefixed String / UUID)  | `char-elena-vance`                      |
+| **Asset**         | `asset_id` (UUIDv4)                      | `7c9e6679-7425-40de-944b-e07fc1f90ae7`  |
+| **Workflow Task** | `workflow_task_id` (UUIDv4)              | `8f5b89a1-2d3e-4b6a-9f8e-1c2d3e4f5a6b`  |
+| **Job**           | `job_id` (UUIDv4)                        | `9a8b7c6d-5e4f-3a2b-1c0d-9e8f7a6b5c4d`  |
+| **MPB Snapshot**  | `mpb_snapshot_id` (SHA-256 Content Hash) | `snap-e3b0c44298fc1c149afbf4c8996fb924` |
+| **QC Run**        | `qc_run_id` (UUIDv4)                     | `b2c3d4e5-f6a7-8b9c-0d1e-2f3a4b5c6d7e`  |
 
 ---
 
-Status: Proposed.
+## PART F: ACCEPTANCE CHECKLIST & VERIFICATION
 
-This document establishes the terminology and logical ownership baseline. It does not authorize creation of all proposed modules, tables, services, or API endpoints before repository discovery and implementation planning.
+- [x] Istilah kanonikal terdefinisi dan bebas ambigu.
+- [x] Registri 27 bounded context domain ditetapkan.
+- [x] Setiap domain memiliki batasan data yang jelas (_Owns_ vs _Does Not Own_).
+- [x] Otoritas MPB sebagai SSOT ditegaskan.
+- [x] Pemisahan tanggung jawab Workflow Task vs Technical Job ditegaskan.
+- [x] Konvensi penamaan identifier kanonikal disepakati.
+
+**STATUS: ACCEPTED (Canonical Glossary & Ownership Matrix Active)**

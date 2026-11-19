@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/DavidAnson/markdownlint/v0.34.0/schema/markdownlint-config-schema.json",
+  "default": true,
+  // MD013/line-length - Line length: disabled for technical docs (tables, URLs, long commands)
+  "MD013": false,
+  // MD022/blanks-around-headings - Headings should be surrounded by blank lines
+  "MD022": {
+    "lines_above": 1,
+    "lines_below": 1
+  },
+  // MD024/no-duplicate-heading - Multiple headings with same content allowed across different sections
+  "MD024": {
+    "siblings_only": true
+  },
+  // MD025/single-title/single-h1 - Allow H1 heading alongside frontmatter title
+  "MD025": false,
+  // MD026/no-trailing-punctuation - Allow trailing colons in technical headings (e.g. "Endpoint:", "Note:")
+  "MD026": false,
+  // MD029/ol-prefix - Ordered list item prefix (allow flexible numbering)
+  "MD029": false,
+  // MD031/blanks-around-fences - Allow code blocks inside lists without breaking list indentation
+  "MD031": {
+    "list_items": false
+  },
+  // MD032/blanks-around-lists - Lists should be surrounded by blank lines
+  "MD032": true,
+  // MD033/no-inline-html - Allow inline HTML (badges, details/summary, breaks)
+  "MD033": false,
+  // MD036/no-emphasis-as-heading - Emphasis used instead of heading allowed
+  "MD036": false,
+  // MD041/first-line-heading - Allow files starting with frontmatter, badges, or notes
+  "MD041": false
+}
