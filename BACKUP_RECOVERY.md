@@ -17,6 +17,7 @@ In cinematic AI film production, data loss is catastrophic. A corrupted Master P
 MovieAIProducer enforces an automated, zero-trust **3-2-1 Backup & Disaster Recovery Architecture** that treats backups as unverified hypotheses until automated restoration drills mathematically prove data recoverability.
 
 ### Recovery Objectives & SLAs
+
 - **Recovery Point Objective (RPO):**
   - **Relational Database (MPB, Screenplay, Scene States):** $\le \mathbf{1\text{ hour}}$ (continuous Write-Ahead Logging / hourly snapshots).
   - **Content-Addressable Asset Store (Videos, Audio, Images):** $\le \mathbf{6\text{ hours}}$ (continuous sync to off-site object storage).
@@ -72,18 +73,20 @@ flowchart TD
 
 ## 3. Data Classification & Protection Tiers
 
-| Data Tier | Entity Scope & File Paths | Business Value | Loss Impact | Backup Frequency | Storage Target |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Tier 1 (Critical)** | Master Production Bible, Character DNA, 50-Scene Screenplay, Foundation Metadata (`./data/movieai.db`) | Irreplaceable creative intellectual property | Total production halt | Hourly snapshot + WAL continuous archiving | Local encrypted NVMe + Off-site S3 Object Lock |
-| **Tier 2 (Important)**| Rendered video shots, synthesized voice WAVs, reference face embeddings (`./data/assets/**`) | High compute & monetary value ($0.20–$0.30/shot) | Re-rendering costs and continuity re-work | Daily differential sync (every 6 hours) | Offsite Cloudflare R2 / S3 Standard |
-| **Tier 3 (Operational)**| Job telemetry, raw inference logs, audit trails, QC diagnostic heatmaps | Operational & debugging diagnostics | Temporary telemetry blindness | Weekly compressed archive (30-day retention) | S3 Infrequent Access (Glacier) |
+| Data Tier                | Entity Scope & File Paths                                                                              | Business Value                                   | Loss Impact                               | Backup Frequency                             | Storage Target                                 |
+| :----------------------- | :----------------------------------------------------------------------------------------------------- | :----------------------------------------------- | :---------------------------------------- | :------------------------------------------- | :--------------------------------------------- |
+| **Tier 1 (Critical)**    | Master Production Bible, Character DNA, 50-Scene Screenplay, Foundation Metadata (`./data/movieai.db`) | Irreplaceable creative intellectual property     | Total production halt                     | Hourly snapshot + WAL continuous archiving   | Local encrypted NVMe + Off-site S3 Object Lock |
+| **Tier 2 (Important)**   | Rendered video shots, synthesized voice WAVs, reference face embeddings (`./data/assets/**`)           | High compute & monetary value ($0.20–$0.30/shot) | Re-rendering costs and continuity re-work | Daily differential sync (every 6 hours)      | Offsite Cloudflare R2 / S3 Standard            |
+| **Tier 3 (Operational)** | Job telemetry, raw inference logs, audit trails, QC diagnostic heatmaps                                | Operational & debugging diagnostics              | Temporary telemetry blindness             | Weekly compressed archive (30-day retention) | S3 Infrequent Access (Glacier)                 |
 
 ---
 
 ## 4. Automated Backup Procedures & Scripts
 
 ### 4.1 Relational Database Snapshot Procedure
+
 For local development or SQLite deployments:
+
 ```bash
 #!/usr/bin/env bash
 # /opt/movieai/scripts/backup_db.sh
@@ -108,6 +111,7 @@ find "${BACKUP_DIR}" -type f -name "*.sqlite.gz" -mtime +7 -delete
 ```
 
 For production PostgreSQL deployments:
+
 ```bash
 #!/usr/bin/env bash
 # /opt/movieai/scripts/backup_postgres.sh
@@ -129,7 +133,9 @@ echo "Encrypted backup created: ${BACKUP_DIR}/movieai_prod_${TIMESTAMP}.dump.gpg
 ```
 
 ### 4.2 Content-Addressable Asset Store (CAS) Synchronization
+
 Because binary media files are content-addressed by their SHA-256 checksums (`./data/assets/{sha[0:2]}/{sha[2:4]}/{sha}.{ext}`), assets are inherently immutable. Once written, a file never changes. This makes synchronization extremely fast and bandwidth-efficient:
+
 ```bash
 #!/usr/bin/env bash
 # /opt/movieai/scripts/sync_cas_offsite.sh
@@ -154,6 +160,7 @@ echo "CAS asset sync completed successfully."
 ## 5. Step-by-Step Restoration Playbooks
 
 ### Playbook A: Accidental Database Corruption or Data Reversion
+
 1. **Stop Traffic Ingress:**
    ```bash
    docker compose stop web worker
@@ -183,6 +190,7 @@ echo "CAS asset sync completed successfully."
 ---
 
 ### Playbook B: Catastrophic Server Loss (Bare-Metal Disaster Recovery)
+
 1. **Provision New Clean Host:** Ubuntu 22.04 LTS instance with Docker and Docker Compose installed.
 2. **Clone Application Repository:**
    ```bash
@@ -212,7 +220,9 @@ echo "CAS asset sync completed successfully."
 A backup is treated as unverified until an automated recovery test passes.
 
 ### Quarterly Automated Restoration Drill
+
 On the 1st of every quarter, an automated CI worker executes the following automated drill:
+
 1. Spawns an ephemeral Docker container with an empty database volume.
 2. Pulls a random backup from the previous 30 days.
 3. Restores the database dump and runs `alembic upgrade head`.

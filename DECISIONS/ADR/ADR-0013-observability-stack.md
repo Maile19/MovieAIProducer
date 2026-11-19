@@ -6,7 +6,8 @@ date: 2026-11-19
 decision_owners: Product Owner, Technical Architect & Infrastructure Owner
 decision_scope: Structured logging, correlation tracking, Prometheus metrics, and OpenTelemetry distributed tracing
 version: "1.2"
-tags: [observability, structlog, prometheus, opentelemetry, correlation-id, tracing]
+tags:
+  [observability, structlog, prometheus, opentelemetry, correlation-id, tracing]
 canonical_path: DECISIONS/ADR/ADR-0013-observability-stack.md
 supersedes: []
 superseded_by: []
@@ -14,24 +15,25 @@ superseded_by: []
 
 # ADR-0013: Observability Stack
 
-| Attribute | Specification |
-| :--- | :--- |
-| **ADR ID** | ADR-0013 |
-| **Title** | Observability Stack: Unified Structured Logging, Correlation IDs & OpenTelemetry |
-| **Status** | ACCEPTED |
-| **Date** | 2026-11-19 |
-| **Decision Owners** | Product Owner, Technical Architect & Infrastructure Owner |
-| **Decision Scope** | Structured logging, correlation tracking, Prometheus metrics, and OpenTelemetry distributed tracing |
-| **Version** | 1.2 |
-| **Canonical Source** | `DECISIONS/ADR/ADR-0013-observability-stack.md` |
-| **Supersedes** | None |
-| **Superseded By** | None |
+| Attribute            | Specification                                                                                       |
+| :------------------- | :-------------------------------------------------------------------------------------------------- |
+| **ADR ID**           | ADR-0013                                                                                            |
+| **Title**            | Observability Stack: Unified Structured Logging, Correlation IDs & OpenTelemetry                    |
+| **Status**           | ACCEPTED                                                                                            |
+| **Date**             | 2026-11-19                                                                                          |
+| **Decision Owners**  | Product Owner, Technical Architect & Infrastructure Owner                                           |
+| **Decision Scope**   | Structured logging, correlation tracking, Prometheus metrics, and OpenTelemetry distributed tracing |
+| **Version**          | 1.2                                                                                                 |
+| **Canonical Source** | `DECISIONS/ADR/ADR-0013-observability-stack.md`                                                     |
+| **Supersedes**       | None                                                                                                |
+| **Superseded By**    | None                                                                                                |
 
 ---
 
 ## 1. Context
 
 MovieAIProducer operates a complex, multi-stage AI filmmaking platform spanning multiple runtime environments:
+
 - FastAPI presentation endpoints.
 - Pure domain business services and application use cases.
 - Background asynchronous workers executing media render jobs.
@@ -48,6 +50,7 @@ Traditional unstructured text logging (`print()` or basic `logging.info()`) make
 ## 2. Problem Statement
 
 How should MovieAIProducer architect its observability subsystem to guarantee:
+
 1. End-to-end distributed traceability across API gateways, use cases, background queues, and external AI calls.
 2. Machine-readable, structured JSON logs adhering to uniform schema conventions.
 3. Strict redaction of secrets, prompt personal data, and API keys.
@@ -102,25 +105,25 @@ flowchart TD
 
 ## 5. Telemetry Data Classification & Retention
 
-| Data Stream | Primary Format | Retention Policy | Security & Redaction Standard |
-| :--- | :--- | :---: | :--- |
-| **Debug Logs** | Structured JSON | 7 Days | Stripped in production |
-| **Application Logs** | Structured JSON | 30 Days | Filtered: API keys and passwords masked |
-| **Operational Metrics** | Time-Series (Prometheus) | 90 Days | High-cardinality labels prohibited |
-| **Distributed Traces** | OpenTelemetry Spans | 14 Days | Sampled: 100% of errors, 10% of successes |
-| **Financial / Usage Records** | Relational Database (SQL) | 7 Years | Immutable, strictly auditable |
-| **QC Verification Records** | Relational Database (SQL) | Project Lifetime | Checksum verified |
+| Data Stream                   | Primary Format            | Retention Policy | Security & Redaction Standard             |
+| :---------------------------- | :------------------------ | :--------------: | :---------------------------------------- |
+| **Debug Logs**                | Structured JSON           |      7 Days      | Stripped in production                    |
+| **Application Logs**          | Structured JSON           |     30 Days      | Filtered: API keys and passwords masked   |
+| **Operational Metrics**       | Time-Series (Prometheus)  |     90 Days      | High-cardinality labels prohibited        |
+| **Distributed Traces**        | OpenTelemetry Spans       |     14 Days      | Sampled: 100% of errors, 10% of successes |
+| **Financial / Usage Records** | Relational Database (SQL) |     7 Years      | Immutable, strictly auditable             |
+| **QC Verification Records**   | Relational Database (SQL) | Project Lifetime | Checksum verified                         |
 
 ---
 
 ## 6. Risks and Mitigations
 
-| Risk | Impact | Implemented Mitigation Strategy |
-| :--- | :---: | :--- |
-| **Secret / Key Leakage in Logs** | Critical | Automated redaction processors in `logging.py` scrub `Authorization`, `token`, and `api_key` patterns. |
-| **Log Volume / Disk Exhaustion** | High | Configurable log levels (`INFO` default in prod); log rotation enforced by host environment. |
-| **High Metric Cardinality** | Medium | Prohibit dynamic UUIDs in metric label values; track dimensions strictly at model/provider level. |
-| **Context Loss Across Async Tasks** | High | `EventDispatcher` port explicitly carries correlation IDs in event metadata. |
+| Risk                                |  Impact  | Implemented Mitigation Strategy                                                                        |
+| :---------------------------------- | :------: | :----------------------------------------------------------------------------------------------------- |
+| **Secret / Key Leakage in Logs**    | Critical | Automated redaction processors in `logging.py` scrub `Authorization`, `token`, and `api_key` patterns. |
+| **Log Volume / Disk Exhaustion**    |   High   | Configurable log levels (`INFO` default in prod); log rotation enforced by host environment.           |
+| **High Metric Cardinality**         |  Medium  | Prohibit dynamic UUIDs in metric label values; track dimensions strictly at model/provider level.      |
+| **Context Loss Across Async Tasks** |   High   | `EventDispatcher` port explicitly carries correlation IDs in event metadata.                           |
 
 ---
 
@@ -135,10 +138,10 @@ flowchart TD
 
 ## 8. Related Documents
 
-- [OBSERVABILITY.md](file:///home/ubuntu/MovieAIProducer/OBSERVABILITY.md)
-- [SECURITY.md](file:///home/ubuntu/MovieAIProducer/SECURITY.md)
-- [ADR-0001: Architecture Style](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0001-architecture-style.md)
-- [ADR-0002: Application Structure](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0002-application-structure.md)
-- [ADR-0003: Provider Adapter System](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0003-provider-adapter-system.md)
-- [ADR-0007: Async Job Processing](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0007-async-job-processing.md)
-- [CDA-0005: Canonical Error & Failure Contract Registry](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0005-canonical-error-failure-contract-registry.md)
+- [OBSERVABILITY.md](../../OBSERVABILITY.md)
+- [SECURITY.md](../../SECURITY.md)
+- [ADR-0001: Architecture Style](ADR-0001-architecture-style.md)
+- [ADR-0002: Application Structure](ADR-0002-application-structure.md)
+- [ADR-0003: Provider Adapter System](ADR-0003-provider-adapter-system.md)
+- [ADR-0007: Async Job Processing](ADR-0007-async-job-processing.md)
+- [CDA-0005: Canonical Error & Failure Contract Registry](../CDA/CDA-0005-canonical-error-failure-contract-registry.md)

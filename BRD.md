@@ -18,19 +18,19 @@ Without centralized production controls, producing a cohesive 5-minute short fil
 
 ### 2.1 The Generative Video Continuity Gap
 
-| Metric / Dimension | Unassisted Generative Prompting | MovieAIProducer Virtual Studio |
-| :--- | :--- | :--- |
-| **Character Consistency** | Faces, hair, and wardrobe morph between cuts (~70% drift across 5 scenes). | Immutable DNA tokens lock facial features, ethnic markers, and wardrobe state across all 50 scenes. |
-| **Cinematography & Optics** | Random lens focal lengths, arbitrary camera movement, and frequent 180-degree rule violations. | Explicit matrix codes enforce focal lengths (`#Lens 01-06`), framing (`#Comp 01-08`), and camera setups (`#Cam 01-34`). |
-| **Production Cost Efficiency** | High re-roll rate (8 to 15 attempts per usable 5-second cut; 80% prompt waste). | Structured compiler with DNA pre-validation reduces re-rolls to fewer than 1.5 attempts per approved shot. |
-| **Editorial Assembly** | Disconnected clips requiring intensive manual masking, color grading, and timing fixes. | Calibrated 5.0-second shots with native J/L audio cut bridges and color timing directives. |
-| **IP Ownership & Traceability** | Fragmented prompts across web interfaces with zero version history or provenance. | Git-style versioning of the Master Production Bible with cryptographic asset provenance. |
+| Metric / Dimension              | Unassisted Generative Prompting                                                                | MovieAIProducer Virtual Studio                                                                                          |
+| :------------------------------ | :--------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------- |
+| **Character Consistency**       | Faces, hair, and wardrobe morph between cuts (~70% drift across 5 scenes).                     | Immutable DNA tokens lock facial features, ethnic markers, and wardrobe state across all 50 scenes.                     |
+| **Cinematography & Optics**     | Random lens focal lengths, arbitrary camera movement, and frequent 180-degree rule violations. | Explicit matrix codes enforce focal lengths (`#Lens 01-06`), framing (`#Comp 01-08`), and camera setups (`#Cam 01-34`). |
+| **Production Cost Efficiency**  | High re-roll rate (8 to 15 attempts per usable 5-second cut; 80% prompt waste).                | Structured compiler with DNA pre-validation reduces re-rolls to fewer than 1.5 attempts per approved shot.              |
+| **Editorial Assembly**          | Disconnected clips requiring intensive manual masking, color grading, and timing fixes.        | Calibrated 5.0-second shots with native J/L audio cut bridges and color timing directives.                              |
+| **IP Ownership & Traceability** | Fragmented prompts across web interfaces with zero version history or provenance.              | Git-style versioning of the Master Production Bible with cryptographic asset provenance.                                |
 
 ---
 
 ## 3. Stakeholder Ecosystem & User Personas
 
-```
+```text
 ┌────────────────────────────────────────────────────────────────────────┐
 │                   MovieAIProducer Stakeholder Model                    │
 └──────────────────────────────────┬─────────────────────────────────────┘
@@ -48,14 +48,14 @@ Without centralized production controls, producing a cohesive 5-minute short fil
 ### 3.1 Personas & Key Objectives
 
 1. **Showrunner / Creative Director:**
-   - *Goal:* Author a compelling 50-scene narrative without losing aesthetic control.
-   - *Requirement:* Immutable visual styles (`#Style 01-18`), precise acting performance cues (`#Act 01-24`), and dynamic character progression (`#State 01-05`).
+   - _Goal:_ Author a compelling 50-scene narrative without losing aesthetic control.
+   - _Requirement:_ Immutable visual styles (`#Style 01-18`), precise acting performance cues (`#Act 01-24`), and dynamic character progression (`#State 01-05`).
 2. **Line Producer / Studio Financier:**
-   - *Goal:* Control AI compute budgets, track shot delivery schedules, and guarantee delivery deadlines.
-   - *Requirement:* Granular provider cost routing, automated failure recovery, and transparent API quota management.
+   - _Goal:_ Control AI compute budgets, track shot delivery schedules, and guarantee delivery deadlines.
+   - _Requirement:_ Granular provider cost routing, automated failure recovery, and transparent API quota management.
 3. **AI Pipeline & Prompt Engineer:**
-   - *Goal:* Maintain stable integrations with evolving generative models (Runway, Kling, Veo, ElevenLabs).
-   - *Requirement:* Decoupled provider adapter layer, structured prompt schemas, and automated continuity scorecards.
+   - _Goal:_ Maintain stable integrations with evolving generative models (Runway, Kling, Veo, ElevenLabs).
+   - _Requirement:_ Decoupled provider adapter layer, structured prompt schemas, and automated continuity scorecards.
 
 ---
 
@@ -63,7 +63,7 @@ Without centralized production controls, producing a cohesive 5-minute short fil
 
 To bridge the gap between amateur generative clips and commercial cinematic standards, MovieAIProducer mandates five operational pillars across all production workflows:
 
-```
+```text
                   ┌────────────────────────────────────────┐
                   │    5 Hollywood Production Pillars      │
                   └──────────────────┬─────────────────────┘
@@ -89,39 +89,42 @@ To bridge the gap between amateur generative clips and commercial cinematic stan
 
 MovieAIProducer maps studio business workflows across 16 formal operational stages:
 
-| Operational Stage | Stage Name | Business Function | Mandatory Quality Gate |
-| :--- | :--- | :--- | :--- |
-| **Stage 01** | Creative Brief & Film Strategy | Defines project scope, target audience, format, and commercial goals. | Executive approval of logline and format constraints. |
-| **Stage 02** | Visual Concept & Style Bible | Establishes master aesthetic palette (`#Style 01-18`) and color timing. | Visual style mood board sign-off. |
-| **Stage 03** | Story Architecture & Screenplay | Generates 4-act structural arc and 50-scene treatment. | Narrative beat verification and scene count check. |
-| **Stage 04** | Script Breakdown & Feasibility | Evaluates visual feasibility, complexity, and estimated generation cost. | Cost estimate model validation. |
-| **Stage 05** | Character Casting & Bible | Synthesizes synthetic actor DNA seeds, facial profiles, and voice models. | Synthetic actor identity lock. |
-| **Stage 06** | Extras & Creature Design | Defines secondary background groups (`#Extras 01-08`) and cultural coherence. | Background diversity and period accuracy sign-off. |
-| **Stage 07** | Production Design & Environment | Builds spatial environment bibles (`#Env 01-05`) and hero props (`#Prop 01-05`). | Environmental architectural lock. |
-| **Stage 08** | Wardrobe, Makeup & Prosthetics | Defines costume states and damage progression (`#State 01-05`). | Wardrobe state continuity matrix sign-off. |
-| **Stage 09** | Storyboard & Previsualization | Generates keyframe visual sequences and rough temporal animatics. | Spatial blocking and 180-degree check. |
-| **Stage 10** | Director's Scene Direction | Establishes dramatic subtext, pacing, and actor performance cues. | Director beat-sheet approval. |
-| **Stage 11** | Cinematography & Camera Engineering | Assigns camera positions (`#Cam 01-34`) and lens profiles (`#Lens 01-06`). | Optical physics and composition check. |
-| **Stage 12** | Lighting & Atmospheric Engineering | Configures lighting setups (`#Light 01-14`) and volumetric effects. | Photometric balance and color temp review. |
-| **Stage 13** | Performance & Dialogue Direction | Calibrates voiceover pacing, emotional cues (`#Act 01-24`), and audio bridges. | Audio timeline alignment (5.0s pacing). |
-| **Stage 14** | Motion & Continuity Engineering | Configures speed profiles (`#Speed 01-05`) and multi-layer parallax (`#FG/#BG`). | Frame bridging and parallax verification. |
-| **Stage 15** | AI Production Orchestration | Compiles prompts, manages provider quotas, and dispatches render jobs. | API dispatch validation; error retry handling. |
-| **Stage 16** | Scene Execution, Editorial & QC | Runs automated continuity scorecards, detects drift, and exports final package. | 95%+ QC score threshold; final director lock. |
+| Operational Stage | Stage Name                          | Business Function                                                                | Mandatory Quality Gate                                |
+| :---------------- | :---------------------------------- | :------------------------------------------------------------------------------- | :---------------------------------------------------- |
+| **Stage 01**      | Creative Brief & Film Strategy      | Defines project scope, target audience, format, and commercial goals.            | Executive approval of logline and format constraints. |
+| **Stage 02**      | Visual Concept & Style Bible        | Establishes master aesthetic palette (`#Style 01-18`) and color timing.          | Visual style mood board sign-off.                     |
+| **Stage 03**      | Story Architecture & Screenplay     | Generates 4-act structural arc and 50-scene treatment.                           | Narrative beat verification and scene count check.    |
+| **Stage 04**      | Script Breakdown & Feasibility      | Evaluates visual feasibility, complexity, and estimated generation cost.         | Cost estimate model validation.                       |
+| **Stage 05**      | Character Casting & Bible           | Synthesizes synthetic actor DNA seeds, facial profiles, and voice models.        | Synthetic actor identity lock.                        |
+| **Stage 06**      | Extras & Creature Design            | Defines secondary background groups (`#Extras 01-08`) and cultural coherence.    | Background diversity and period accuracy sign-off.    |
+| **Stage 07**      | Production Design & Environment     | Builds spatial environment bibles (`#Env 01-05`) and hero props (`#Prop 01-05`). | Environmental architectural lock.                     |
+| **Stage 08**      | Wardrobe, Makeup & Prosthetics      | Defines costume states and damage progression (`#State 01-05`).                  | Wardrobe state continuity matrix sign-off.            |
+| **Stage 09**      | Storyboard & Previsualization       | Generates keyframe visual sequences and rough temporal animatics.                | Spatial blocking and 180-degree check.                |
+| **Stage 10**      | Director's Scene Direction          | Establishes dramatic subtext, pacing, and actor performance cues.                | Director beat-sheet approval.                         |
+| **Stage 11**      | Cinematography & Camera Engineering | Assigns camera positions (`#Cam 01-34`) and lens profiles (`#Lens 01-06`).       | Optical physics and composition check.                |
+| **Stage 12**      | Lighting & Atmospheric Engineering  | Configures lighting setups (`#Light 01-14`) and volumetric effects.              | Photometric balance and color temp review.            |
+| **Stage 13**      | Performance & Dialogue Direction    | Calibrates voiceover pacing, emotional cues (`#Act 01-24`), and audio bridges.   | Audio timeline alignment (5.0s pacing).               |
+| **Stage 14**      | Motion & Continuity Engineering     | Configures speed profiles (`#Speed 01-05`) and multi-layer parallax (`#FG/#BG`). | Frame bridging and parallax verification.             |
+| **Stage 15**      | AI Production Orchestration         | Compiles prompts, manages provider quotas, and dispatches render jobs.           | API dispatch validation; error retry handling.        |
+| **Stage 16**      | Scene Execution, Editorial & QC     | Runs automated continuity scorecards, detects drift, and exports final package.  | 95%+ QC score threshold; final director lock.         |
 
 ---
 
 ## 6. Functional Business Requirements
 
 ### 6.1 Master Production Bible (MPB) as Single Source of Truth
+
 - The system must store all project specifications in an immutable, relational database schema.
 - Once a creative entity (Character DNA, Environment, Prop) is approved, it must receive a permanent UUID and be locked against unversioned modification.
 
 ### 6.2 Provider Independence & Cost Routing
+
 - Generation requests must route through an abstract adapter interface, supporting Kling, Runway, Google Veo, OpenAI Sora, Midjourney, and ElevenLabs.
 - The platform must support dynamic provider failover: if Provider A times out or returns rate limits, the system must transparently fall back to an equivalent secondary provider.
 - Inference costs must be tracked per scene and aggregated at the project level.
 
 ### 6.3 Automated Quality Control & Continuity Verification
+
 - The platform must compute a quantitative Continuity Score for every rendered scene based on:
   1. Facial similarity vector compared to the MPB Character DNA seed (target: `>=0.92` cosine similarity).
   2. Color palette histogram match against the Master Style specification.
@@ -132,13 +135,13 @@ MovieAIProducer maps studio business workflows across 16 formal operational stag
 
 ## 7. Key Performance Indicators (KPIs)
 
-| KPI | Target | Measurement Method |
-| :--- | :--- | :--- |
-| **Re-Prompt / Waste Ratio** | `<= 1.5` attempts per approved cut | Total provider generation jobs divided by total approved shots in the 50-scene timeline. |
-| **Character Visual Continuity** | `>= 92%` visual match across 50 scenes | Automated facial embedding distance analysis between Scene 01 and subsequent cuts. |
-| **End-to-End Production Time** | `<= 6` hours for complete 50-scene film | Total elapsed duration from Creative Brief approval to Final Editorial QC lock. |
-| **Cost per Finished Minute** | `<= $35.00` per minute of final cinema | Total API inference spend (LLM + T2I + I2V + TTS) divided by total runtime (4.16 minutes). |
-| **System Uptime & Job Reliability** | `>= 99.5%` background job completion | Percentage of scheduled generation jobs completed without fatal unhandled exceptions. |
+| KPI                                 | Target                                  | Measurement Method                                                                         |
+| :---------------------------------- | :-------------------------------------- | :----------------------------------------------------------------------------------------- |
+| **Re-Prompt / Waste Ratio**         | `<= 1.5` attempts per approved cut      | Total provider generation jobs divided by total approved shots in the 50-scene timeline.   |
+| **Character Visual Continuity**     | `>= 92%` visual match across 50 scenes  | Automated facial embedding distance analysis between Scene 01 and subsequent cuts.         |
+| **End-to-End Production Time**      | `<= 6` hours for complete 50-scene film | Total elapsed duration from Creative Brief approval to Final Editorial QC lock.            |
+| **Cost per Finished Minute**        | `<= $35.00` per minute of final cinema  | Total API inference spend (LLM + T2I + I2V + TTS) divided by total runtime (4.16 minutes). |
+| **System Uptime & Job Reliability** | `>= 99.5%` background job completion    | Percentage of scheduled generation jobs completed without fatal unhandled exceptions.      |
 
 ---
 

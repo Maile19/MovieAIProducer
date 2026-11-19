@@ -16,6 +16,7 @@
 The MovieAIProducer API provides a deterministic, versioned RESTful interface for the Hollywood 12-Step Cinematic Pipeline. It is engineered with FastAPI and enforces strict validation via Pydantic schemas.
 
 ### Core Protocol Standards
+
 1. **Explicit Implementation Transparency:** All endpoints are strictly marked as either **`[IMPLEMENTED]`** (verified against current codebase) or **`[PLANNED]`** (scheduled roadmap item).
 2. **Standard Correlation Headers:** Every request and response carries the `X-Request-ID` header (UUIDv4) for distributed tracing across logs, database transactions, and background workers.
 3. **Idempotency Keys:** Mutating production jobs accept an `Idempotency-Key` header to prevent duplicate GPU invocations and billing redundancy.
@@ -41,46 +42,47 @@ The MovieAIProducer API provides a deterministic, versioned RESTful interface fo
 
 ## 2. API Endpoint Matrix Summary
 
-| Method | Path | Status | Domain Module | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| **GET** | `/health` | **`[IMPLEMENTED]`** | Core System | Liveness probe returning service operational status |
-| **GET** | `/ready` | **`[IMPLEMENTED]`** | Core System | Readiness probe verifying SQLite connectivity and CAS storage |
-| **POST** | `/api/v1/auth/login` | **`[PLANNED]`** | Auth & Identity | Authenticate with credentials and receive JWT bearer tokens |
-| **POST** | `/api/v1/auth/refresh` | **`[PLANNED]`** | Auth & Identity | Rotate expired access token using valid refresh token |
-| **GET** | `/api/v1/auth/me` | **`[PLANNED]`** | Auth & Identity | Get authenticated user profile and RBAC permissions |
-| **GET** | `/api/v1/projects` | **`[PLANNED]`** | Project Management | List all film projects with pagination |
-| **POST** | `/api/v1/projects` | **`[PLANNED]`** | Project Management | Initialize new cinematic film project |
-| **GET** | `/api/v1/projects/{id}` | **`[PLANNED]`** | Project Management | Retrieve project summary, aspect ratio, and active stage |
-| **GET** | `/api/v1/projects/{id}/bible` | **`[PLANNED]`** | Master Production Bible | Retrieve active MPB and locked DNA variables |
-| **PUT** | `/api/v1/projects/{id}/bible` | **`[PLANNED]`** | Master Production Bible | Update MPB creative variables (#Style, #Light, #Env) |
-| **POST** | `/api/v1/projects/{id}/bible/lock` | **`[PLANNED]`** | Master Production Bible | Lock MPB version, making DNA immutable for generation |
-| **GET** | `/api/v1/projects/{id}/scenes` | **`[PLANNED]`** | Story & Screenplay | Retrieve 50-scene blueprint organized by 4 Acts |
-| **POST** | `/api/v1/projects/{id}/scenes` | **`[PLANNED]`** | Story & Screenplay | Batch generate or create 50 scenes |
-| **GET** | `/api/v1/scenes/{id}` | **`[PLANNED]`** | Story & Screenplay | Retrieve scene narrative goal, slugline, and dialogue |
-| **POST** | `/api/v1/scenes/{id}/calibrate-dialogue`| **`[PLANNED]`** | Story & Screenplay | Calibrate dialogue lines to 5s limit and J/L cuts |
-| **GET** | `/api/v1/projects/{id}/characters` | **`[PLANNED]`** | Character & Voice DNA | List registered characters and face embeddings |
-| **POST** | `/api/v1/characters/{id}/states` | **`[PLANNED]`** | Character & Voice DNA | Register character evolution state (#State 01-05) |
-| **POST** | `/api/v1/characters/{id}/voice-dna` | **`[PLANNED]`** | Character & Voice DNA | Register reference WAV audio for GPT-SoVITS cloning |
-| **GET** | `/api/v1/scenes/{id}/shots` | **`[PLANNED]`** | Cinematography Matrix | List shots for a specific scene |
-| **POST** | `/api/v1/scenes/{id}/shots` | **`[PLANNED]`** | Cinematography Matrix | Add shot with #Cam, #Lens, #Comp, #Light, #Act codes |
-| **POST** | `/api/v1/shots/{id}/compile-prompt` | **`[PLANNED]`** | Prompt Compilation | Transpile DNA & camera matrices into engine prompt |
-| **POST** | `/api/v1/shots/{id}/generate` | **`[PLANNED]`** | AI Production Engine | Submit video generation job to ComfyUI/Kling/Veo |
-| **POST** | `/api/v1/shots/{id}/generate-voice` | **`[PLANNED]`** | AI Production Engine | Submit dialogue TTS job to GPT-SoVITS/ElevenLabs |
-| **GET** | `/api/v1/jobs/{id}` | **`[PLANNED]`** | AI Production Engine | Poll asynchronous job progress and status |
-| **POST** | `/api/v1/jobs/{id}/cancel` | **`[PLANNED]`** | AI Production Engine | Abort running generation job |
-| **POST** | `/api/v1/shots/{id}/qc/run` | **`[PLANNED]`** | Quality Control Engine | Execute automated CLIP, aesthetic, and SNR checks |
-| **GET** | `/api/v1/shots/{id}/qc/report` | **`[PLANNED]`** | Quality Control Engine | Retrieve automated QC scorecard and defect log |
-| **POST** | `/api/v1/shots/{id}/approve` | **`[PLANNED]`** | Quality Control Engine | Showrunner sign-off locking shot into master cut |
-| **POST** | `/api/v1/assets/upload` | **`[PLANNED]`** | Asset Storage (CAS) | Upload reference image/audio to content-addressed store |
-| **GET** | `/api/v1/assets/{id}` | **`[PLANNED]`** | Asset Storage (CAS) | Retrieve asset metadata and SHA-256 checksum |
-| **GET** | `/api/v1/assets/{id}/stream` | **`[PLANNED]`** | Asset Storage (CAS) | HTTP range video streaming for dailies player |
-| **WS** | `/api/v1/ws/projects/{id}/events` | **`[PLANNED]`** | Real-Time Events | WebSocket feed for job progress and live QC alerts |
+| Method   | Path                                     | Status              | Domain Module           | Description                                                   |
+| :------- | :--------------------------------------- | :------------------ | :---------------------- | :------------------------------------------------------------ |
+| **GET**  | `/health`                                | **`[IMPLEMENTED]`** | Core System             | Liveness probe returning service operational status           |
+| **GET**  | `/ready`                                 | **`[IMPLEMENTED]`** | Core System             | Readiness probe verifying SQLite connectivity and CAS storage |
+| **POST** | `/api/v1/auth/login`                     | **`[PLANNED]`**     | Auth & Identity         | Authenticate with credentials and receive JWT bearer tokens   |
+| **POST** | `/api/v1/auth/refresh`                   | **`[PLANNED]`**     | Auth & Identity         | Rotate expired access token using valid refresh token         |
+| **GET**  | `/api/v1/auth/me`                        | **`[PLANNED]`**     | Auth & Identity         | Get authenticated user profile and RBAC permissions           |
+| **GET**  | `/api/v1/projects`                       | **`[PLANNED]`**     | Project Management      | List all film projects with pagination                        |
+| **POST** | `/api/v1/projects`                       | **`[PLANNED]`**     | Project Management      | Initialize new cinematic film project                         |
+| **GET**  | `/api/v1/projects/{id}`                  | **`[PLANNED]`**     | Project Management      | Retrieve project summary, aspect ratio, and active stage      |
+| **GET**  | `/api/v1/projects/{id}/bible`            | **`[PLANNED]`**     | Master Production Bible | Retrieve active MPB and locked DNA variables                  |
+| **PUT**  | `/api/v1/projects/{id}/bible`            | **`[PLANNED]`**     | Master Production Bible | Update MPB creative variables (#Style, #Light, #Env)          |
+| **POST** | `/api/v1/projects/{id}/bible/lock`       | **`[PLANNED]`**     | Master Production Bible | Lock MPB version, making DNA immutable for generation         |
+| **GET**  | `/api/v1/projects/{id}/scenes`           | **`[PLANNED]`**     | Story & Screenplay      | Retrieve 50-scene blueprint organized by 4 Acts               |
+| **POST** | `/api/v1/projects/{id}/scenes`           | **`[PLANNED]`**     | Story & Screenplay      | Batch generate or create 50 scenes                            |
+| **GET**  | `/api/v1/scenes/{id}`                    | **`[PLANNED]`**     | Story & Screenplay      | Retrieve scene narrative goal, slugline, and dialogue         |
+| **POST** | `/api/v1/scenes/{id}/calibrate-dialogue` | **`[PLANNED]`**     | Story & Screenplay      | Calibrate dialogue lines to 5s limit and J/L cuts             |
+| **GET**  | `/api/v1/projects/{id}/characters`       | **`[PLANNED]`**     | Character & Voice DNA   | List registered characters and face embeddings                |
+| **POST** | `/api/v1/characters/{id}/states`         | **`[PLANNED]`**     | Character & Voice DNA   | Register character evolution state (#State 01-05)             |
+| **POST** | `/api/v1/characters/{id}/voice-dna`      | **`[PLANNED]`**     | Character & Voice DNA   | Register reference WAV audio for GPT-SoVITS cloning           |
+| **GET**  | `/api/v1/scenes/{id}/shots`              | **`[PLANNED]`**     | Cinematography Matrix   | List shots for a specific scene                               |
+| **POST** | `/api/v1/scenes/{id}/shots`              | **`[PLANNED]`**     | Cinematography Matrix   | Add shot with #Cam, #Lens, #Comp, #Light, #Act codes          |
+| **POST** | `/api/v1/shots/{id}/compile-prompt`      | **`[PLANNED]`**     | Prompt Compilation      | Transpile DNA & camera matrices into engine prompt            |
+| **POST** | `/api/v1/shots/{id}/generate`            | **`[PLANNED]`**     | AI Production Engine    | Submit video generation job to ComfyUI/Kling/Veo              |
+| **POST** | `/api/v1/shots/{id}/generate-voice`      | **`[PLANNED]`**     | AI Production Engine    | Submit dialogue TTS job to GPT-SoVITS/ElevenLabs              |
+| **GET**  | `/api/v1/jobs/{id}`                      | **`[PLANNED]`**     | AI Production Engine    | Poll asynchronous job progress and status                     |
+| **POST** | `/api/v1/jobs/{id}/cancel`               | **`[PLANNED]`**     | AI Production Engine    | Abort running generation job                                  |
+| **POST** | `/api/v1/shots/{id}/qc/run`              | **`[PLANNED]`**     | Quality Control Engine  | Execute automated CLIP, aesthetic, and SNR checks             |
+| **GET**  | `/api/v1/shots/{id}/qc/report`           | **`[PLANNED]`**     | Quality Control Engine  | Retrieve automated QC scorecard and defect log                |
+| **POST** | `/api/v1/shots/{id}/approve`             | **`[PLANNED]`**     | Quality Control Engine  | Showrunner sign-off locking shot into master cut              |
+| **POST** | `/api/v1/assets/upload`                  | **`[PLANNED]`**     | Asset Storage (CAS)     | Upload reference image/audio to content-addressed store       |
+| **GET**  | `/api/v1/assets/{id}`                    | **`[PLANNED]`**     | Asset Storage (CAS)     | Retrieve asset metadata and SHA-256 checksum                  |
+| **GET**  | `/api/v1/assets/{id}/stream`             | **`[PLANNED]`**     | Asset Storage (CAS)     | HTTP range video streaming for dailies player                 |
+| **WS**   | `/api/v1/ws/projects/{id}/events`        | **`[PLANNED]`**     | Real-Time Events        | WebSocket feed for job progress and live QC alerts            |
 
 ---
 
 ## 3. Implemented Endpoints Specification `[IMPLEMENTED]`
 
 ### 3.1 Liveness Probe
+
 - **Endpoint:** `GET /health`
 - **Status:** **`[IMPLEMENTED]`**
 - **File Reference:** `backend/app/api/health.py`
@@ -88,6 +90,7 @@ The MovieAIProducer API provides a deterministic, versioned RESTful interface fo
 - **Response Headers:** `X-Request-ID: <uuid4>`
 
 #### Response (200 OK):
+
 ```json
 {
   "status": "alive"
@@ -97,6 +100,7 @@ The MovieAIProducer API provides a deterministic, versioned RESTful interface fo
 ---
 
 ### 3.2 Readiness Probe
+
 - **Endpoint:** `GET /ready`
 - **Status:** **`[IMPLEMENTED]`**
 - **File Reference:** `backend/app/api/health.py`
@@ -104,6 +108,7 @@ The MovieAIProducer API provides a deterministic, versioned RESTful interface fo
 - **Logic:** Performs `SELECT 1` on the active SQLAlchemy engine and verifies that `settings.asset_storage_path` exists as a valid directory.
 
 #### Response (200 OK - Healthy):
+
 ```json
 {
   "status": "ready",
@@ -115,6 +120,7 @@ The MovieAIProducer API provides a deterministic, versioned RESTful interface fo
 ```
 
 #### Response (503 Service Unavailable - Degraded):
+
 ```json
 {
   "status": "not_ready",
@@ -130,11 +136,13 @@ The MovieAIProducer API provides a deterministic, versioned RESTful interface fo
 ## 4. Planned Core Endpoints Specification `[PLANNED]`
 
 ### 4.1 Project Creation
+
 - **Endpoint:** `POST /api/v1/projects`
 - **Status:** **`[PLANNED]`**
 - **Authentication:** Bearer Token (Role: Showrunner)
 
 #### Request Body:
+
 ```json
 {
   "title": "Chronicles of Nusantara 2099",
@@ -148,6 +156,7 @@ The MovieAIProducer API provides a deterministic, versioned RESTful interface fo
 ```
 
 #### Response (201 Created):
+
 ```json
 {
   "data": {
@@ -166,12 +175,14 @@ The MovieAIProducer API provides a deterministic, versioned RESTful interface fo
 ---
 
 ### 4.2 Master Production Bible (MPB) Locking
+
 - **Endpoint:** `POST /api/v1/projects/{project_id}/bible/lock`
 - **Status:** **`[PLANNED]`**
 - **Authentication:** Bearer Token (Role: Showrunner)
 - **Purpose:** Freezes all creative parameters from Steps 1–6 into an immutable baseline.
 
 #### Request Body:
+
 ```json
 {
   "approval_notes": "Character DNA and #Style 08 locked. Approved by Showrunner for 50-scene generation.",
@@ -180,6 +191,7 @@ The MovieAIProducer API provides a deterministic, versioned RESTful interface fo
 ```
 
 #### Response (200 OK):
+
 ```json
 {
   "data": {
@@ -201,12 +213,14 @@ The MovieAIProducer API provides a deterministic, versioned RESTful interface fo
 ---
 
 ### 4.3 Dialogue Pacing Calibration
+
 - **Endpoint:** `POST /api/v1/scenes/{scene_id}/calibrate-dialogue`
 - **Status:** **`[PLANNED]`**
 - **Authentication:** Bearer Token (Role: Director / Writer)
 - **Purpose:** Automatically validates dialogue length against the 5.0-second generative limit and calculates J/L audio transitions.
 
 #### Request Body:
+
 ```json
 {
   "target_language": "id-ID",
@@ -215,6 +229,7 @@ The MovieAIProducer API provides a deterministic, versioned RESTful interface fo
 ```
 
 #### Response (200 OK):
+
 ```json
 {
   "data": {
@@ -239,12 +254,14 @@ The MovieAIProducer API provides a deterministic, versioned RESTful interface fo
 ---
 
 ### 4.4 Shot Video Generation Dispatch
+
 - **Endpoint:** `POST /api/v1/shots/{shot_id}/generate`
 - **Status:** **`[PLANNED]`**
 - **Authentication:** Bearer Token (Role: Cinematographer / Director)
 - **Headers:** `Idempotency-Key: <unique-client-token>`
 
 #### Request Body:
+
 ```json
 {
   "provider_target": "comfyui_local",
@@ -259,6 +276,7 @@ The MovieAIProducer API provides a deterministic, versioned RESTful interface fo
 ```
 
 #### Response (202 Accepted):
+
 ```json
 {
   "data": {
@@ -276,11 +294,13 @@ The MovieAIProducer API provides a deterministic, versioned RESTful interface fo
 ---
 
 ### 4.5 Asynchronous Job Polling
+
 - **Endpoint:** `GET /api/v1/jobs/{job_id}`
 - **Status:** **`[PLANNED]`**
 - **Authentication:** Bearer Token
 
 #### Response (200 OK - In Progress):
+
 ```json
 {
   "data": {
@@ -297,6 +317,7 @@ The MovieAIProducer API provides a deterministic, versioned RESTful interface fo
 ```
 
 #### Response (200 OK - Completed):
+
 ```json
 {
   "data": {
@@ -315,11 +336,13 @@ The MovieAIProducer API provides a deterministic, versioned RESTful interface fo
 ---
 
 ### 4.6 Automated Quality Control Report
+
 - **Endpoint:** `GET /api/v1/shots/{shot_id}/qc/report`
 - **Status:** **`[PLANNED]`**
 - **Authentication:** Bearer Token
 
 #### Response (200 OK):
+
 ```json
 {
   "data": {

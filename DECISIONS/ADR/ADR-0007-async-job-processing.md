@@ -14,24 +14,25 @@ superseded_by: []
 
 # ADR-0007: Async Job Processing
 
-| Attribute | Specification |
-| :--- | :--- |
-| **ADR ID** | ADR-0007 |
-| **Title** | Async Job Processing: Persistent Distributed Task Queues & Event-Driven Workers |
-| **Status** | ACCEPTED |
-| **Date** | 2026-11-19 |
-| **Decision Owners** | Product Architect & Core Infrastructure Team |
-| **Decision Scope** | Background task execution, asynchronous AI generation, job queuing, and retry policies |
-| **Version** | 1.2 |
-| **Canonical Source** | `DECISIONS/ADR/ADR-0007-async-job-processing.md` |
-| **Supersedes** | None |
-| **Superseded By** | None |
+| Attribute            | Specification                                                                          |
+| :------------------- | :------------------------------------------------------------------------------------- |
+| **ADR ID**           | ADR-0007                                                                               |
+| **Title**            | Async Job Processing: Persistent Distributed Task Queues & Event-Driven Workers        |
+| **Status**           | ACCEPTED                                                                               |
+| **Date**             | 2026-11-19                                                                             |
+| **Decision Owners**  | Product Architect & Core Infrastructure Team                                           |
+| **Decision Scope**   | Background task execution, asynchronous AI generation, job queuing, and retry policies |
+| **Version**          | 1.2                                                                                    |
+| **Canonical Source** | `DECISIONS/ADR/ADR-0007-async-job-processing.md`                                       |
+| **Supersedes**       | None                                                                                   |
+| **Superseded By**    | None                                                                                   |
 
 ---
 
 ## 1. Context
 
 MovieAIProducer executes long-running computational workloads that cannot and must not block standard synchronous HTTP request/response lifecycles:
+
 - **Screenplay Analysis & Scene Breakdown**: Multi-turn LLM reasoning (15–60s).
 - **High-Resolution Concept & Storyboard Generation**: Diffusion models on GPU clusters (10–45s).
 - **AI Video Generation**: Multi-second shot rendering on ComfyUI / Runway / Kling (30s–5m).
@@ -46,6 +47,7 @@ Certain external providers return results via asynchronous webhook callbacks or 
 ## 2. Problem Statement
 
 Without a persistent, structured job processing architecture, the system risks:
+
 1. HTTP gateway timeouts (504 Gateway Timeout) on video and audio generation requests.
 2. Severely degraded API responsiveness and thread pool exhaustion.
 3. Lost jobs and orphaned state during server restarts or worker crashes.
@@ -64,7 +66,7 @@ Adopt a **Persistent Asynchronous Job Processing Architecture** utilizing databa
    - **Local Development / MVP**: In-memory asynchronous event bus (`backend/app/infrastructure/common/event_bus.py`) with `asyncio` background tasks.
    - **Production / Dedicated Workers**: Distributed message broker (Redis / Celery / ARQ) executing independent worker processes across GPU/CPU nodes.
 3. **Idempotency Guarantee**: Every job payload carries an `idempotency_key` based on the immutable MPB snapshot hash, shot ID, and model seed. Duplicate requests return the existing active job rather than dispatching a duplicate render.
-4. **State Machine Conformance**: All job transitions strictly adhere to the canonical matrix defined in [CDA-0003](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0003-canonical-lifecycle-state-transition-matrix.md).
+4. **State Machine Conformance**: All job transitions strictly adhere to the canonical matrix defined in [CDA-0003](../CDA/CDA-0003-canonical-lifecycle-state-transition-matrix.md).
 
 ---
 
@@ -77,7 +79,7 @@ flowchart TD
         API -->|1. Validate & Create Job| UoW["Unit of Work"]
         UoW -->|2. Persist State: QUEUED| DB[("Relational Database")]
         API -->|3. Dispatch Task| Dispatcher["Event Dispatcher / Queue"]
-        API -->|4. Return 202 Accepted (job_id)| Client
+        API -->|"4. Return 202 Accepted (job_id)"| Client
     end
 
     subgraph Queue["Message Broker / Dispatcher"]
@@ -123,17 +125,17 @@ stateDiagram-v2
 
 ## 6. Job Categories & Routing Matrix
 
-| Job Category | Representative Operations | Max Execution Timeout | Retry Policy |
-| :--- | :--- | :---: | :--- |
-| **CREATIVE** | Screenplay generation, beat expansion | 120s | 2 retries (linear backoff) |
-| **IMAGE** | Character DNA turnaround, concept art | 90s | 3 retries (exponential backoff) |
-| **VIDEO** | First/last frame conditioned shot render | 600s | 1 retry (seed perturbation) |
-| **AUDIO** | Dialogue voice synthesis, sound effects | 60s | 3 retries (exponential backoff) |
-| **ANALYSIS** | Script breakdown, scene sentiment analysis | 120s | 2 retries |
-| **RENDER** | Multi-track timeline assembly, FFmpeg stitching | 900s | 1 retry (clean temporary buffer) |
-| **CONTINUITY**| Vector embedding distance, face verification | 60s | 2 retries |
-| **QC** | 4-tier automated quality gate inspection | 180s | 1 retry |
-| **EXPORT** | Master ProRes / H.264 film packaging | 1800s | 0 retries (manual inspection) |
+| Job Category   | Representative Operations                       | Max Execution Timeout | Retry Policy                     |
+| :------------- | :---------------------------------------------- | :-------------------: | :------------------------------- |
+| **CREATIVE**   | Screenplay generation, beat expansion           |         120s          | 2 retries (linear backoff)       |
+| **IMAGE**      | Character DNA turnaround, concept art           |          90s          | 3 retries (exponential backoff)  |
+| **VIDEO**      | First/last frame conditioned shot render        |         600s          | 1 retry (seed perturbation)      |
+| **AUDIO**      | Dialogue voice synthesis, sound effects         |          60s          | 3 retries (exponential backoff)  |
+| **ANALYSIS**   | Script breakdown, scene sentiment analysis      |         120s          | 2 retries                        |
+| **RENDER**     | Multi-track timeline assembly, FFmpeg stitching |         900s          | 1 retry (clean temporary buffer) |
+| **CONTINUITY** | Vector embedding distance, face verification    |          60s          | 2 retries                        |
+| **QC**         | 4-tier automated quality gate inspection        |         180s          | 1 retry                          |
+| **EXPORT**     | Master ProRes / H.264 film packaging            |         1800s         | 0 retries (manual inspection)    |
 
 ---
 
@@ -178,17 +180,17 @@ sequenceDiagram
 ## 9. Implementation Status: ACCEPTED
 
 - In-memory asynchronous event bus implemented in `backend/app/infrastructure/common/event_bus.py`.
-- Job lifecycle states aligned with [CDA-0003](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0003-canonical-lifecycle-state-transition-matrix.md).
+- Job lifecycle states aligned with [CDA-0003](../CDA/CDA-0003-canonical-lifecycle-state-transition-matrix.md).
 - Distributed queue integration (Redis/ARQ or Celery) scheduled for implementation in Phase 8 (Production Orchestration).
 
 ---
 
 ## 10. Related Documents
 
-- [ARCHITECTURE.md](file:///home/ubuntu/MovieAIProducer/ARCHITECTURE.md)
-- [ERROR_HANDLING.md](file:///home/ubuntu/MovieAIProducer/ERROR_HANDLING.md)
-- [ADR-0003: Provider Adapter System](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0003-provider-adapter-system.md)
-- [ADR-0005: Production Workflow Engine](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0005-production-workflow-engine.md)
-- [ADR-0006: Data Storage Strategy](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0006-data-storage-strategy.md)
-- [CDA-0003: Canonical Lifecycle & State Transition Matrix](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0003-canonical-lifecycle-state-transition-matrix.md)
-- [CDA-0004: Canonical Event & Integration Contract Registry](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0004-canonical-event-integration-contract-registry.md)
+- [ARCHITECTURE.md](../../ARCHITECTURE.md)
+- [ERROR_HANDLING.md](../../ERROR_HANDLING.md)
+- [ADR-0003: Provider Adapter System](ADR-0003-provider-adapter-system.md)
+- [ADR-0005: Production Workflow Engine](ADR-0005-production-workflow-engine.md)
+- [ADR-0006: Data Storage Strategy](ADR-0006-data-storage-strategy.md)
+- [CDA-0003: Canonical Lifecycle & State Transition Matrix](../CDA/CDA-0003-canonical-lifecycle-state-transition-matrix.md)
+- [CDA-0004: Canonical Event & Integration Contract Registry](../CDA/CDA-0004-canonical-event-integration-contract-registry.md)

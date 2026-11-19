@@ -14,6 +14,7 @@
 ## 1. Security Vision & Governance
 
 MovieAIProducer is a professional, studio-grade AI film production system managing intellectual property of substantial commercial and creative value:
+
 - Film screenplays, beat sheets, and confidential narrative lore.
 - Proprietary Master Production Bibles (MPB) and character facial/voice DNA embeddings.
 - High-resolution visual concept art, storyboard animatics, and generated video frames.
@@ -83,27 +84,29 @@ flowchart TD
 
 ## 3. Threat Model (STRIDE + Generative AI Vectors)
 
-| Threat Category | Specific Attack Vector | Target Impact | Mitigation Strategy | Implementation Status |
-| :--- | :--- | :--- | :--- | :--- |
-| **Spoofing** | Session token theft or replay; forged worker identities | Unauthorized film project manipulation | Short-lived RS256 JWTs (15m), secure HTTP-only SameSite cookies, mTLS for workers | **`[PLANNED]`** (ADR-0011) |
-| **Tampering** | Parameter tampering on locked MPB DNA; unauthorized prompt mutations | Narrative continuity corruption, character drift | Cryptographic version hashing, immutable DNA freeze rules (`is_locked = TRUE`) | **`[PLANNED]`** (ADR-0004) |
-| **Repudiation** | Denying approval of expensive 4K generation batches | Billing disputes, unauthorized compute costs | Immutable audit logs (`audit_logs` table) with user UUID and correlation ID | **`[PLANNED]`** (ADR-0013) |
-| **Information Disclosure** | Leakage of API keys in logs; exposure of CAS asset paths | Provider credential compromise; IP theft | Pydantic SecretStr, `structlog` zero-secret redactor, content-addressed hash storage | **`[IMPLEMENTED]`** (`backend/app/core/logging.py`) |
-| **Denial of Service** | Flooding generative video endpoints with massive prompt queues | GPU exhaustion, financial drain | Per-tenant rate limits, `Idempotency-Key` headers, worker queue depth caps | **`[PLANNED]`** (ADR-0007) |
-| **Elevation of Privilege** | Reviewer modifying master screenplay or approving MPB | Creative sabotage | Strict RBAC matrix enforced at application usecase boundary | **`[PLANNED]`** (ADR-0011) |
-| **Prompt Injection** | User-injected text instructing model to ignore cinematic bounds | System prompt leakage, off-brand offensive outputs | Strict separation of instruction delimiters (`<CINEMATIC_DNA>` tags), regex sanitization | **`[PLANNED]`** (ADR-0008) |
-| **SSRF** | External image/audio reference URLs pointing to local metadata APIs | Internal network breach (169.254.169.254) | Direct CAS uploads only; URL egress validation blocking private RFC 1918 subnets | **`[PLANNED]`** (ADR-0012) |
-| **Host Header Attack** | Spoofed HTTP Host headers poisoning password resets | Cache poisoning, redirection hijacking | Host header whitelist enforced via `TrustedHostMiddleware` | **`[IMPLEMENTED]`** (`backend/app/main.py`) |
+| Threat Category            | Specific Attack Vector                                               | Target Impact                                      | Mitigation Strategy                                                                      | Implementation Status                               |
+| :------------------------- | :------------------------------------------------------------------- | :------------------------------------------------- | :--------------------------------------------------------------------------------------- | :-------------------------------------------------- |
+| **Spoofing**               | Session token theft or replay; forged worker identities              | Unauthorized film project manipulation             | Short-lived RS256 JWTs (15m), secure HTTP-only SameSite cookies, mTLS for workers        | **`[PLANNED]`** (ADR-0011)                          |
+| **Tampering**              | Parameter tampering on locked MPB DNA; unauthorized prompt mutations | Narrative continuity corruption, character drift   | Cryptographic version hashing, immutable DNA freeze rules (`is_locked = TRUE`)           | **`[PLANNED]`** (ADR-0004)                          |
+| **Repudiation**            | Denying approval of expensive 4K generation batches                  | Billing disputes, unauthorized compute costs       | Immutable audit logs (`audit_logs` table) with user UUID and correlation ID              | **`[PLANNED]`** (ADR-0013)                          |
+| **Information Disclosure** | Leakage of API keys in logs; exposure of CAS asset paths             | Provider credential compromise; IP theft           | Pydantic SecretStr, `structlog` zero-secret redactor, content-addressed hash storage     | **`[IMPLEMENTED]`** (`backend/app/core/logging.py`) |
+| **Denial of Service**      | Flooding generative video endpoints with massive prompt queues       | GPU exhaustion, financial drain                    | Per-tenant rate limits, `Idempotency-Key` headers, worker queue depth caps               | **`[PLANNED]`** (ADR-0007)                          |
+| **Elevation of Privilege** | Reviewer modifying master screenplay or approving MPB                | Creative sabotage                                  | Strict RBAC matrix enforced at application usecase boundary                              | **`[PLANNED]`** (ADR-0011)                          |
+| **Prompt Injection**       | User-injected text instructing model to ignore cinematic bounds      | System prompt leakage, off-brand offensive outputs | Strict separation of instruction delimiters (`<CINEMATIC_DNA>` tags), regex sanitization | **`[PLANNED]`** (ADR-0008)                          |
+| **SSRF**                   | External image/audio reference URLs pointing to local metadata APIs  | Internal network breach (169.254.169.254)          | Direct CAS uploads only; URL egress validation blocking private RFC 1918 subnets         | **`[PLANNED]`** (ADR-0012)                          |
+| **Host Header Attack**     | Spoofed HTTP Host headers poisoning password resets                  | Cache poisoning, redirection hijacking             | Host header whitelist enforced via `TrustedHostMiddleware`                               | **`[IMPLEMENTED]`** (`backend/app/main.py`)         |
 
 ---
 
 ## 4. Authentication Architecture `[IMPLEMENTED / PLANNED]`
 
 ### 4.1 Implemented Presentation Defense `[IMPLEMENTED]`
+
 - **Host Whitelisting:** `TrustedHostMiddleware` in `backend/app/main.py` restricts access to `settings.allowed_host_list` (`localhost`, `127.0.0.1`, `testserver`, `producer.apologets.com`).
 - **Distributed Request Tracing:** `RequestIDMiddleware` in `backend/app/core/middleware.py` attaches an immutable `X-Request-ID` to track every authenticated interaction.
 
 ### 4.2 Planned Identity & Session Management `[PLANNED]`
+
 - **Password Storage:** Passwords hashed with **Argon2id** (memory: 64MB, iterations: 3, parallelism: 4), with fallback to BCrypt (cost: 12).
 - **Token Specifications:**
   - **Access Token:** Asymmetric RS256 or Ed25519 JWT with a 15-minute Time-to-Live (TTL).
@@ -116,20 +119,21 @@ flowchart TD
 
 MovieAIProducer defines five distinct studio roles reflecting real Hollywood production team hierarchies:
 
-| Operation / Scope | Showrunner (Owner) | Director | Cinematographer | Editor | Reviewer / Guest |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **Project Creation & Deletion** | **Yes** | No | No | No | No |
-| **Edit Master Production Bible** | **Yes** | **Yes** | No | No | No |
-| **Lock / Freeze Creative DNA** | **Yes** | No | No | No | No |
-| **Edit 50-Scene Screenplay** | **Yes** | **Yes** | No | No | No |
-| **Configure Camera & Light Matrix**| **Yes** | **Yes** | **Yes** | No | No |
-| **Submit Video/Voice Generation** | **Yes** | **Yes** | **Yes** | No | No |
-| **Execute Automated QC** | **Yes** | **Yes** | **Yes** | **Yes** | No |
-| **Final Shot Approval & Cut** | **Yes** | **Yes** | No | No | No |
-| **View Dailies & QC Scorecard** | **Yes** | **Yes** | **Yes** | **Yes** | **Yes** |
-| **Manage Billing & API Keys** | **Yes** | No | No | No | No |
+| Operation / Scope                   | Showrunner (Owner) | Director | Cinematographer | Editor  | Reviewer / Guest |
+| :---------------------------------- | :----------------: | :------: | :-------------: | :-----: | :--------------: |
+| **Project Creation & Deletion**     |      **Yes**       |    No    |       No        |   No    |        No        |
+| **Edit Master Production Bible**    |      **Yes**       | **Yes**  |       No        |   No    |        No        |
+| **Lock / Freeze Creative DNA**      |      **Yes**       |    No    |       No        |   No    |        No        |
+| **Edit 50-Scene Screenplay**        |      **Yes**       | **Yes**  |       No        |   No    |        No        |
+| **Configure Camera & Light Matrix** |      **Yes**       | **Yes**  |     **Yes**     |   No    |        No        |
+| **Submit Video/Voice Generation**   |      **Yes**       | **Yes**  |     **Yes**     |   No    |        No        |
+| **Execute Automated QC**            |      **Yes**       | **Yes**  |     **Yes**     | **Yes** |        No        |
+| **Final Shot Approval & Cut**       |      **Yes**       | **Yes**  |       No        |   No    |        No        |
+| **View Dailies & QC Scorecard**     |      **Yes**       | **Yes**  |     **Yes**     | **Yes** |     **Yes**      |
+| **Manage Billing & API Keys**       |      **Yes**       |    No    |       No        |   No    |        No        |
 
 ### Object-Level Tenant Isolation
+
 Every query in the application layer filters explicitly by `project_id`. A user authenticated as Director in Project A has zero read or write authority over Project B.
 
 ---
@@ -137,13 +141,16 @@ Every query in the application layer filters explicitly by `project_id`. A user 
 ## 6. Generative AI Security & Ethical Protections
 
 ### 6.1 Prompt Injection Defense Pipeline
+
 1. **Structural Delimiter Isolation:** Prompts sent to LLM compilers (Claude, Gemini, GPT-4o) wrap narrative screenplay inputs inside rigorous XML tags (`<SCREENPLAY_BEAT>...</SCREENPLAY_BEAT>`).
 2. **Negative Constraint Armor:** Compiler automatically appends defensive safety and visual negative tokens:
    `ugly, deformed, mutated limbs, bad anatomy, blurry, watermarks, text overlay, offensive imagery, low resolution`.
-3. **Instruction Disregard Guard:** Compiler rejects raw inputs containing meta-prompts (e.g. *"ignore previous instructions"*, *"system prompt reveal"*).
+3. **Instruction Disregard Guard:** Compiler rejects raw inputs containing meta-prompts (e.g. _"ignore previous instructions"_, _"system prompt reveal"_).
 
 ### 6.2 Voice Cloning Consent & Deepfake Ethics
+
 In accordance with AI safety standards, zero-shot voice cloning (GPT-SoVITS / ElevenLabs) enforces:
+
 1. **Explicit Voice Actor Consent Manifest:** Before reference audio WAV is ingested into CAS, a cryptographically signed consent record must be registered.
 2. **Watermarking:** Synthesized voice audio clips embed an imperceptible high-frequency acoustic watermark identifying MovieAIProducer synthesis.
 
@@ -152,6 +159,7 @@ In accordance with AI safety standards, zero-shot voice cloning (GPT-SoVITS / El
 ## 7. Asset Storage Security & Content-Addressable Integrity `[IMPLEMENTED]`
 
 Binary media files (images, audio, video) are handled via the content-addressed storage architecture (ADR-0012):
+
 1. **SHA-256 Storage Keys:** Files are keyed by their SHA-256 hash (`./data/assets/{hash[0:2]}/{hash[2:4]}/{hash}.{ext}`). Any file tampering breaks checksum verification.
 2. **Direct CAS Path Isolation:** The web presentation layer never serves raw filesystem paths. Assets are served through authenticated streaming handlers (`/api/v1/assets/{id}/stream`) with MIME-type verification.
 3. **Upload File Validation:** Uploaded character references undergo magic-number byte inspection (rejecting executables disguised as PNG/MP4) and dimension sanity checks (maximum 20MB for images, 100MB for audio references).

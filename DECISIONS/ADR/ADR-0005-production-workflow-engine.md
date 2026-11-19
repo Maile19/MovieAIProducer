@@ -14,18 +14,18 @@ superseded_by: []
 
 # ADR-0005: Production Workflow Engine
 
-| Attribute | Specification |
-| :--- | :--- |
-| **ADR ID** | ADR-0005 |
-| **Title** | Production Workflow Engine: Directed Acyclic Graph (DAG) & State Machine |
-| **Status** | ACCEPTED |
-| **Date** | 2026-11-19 |
-| **Decision Owners** | Project Architecture & Workflow Orchestration Team |
-| **Decision Scope** | Production lifecycle orchestration and execution management |
-| **Version** | 1.2 |
-| **Canonical Source** | `DECISIONS/ADR/ADR-0005-production-workflow-engine.md` |
-| **Supersedes** | None |
-| **Superseded By** | None |
+| Attribute            | Specification                                                            |
+| :------------------- | :----------------------------------------------------------------------- |
+| **ADR ID**           | ADR-0005                                                                 |
+| **Title**            | Production Workflow Engine: Directed Acyclic Graph (DAG) & State Machine |
+| **Status**           | ACCEPTED                                                                 |
+| **Date**             | 2026-11-19                                                               |
+| **Decision Owners**  | Project Architecture & Workflow Orchestration Team                       |
+| **Decision Scope**   | Production lifecycle orchestration and execution management              |
+| **Version**          | 1.2                                                                      |
+| **Canonical Source** | `DECISIONS/ADR/ADR-0005-production-workflow-engine.md`                   |
+| **Supersedes**       | None                                                                     |
+| **Superseded By**    | None                                                                     |
 
 ---
 
@@ -57,13 +57,14 @@ These stages involve complex dependencies: some are sequential, while others ope
 ## 2. Problem Statement
 
 How should MovieAIProducer coordinate multi-level production workflows while guaranteeing:
+
 1. Deterministic dependency resolution across projects, stages, scenes, shots, and tasks.
 2. Safe parallel execution of independent scenes.
 3. Rigid human approval gates between critical creative milestones.
 4. Transparent allocation of tasks between autonomous AI agents and human creators.
 5. Resilient recovery from interrupted or failed long-running generation jobs.
 6. Cascade invalidation: automatically flagging downstream shots when an upstream script revision occurs.
-7. Strict alignment with the canonical state lifecycle matrix defined in [CDA-0003](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0003-canonical-lifecycle-state-transition-matrix.md).
+7. Strict alignment with the canonical state lifecycle matrix defined in [CDA-0003](../CDA/CDA-0003-canonical-lifecycle-state-transition-matrix.md).
 
 ---
 
@@ -72,9 +73,9 @@ How should MovieAIProducer coordinate multi-level production workflows while gua
 Adopt a **Persistent, Dependency-Aware Production Workflow Engine** utilizing Directed Acyclic Graphs (DAG), explicit state machines, and event-driven coordination.
 
 1. **Hierarchical Orchestration**: The engine manages workflows at four nested granularities: Project $\rightarrow$ Stage $\rightarrow$ Scene $\rightarrow$ Shot $\rightarrow$ Task.
-2. **Deterministic State Transitions**: State transitions are strictly validated against [CDA-0003](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0003-canonical-lifecycle-state-transition-matrix.md). Unregistered or illegal transitions throw `InvalidStateTransitionException`.
+2. **Deterministic State Transitions**: State transitions are strictly validated against [CDA-0003](../CDA/CDA-0003-canonical-lifecycle-state-transition-matrix.md). Unregistered or illegal transitions throw `InvalidStateTransitionException`.
 3. **Approval Gate Decoupling**: AI agents may mark tasks as `AWAITING_APPROVAL`, but stage progression to `COMPLETED` requires human signoff or explicit policy-based gate passage.
-4. **Engine Independence**: Workflow scheduling is decoupled from external generation tools; task execution delegates to the Provider Adapter System ([ADR-0003](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0003-provider-adapter-system.md)) via async background jobs ([ADR-0007](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0007-async-job-processing.md)).
+4. **Engine Independence**: Workflow scheduling is decoupled from external generation tools; task execution delegates to the Provider Adapter System ([ADR-0003](ADR-0003-provider-adapter-system.md)) via async background jobs ([ADR-0007](ADR-0007-async-job-processing.md)).
 
 ---
 
@@ -114,7 +115,7 @@ flowchart TD
 
 ## 5. Workflow State Machine Lifecycle
 
-Conforming to [CDA-0003](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0003-canonical-lifecycle-state-transition-matrix.md), every stage and task adheres to the following deterministic lifecycle:
+Conforming to [CDA-0003](../CDA/CDA-0003-canonical-lifecycle-state-transition-matrix.md), every stage and task adheres to the following deterministic lifecycle:
 
 ```mermaid
 stateDiagram-v2
@@ -133,51 +134,53 @@ stateDiagram-v2
 
 ### State Definitions
 
-| State | Semantic Meaning | Allowed Next States |
-| :--- | :--- | :--- |
-| **NOT_STARTED** | Prerequisite tasks or upstream stages are incomplete | `READY`, `CANCELLED` |
-| **READY** | All dependency constraints satisfied; ready to run | `IN_PROGRESS`, `CANCELLED` |
-| **IN_PROGRESS** | Actively processing in worker, agent, or provider | `PAUSED`, `AWAITING_APPROVAL`, `COMPLETED`, `FAILED`, `CANCELLED` |
-| **PAUSED** | Temporarily halted without loss of state | `IN_PROGRESS`, `CANCELLED` |
-| **AWAITING_APPROVAL** | Generated assets or specs waiting for human signoff | `COMPLETED`, `IN_PROGRESS` (rework), `REJECTED` |
-| **COMPLETED** | Verification passed and signoff granted | `ARCHIVED`, `SUPERSEDED` |
-| **FAILED** | Terminal execution failure; awaiting intervention | `READY` (retry), `CANCELLED` |
-| **CANCELLED** | Cancelled by user or pipeline abort | `ARCHIVED` |
+| State                 | Semantic Meaning                                     | Allowed Next States                                               |
+| :-------------------- | :--------------------------------------------------- | :---------------------------------------------------------------- |
+| **NOT_STARTED**       | Prerequisite tasks or upstream stages are incomplete | `READY`, `CANCELLED`                                              |
+| **READY**             | All dependency constraints satisfied; ready to run   | `IN_PROGRESS`, `CANCELLED`                                        |
+| **IN_PROGRESS**       | Actively processing in worker, agent, or provider    | `PAUSED`, `AWAITING_APPROVAL`, `COMPLETED`, `FAILED`, `CANCELLED` |
+| **PAUSED**            | Temporarily halted without loss of state             | `IN_PROGRESS`, `CANCELLED`                                        |
+| **AWAITING_APPROVAL** | Generated assets or specs waiting for human signoff  | `COMPLETED`, `IN_PROGRESS` (rework), `REJECTED`                   |
+| **COMPLETED**         | Verification passed and signoff granted              | `ARCHIVED`, `SUPERSEDED`                                          |
+| **FAILED**            | Terminal execution failure; awaiting intervention    | `READY` (retry), `CANCELLED`                                      |
+| **CANCELLED**         | Cancelled by user or pipeline abort                  | `ARCHIVED`                                                        |
 
 ---
 
 ## 6. Hollywood 16 Operational Stages Matrix
 
-| Stage | Name | Key Inputs | Primary Deliverables | Human Signoff Required? |
-| :---: | :--- | :--- | :--- | :---: |
-| **1** | Creative Brief & Film Strategy | Pitch, Market Data | Creative brief manifest, premise, target audience | Yes (Producer) |
-| **2** | Visual Concept & Style Bible | Creative brief | #Style 01-18 visual codes, moodboards, color palette | Yes (Art Director) |
-| **3** | Story Architecture & Screenplay | Beat sheet | Screenplay draft, sluglines, dialogue, scene beats | Yes (Lead Writer) |
-| **4** | Script Breakdown & Feasibility | Approved screenplay | Scene breakdown sheets, budget & token estimates | Yes (Producer) |
-| **5** | Character Casting & Bible | Character breakdowns | Visual DNA, portrait renders, voice models | Yes (Director) |
-| **6** | Extras, Crowd & Creature Design | Scene requirements | Secondary character specs, creature visual keys | Optional |
-| **7** | Production Design & Envs | Scene sluglines | Location architectural keys, floor plans, 3D mats | Yes (Production Designer) |
-| **8** | Wardrobe, Makeup & Props | Character states | Costume continuity sheets, prop models | Yes (Costume Designer) |
-| **9** | Storyboard & Animatic | Script breakdown | 2D/3D storyboard frames, timed animatic video | Yes (Director) |
-| **10** | Director's Scene Direction | Animatic, Script | Subtext notes, dramatic tempo, actor cues | Yes (Director) |
-| **11** | Cinematography & Camera | Shot list | Lens focal lengths, sensor profiles, camera paths | Yes (DP) |
-| **12** | Lighting & Atmosphere | Location layout | #Light 01-14 lighting schematics, key/fill ratios | Yes (Gaffer/DP) |
-| **13** | Performance & Dialogue | Voice models, Lines | Synthesized dialogue stems, #Act 01-24 acting passes | Yes (Sound Supervisor) |
-| **14** | Motion & Continuity Engine | Character & Env keys | Motion vectors, facial/costume continuity locks | Automated |
-| **15** | AI Production Orchestration | Compiled prompts | Raw video/image shot renders from AI engines | Automated |
-| **16** | Scene Execution, Editorial & QC | Shot renders, Audio | Conformed scene edit, 4-tier QC signoff, master export | Yes (Lead Editor / Director) |
+| Stage  | Name                            | Key Inputs           | Primary Deliverables                                   |   Human Signoff Required?    |
+| :----: | :------------------------------ | :------------------- | :----------------------------------------------------- | :--------------------------: |
+| **1**  | Creative Brief & Film Strategy  | Pitch, Market Data   | Creative brief manifest, premise, target audience      |        Yes (Producer)        |
+| **2**  | Visual Concept & Style Bible    | Creative brief       | #Style 01-18 visual codes, moodboards, color palette   |      Yes (Art Director)      |
+| **3**  | Story Architecture & Screenplay | Beat sheet           | Screenplay draft, sluglines, dialogue, scene beats     |      Yes (Lead Writer)       |
+| **4**  | Script Breakdown & Feasibility  | Approved screenplay  | Scene breakdown sheets, budget & token estimates       |        Yes (Producer)        |
+| **5**  | Character Casting & Bible       | Character breakdowns | Visual DNA, portrait renders, voice models             |        Yes (Director)        |
+| **6**  | Extras, Crowd & Creature Design | Scene requirements   | Secondary character specs, creature visual keys        |           Optional           |
+| **7**  | Production Design & Envs        | Scene sluglines      | Location architectural keys, floor plans, 3D mats      |  Yes (Production Designer)   |
+| **8**  | Wardrobe, Makeup & Props        | Character states     | Costume continuity sheets, prop models                 |    Yes (Costume Designer)    |
+| **9**  | Storyboard & Animatic           | Script breakdown     | 2D/3D storyboard frames, timed animatic video          |        Yes (Director)        |
+| **10** | Director's Scene Direction      | Animatic, Script     | Subtext notes, dramatic tempo, actor cues              |        Yes (Director)        |
+| **11** | Cinematography & Camera         | Shot list            | Lens focal lengths, sensor profiles, camera paths      |           Yes (DP)           |
+| **12** | Lighting & Atmosphere           | Location layout      | #Light 01-14 lighting schematics, key/fill ratios      |       Yes (Gaffer/DP)        |
+| **13** | Performance & Dialogue          | Voice models, Lines  | Synthesized dialogue stems, #Act 01-24 acting passes   |    Yes (Sound Supervisor)    |
+| **14** | Motion & Continuity Engine      | Character & Env keys | Motion vectors, facial/costume continuity locks        |          Automated           |
+| **15** | AI Production Orchestration     | Compiled prompts     | Raw video/image shot renders from AI engines           |          Automated           |
+| **16** | Scene Execution, Editorial & QC | Shot renders, Audio  | Conformed scene edit, 4-tier QC signoff, master export | Yes (Lead Editor / Director) |
 
 ---
 
 ## 7. Consequences & Trade-offs
 
 ### Positive Consequences
+
 - Guarantees systematic execution of complex Hollywood-grade productions.
 - Full parallelization of scene rendering while maintaining global narrative dependencies.
 - Immediate visibility into project progress, bottlenecks, and costs.
 - Enforces strict human governance at artistic milestone gates.
 
 ### Accepted Trade-offs
+
 - Increased orchestration overhead: Task state, dependency resolution, and event logging must be persisted.
 - Strict gating prevents skipping mandatory pre-production steps without explicit managerial override.
 
@@ -185,7 +188,7 @@ stateDiagram-v2
 
 ## 8. Implementation Status: ACCEPTED
 
-- State machine transition rules codified in [CDA-0003](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0003-canonical-lifecycle-state-transition-matrix.md).
+- State machine transition rules codified in [CDA-0003](../CDA/CDA-0003-canonical-lifecycle-state-transition-matrix.md).
 - Event dispatcher foundation established in `backend/app/infrastructure/common/event_bus.py`.
 - Workflow engine aggregate models and DAG runner scheduled for implementation in Phase 2 / Phase 8.
 
@@ -193,11 +196,11 @@ stateDiagram-v2
 
 ## 9. Related Documents
 
-- [ARCHITECTURE.md](file:///home/ubuntu/MovieAIProducer/ARCHITECTURE.md)
-- [AI_PIPELINE.md](file:///home/ubuntu/MovieAIProducer/AI_PIPELINE.md)
-- [ADR-0001: Architecture Style](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0001-architecture-style.md)
-- [ADR-0004: Master Production Bible](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0004-master-production-bible.md)
-- [ADR-0007: Async Job Processing](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0007-async-job-processing.md)
-- [ADR-0010: Quality Control Engine](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0010-quality-control-engine.md)
-- [CDA-0003: Canonical Lifecycle & State Transition Matrix](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0003-canonical-lifecycle-state-transition-matrix.md)
-- [CDA-0004: Canonical Event & Integration Contract Registry](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0004-canonical-event-integration-contract-registry.md)
+- [ARCHITECTURE.md](../../ARCHITECTURE.md)
+- [AI_PIPELINE.md](../../AI_PIPELINE.md)
+- [ADR-0001: Architecture Style](ADR-0001-architecture-style.md)
+- [ADR-0004: Master Production Bible](ADR-0004-master-production-bible.md)
+- [ADR-0007: Async Job Processing](ADR-0007-async-job-processing.md)
+- [ADR-0010: Quality Control Engine](ADR-0010-quality-control-engine.md)
+- [CDA-0003: Canonical Lifecycle & State Transition Matrix](../CDA/CDA-0003-canonical-lifecycle-state-transition-matrix.md)
+- [CDA-0004: Canonical Event & Integration Contract Registry](../CDA/CDA-0004-canonical-event-integration-contract-registry.md)

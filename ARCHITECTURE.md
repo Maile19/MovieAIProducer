@@ -15,7 +15,8 @@
 MovieAIProducer is a professional, studio-grade AI film production system designed to execute a strict **12-Step Hollywood Cinematic Framework** across 50 scenes, managed through a **16-Stage Operational Lifecycle**. The system enforces architectural separation between creative intent, narrative continuity, orchestration logic, and external AI execution engines (ComfyUI, Google Veo, Kling, Runway, GPT-SoVITS, ElevenLabs).
 
 ### Core Architectural Axioms
-1. **Domain-Driven Design (DDD) & Modular Monolith:** Business rules governing the *Master Production Bible (MPB)*, Character DNA, and Scene continuity reside in a pure domain layer isolated from web frameworks and external SDKs.
+
+1. **Domain-Driven Design (DDD) & Modular Monolith:** Business rules governing the _Master Production Bible (MPB)_, Character DNA, and Scene continuity reside in a pure domain layer isolated from web frameworks and external SDKs.
 2. **Explicit Implementation Transparency:** Every subsystem, database table, service port, and API endpoint is explicitly demarcated as either **`[IMPLEMENTED]`** (verified against current codebase) or **`[PLANNED]`** (scheduled roadmap item) to prevent fictional documentation drift.
 3. **Immutability of Creative DNA:** Once visual style codes, lighting profiles, character embeddings, and camera physics are approved and locked, they become immutable constraints for downstream generative pipelines.
 4. **Provider-Agnostic Execution:** The domain and application layers communicate exclusively with abstract provider interfaces. Generative video engines (e.g. ComfyUI, Kling, Veo) and voice synthesis models (e.g. GPT-SoVITS, ElevenLabs) are hot-swappable infrastructure adapters.
@@ -122,28 +123,28 @@ flowchart TD
 
 ## 3. Technology Stack & Verification Matrix
 
-| Layer | Technology / Framework | Implementation Status | Grounded File / Reference |
-| :--- | :--- | :--- | :--- |
-| **Runtime Environment** | Python 3.11+ / 3.14 (Ubuntu Linux) | **`[IMPLEMENTED]`** | `pyproject.toml`, `.venv` |
-| **Web Framework** | FastAPI 0.115+ | **`[IMPLEMENTED]`** | `backend/app/main.py` |
-| **ASGI Server** | Uvicorn / Starlette | **`[IMPLEMENTED]`** | `backend/app/core/config.py` |
-| **Settings & Env** | Pydantic Settings (`BaseSettings`) | **`[IMPLEMENTED]`** | `backend/app/core/config.py` |
-| **Structured Logging** | `structlog` (JSON in prod, Console in dev) | **`[IMPLEMENTED]`** | `backend/app/core/logging.py` |
-| **Middleware** | `RequestIDMiddleware`, `TrustedHostMiddleware` | **`[IMPLEMENTED]`** | `backend/app/core/middleware.py` |
-| **Database ORM** | SQLAlchemy 2.0 (AsyncIO + aiosqlite / asyncpg) | **`[IMPLEMENTED]`** | `backend/app/infrastructure/database/` |
-| **Schema Migrations** | Alembic | **`[IMPLEMENTED]`** | `alembic.ini`, `migrations/versions/0001_initial_database_foundation.py` |
-| **Domain Primitives** | Base `Entity`, `AggregateRoot`, `ValueObject`, `DomainEvent` | **`[IMPLEMENTED]`** | `backend/app/domain/common/` |
-| **Application Primitives** | Base `UseCase`, `DTO`, `Port`, `UnitOfWork` | **`[IMPLEMENTED]`** | `backend/app/application/common/` |
-| **Infrastructure Repos** | `SqlAlchemyRepository`, `SqlAlchemyUnitOfWork`, `InMemoryRepository` | **`[IMPLEMENTED]`** | `backend/app/infrastructure/` |
-| **Health Monitoring** | Liveness (`/health`) and Readiness (`/ready`) | **`[IMPLEMENTED]`** | `backend/app/api/health.py` |
-| **Asset Storage (CAS)** | Filesystem content-addressed storage (`./data/assets`) | **`[IMPLEMENTED]`** | `backend/app/core/config.py`, `backend/app/main.py` |
-| **Frontend Dashboard** | Next.js 14+ / React 19, Tailwind CSS, TypeScript | **`[PLANNED]`** | Targeted at `https://producer.apologets.com` |
-| **Workflow Engine** | 16-Stage Operational Orchestrator | **`[PLANNED]`** | `DECISIONS/ADR/ADR-0005-production-workflow-engine.md` |
-| **Prompt Compiler** | 12-Step Hollywood Cinematic Template Engine | **`[PLANNED]`** | `DECISIONS/ADR/ADR-0008-prompt-compilation-engine.md` |
-| **Reference Node Gen** | ComfyUI Execution API & Websockets | **`[PLANNED]`** | `/home/ubuntu/workspace/ComfyUI` |
-| **Reference Voice Gen** | GPT-SoVITS v2 Zero-Shot Voice Synthesis | **`[PLANNED]`** | `/home/ubuntu/workspace/GPT-SoVITS` |
-| **Async Task Queue** | Redis + Celery / RQ Worker Queue | **`[PLANNED]`** | `DECISIONS/ADR/ADR-0007-async-job-processing.md` |
-| **Automated QC Engine** | CLIP / Aesthetic Score / Temporal Consistency | **`[PLANNED]`** | `DECISIONS/ADR/ADR-0010-quality-control-engine.md` |
+| Layer                      | Technology / Framework                                               | Implementation Status | Grounded File / Reference                                                |
+| :------------------------- | :------------------------------------------------------------------- | :-------------------- | :----------------------------------------------------------------------- |
+| **Runtime Environment**    | Python 3.11+ / 3.14 (Ubuntu Linux)                                   | **`[IMPLEMENTED]`**   | `pyproject.toml`, `.venv`                                                |
+| **Web Framework**          | FastAPI 0.115+                                                       | **`[IMPLEMENTED]`**   | `backend/app/main.py`                                                    |
+| **ASGI Server**            | Uvicorn / Starlette                                                  | **`[IMPLEMENTED]`**   | `backend/app/core/config.py`                                             |
+| **Settings & Env**         | Pydantic Settings (`BaseSettings`)                                   | **`[IMPLEMENTED]`**   | `backend/app/core/config.py`                                             |
+| **Structured Logging**     | `structlog` (JSON in prod, Console in dev)                           | **`[IMPLEMENTED]`**   | `backend/app/core/logging.py`                                            |
+| **Middleware**             | `RequestIDMiddleware`, `TrustedHostMiddleware`                       | **`[IMPLEMENTED]`**   | `backend/app/core/middleware.py`                                         |
+| **Database ORM**           | SQLAlchemy 2.0 (AsyncIO + aiosqlite / asyncpg)                       | **`[IMPLEMENTED]`**   | `backend/app/infrastructure/database/`                                   |
+| **Schema Migrations**      | Alembic                                                              | **`[IMPLEMENTED]`**   | `alembic.ini`, `migrations/versions/0001_initial_database_foundation.py` |
+| **Domain Primitives**      | Base `Entity`, `AggregateRoot`, `ValueObject`, `DomainEvent`         | **`[IMPLEMENTED]`**   | `backend/app/domain/common/`                                             |
+| **Application Primitives** | Base `UseCase`, `DTO`, `Port`, `UnitOfWork`                          | **`[IMPLEMENTED]`**   | `backend/app/application/common/`                                        |
+| **Infrastructure Repos**   | `SqlAlchemyRepository`, `SqlAlchemyUnitOfWork`, `InMemoryRepository` | **`[IMPLEMENTED]`**   | `backend/app/infrastructure/`                                            |
+| **Health Monitoring**      | Liveness (`/health`) and Readiness (`/ready`)                        | **`[IMPLEMENTED]`**   | `backend/app/api/health.py`                                              |
+| **Asset Storage (CAS)**    | Filesystem content-addressed storage (`./data/assets`)               | **`[IMPLEMENTED]`**   | `backend/app/core/config.py`, `backend/app/main.py`                      |
+| **Frontend Dashboard**     | Next.js 14+ / React 19, Tailwind CSS, TypeScript                     | **`[PLANNED]`**       | Targeted at `https://producer.apologets.com`                             |
+| **Workflow Engine**        | 16-Stage Operational Orchestrator                                    | **`[PLANNED]`**       | `DECISIONS/ADR/ADR-0005-production-workflow-engine.md`                   |
+| **Prompt Compiler**        | 12-Step Hollywood Cinematic Template Engine                          | **`[PLANNED]`**       | `DECISIONS/ADR/ADR-0008-prompt-compilation-engine.md`                    |
+| **Reference Node Gen**     | ComfyUI Execution API & Websockets                                   | **`[PLANNED]`**       | `/home/ubuntu/workspace/ComfyUI`                                         |
+| **Reference Voice Gen**    | GPT-SoVITS v2 Zero-Shot Voice Synthesis                              | **`[PLANNED]`**       | `/home/ubuntu/workspace/GPT-SoVITS`                                      |
+| **Async Task Queue**       | Redis + Celery / RQ Worker Queue                                     | **`[PLANNED]`**       | `DECISIONS/ADR/ADR-0007-async-job-processing.md`                         |
+| **Automated QC Engine**    | CLIP / Aesthetic Score / Temporal Consistency                        | **`[PLANNED]`**       | `DECISIONS/ADR/ADR-0010-quality-control-engine.md`                       |
 
 ---
 
@@ -151,7 +152,7 @@ flowchart TD
 
 Architectural integrity is validated by automated boundary tests (`tests/architecture/test_layer_boundaries.py`). The dependency rule strictly requires outer layers to depend on inner layers, never the reverse.
 
-```
+```text
        +-------------------------------------------------------------+
        | Presentation Layer (FastAPI Routers, Middleware, Schemas)   |
        +------------------------------+------------------------------+
@@ -173,6 +174,7 @@ Architectural integrity is validated by automated boundary tests (`tests/archite
 ```
 
 ### Layer Rules
+
 1. **Domain Layer (`backend/app/domain/`):**
    - Pure Python with zero dependencies on FastAPI, SQLAlchemy, HTTP clients, or external frameworks.
    - Contains domain invariants, business entities (`AggregateRoot`, `Entity`), value objects (`ValueObject`), and abstract repository interfaces (`Repository`).
@@ -195,11 +197,13 @@ Architectural integrity is validated by automated boundary tests (`tests/archite
 ## 5. Domain Aggregates & Invariant Management
 
 ### 5.1 Foundation Metadata Aggregate **`[IMPLEMENTED]`**
+
 - **Model:** `backend/app/infrastructure/database/models/foundation.py` (`FoundationMetadataModel`)
 - **Table:** `foundation_metadata`
 - **Purpose:** Tracks database schema initialization, runtime migration markers, and operational metadata.
 
 ### 5.2 Master Production Bible (MPB) Aggregate **`[PLANNED]`**
+
 - **Root Entity:** `MasterProductionBible`
 - **Invariants:**
   - Every project possesses exactly one active MPB.
@@ -208,6 +212,7 @@ Architectural integrity is validated by automated boundary tests (`tests/archite
   - Revisions create a branching copy with an incremented version number (`version_id`).
 
 ### 5.3 Scene & Shot Aggregate **`[PLANNED]`**
+
 - **Root Entity:** `Scene` (1 of 50 in 4-Act structure)
 - **Child Entities:** `Shot` (1 to N per scene), `DialogueLine` (with 5-second calibration)
 - **Invariants:**
@@ -248,6 +253,7 @@ sequenceDiagram
 ```
 
 ### 6.1 Reference Integration: ComfyUI Local Execution **`[PLANNED]`**
+
 - **Reference Location:** `/home/ubuntu/workspace/ComfyUI`
 - **Execution Mechanism:** Communicates via ComfyUI's REST API (`POST /prompt`) and WebSocket (`/ws?clientId=...`).
 - **Pipeline Architecture:**
@@ -256,6 +262,7 @@ sequenceDiagram
   - Monitors real-time node progress via WebSocket stream to broadcast progress percentage to the showrunner UI.
 
 ### 6.2 Reference Integration: GPT-SoVITS Voice Engine **`[PLANNED]`**
+
 - **Reference Location:** `/home/ubuntu/workspace/GPT-SoVITS`
 - **Execution Mechanism:** Communicates via FastAPI endpoints in `api_v2.py`.
 - **Pipeline Architecture:**
@@ -268,12 +275,14 @@ sequenceDiagram
 ## 7. Storage & Persistence Architecture
 
 ### 7.1 Database Persistence
+
 - **Development/Local:** SQLite with `aiosqlite` at `./data/movieai.db`.
 - **Production:** PostgreSQL via `asyncpg` targeted at `postgresql+asyncpg://...`.
 - **Constraint Conventions:** Cross-database deterministic constraint naming (`POSTGRES_SQLITE_NAMING_CONVENTIONS` in `base.py`).
 - **Data Types:** Deterministic UTC timestamps via custom `UTCDateTime` TypeDecorator enforcing timezone-aware datetime objects in SQLite and PostgreSQL.
 
 ### 7.2 Content-Addressable Asset Storage (CAS)
+
 - **Base Directory:** Configured via `settings.asset_storage_path` (defaults to `./data/assets`).
 - **Storage Strategy:** All media artifacts (character references, video renders, audio tracks, QC reports) are addressed by their SHA-256 checksum:
   `./data/assets/{sha256[0:2]}/{sha256[2:4]}/{sha256}.{ext}`
@@ -284,11 +293,13 @@ sequenceDiagram
 ## 8. Cross-Cutting Engineering Concerns
 
 ### 8.1 Observability & Telemetry **`[IMPLEMENTED]`**
+
 - Every inbound HTTP request receives a unique UUIDv4 `X-Request-ID` attached by `RequestIDMiddleware`.
 - Structured logging powered by `structlog` automatically binds `request_id`, service name, and execution context.
 - Unhandled exceptions are caught by the global handler in `main.py`, returning a sanitized JSON error payload with the correlation ID.
 
 ### 8.2 Security & Isolation **`[IMPLEMENTED / PLANNED]`**
+
 - **`[IMPLEMENTED]`:** Host header validation via `TrustedHostMiddleware` restricting access to `localhost`, `127.0.0.1`, `testserver`, and `producer.apologets.com`.
 - **`[IMPLEMENTED]`:** Secret masking in application settings via Pydantic `BaseSettings`.
 - **`[PLANNED]`:** Role-Based Access Control (RBAC) isolating Showrunners, Directors, and Reviewers.

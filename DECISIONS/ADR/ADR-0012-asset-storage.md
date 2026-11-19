@@ -14,24 +14,25 @@ superseded_by: []
 
 # ADR-0012: Asset Storage Architecture
 
-| Attribute | Specification |
-| :--- | :--- |
-| **ADR ID** | ADR-0012 |
-| **Title** | Asset Storage Architecture: Pluggable Storage Adapters & Content-Addressed Media |
-| **Status** | ACCEPTED |
-| **Date** | 2026-11-19 |
-| **Decision Owners** | Product Owner, Technical Architect & Infrastructure Owner |
-| **Decision Scope** | Binary media asset management, storage ports, lifecycle tiers, and content addressing |
-| **Version** | 1.2 |
-| **Canonical Source** | `DECISIONS/ADR/ADR-0012-asset-storage.md` |
-| **Supersedes** | None |
-| **Superseded By** | None |
+| Attribute            | Specification                                                                         |
+| :------------------- | :------------------------------------------------------------------------------------ |
+| **ADR ID**           | ADR-0012                                                                              |
+| **Title**            | Asset Storage Architecture: Pluggable Storage Adapters & Content-Addressed Media      |
+| **Status**           | ACCEPTED                                                                              |
+| **Date**             | 2026-11-19                                                                            |
+| **Decision Owners**  | Product Owner, Technical Architect & Infrastructure Owner                             |
+| **Decision Scope**   | Binary media asset management, storage ports, lifecycle tiers, and content addressing |
+| **Version**          | 1.2                                                                                   |
+| **Canonical Source** | `DECISIONS/ADR/ADR-0012-asset-storage.md`                                             |
+| **Supersedes**       | None                                                                                  |
+| **Superseded By**    | None                                                                                  |
 
 ---
 
 ## 1. Context
 
 MovieAIProducer coordinates massive volumes of multimedia assets throughout the 16-stage Hollywood film production lifecycle:
+
 - High-resolution reference moodboards and character turnaround sheets.
 - Previsualization storyboards, timed animatic MP4s, and 3D camera projections.
 - Generated raw video clips from ComfyUI, Runway, Kling, and Veo.
@@ -48,6 +49,7 @@ Treating production media as unmanaged arbitrary files on a local disk without o
 ## 2. Problem Statement
 
 How should MovieAIProducer architect its media storage subsystem to ensure:
+
 1. Complete abstraction between application business logic and the physical storage medium.
 2. Effortless zero-dependency local development (using the local filesystem) with seamless switching to cloud object storage (S3 / Cloudflare R2 / MinIO) in production.
 3. Content-addressed integrity: every asset is verified with a SHA-256 checksum to guarantee uncorrupted delivery.
@@ -98,18 +100,18 @@ flowchart TD
 
 ## 5. Canonical Asset Categories
 
-| Asset Category | Representative Files & Modalities | Storage Tier | Retention Policy |
-| :--- | :--- | :---: | :--- |
-| **REFERENCE** | Director moodboards, lighting references, style plates | Standard | Project Lifetime |
-| **CHARACTER** | Facial turnaround portraits, 512-d DNA embeddings | Hot | Project Lifetime |
-| **ENVIRONMENT**| Location concept art, 360° panoramas, HDRI maps | Standard | Project Lifetime |
-| **DESIGN** | Prop blueprints, vehicle keys, wardrobe sheets | Standard | Project Lifetime |
-| **STORYBOARD** | 2D/3D storyboard frames, animatic MP4 timelines | Hot | Project Lifetime |
-| **VIDEO** | Raw shot renders from ComfyUI / Runway / Kling | Hot | Active Production |
-| **AUDIO** | Dialogue voice stems, Foley effects, music cues | Hot | Project Lifetime |
-| **RENDER** | Multi-shot timeline conforms, color-graded scenes | Standard | Project Lifetime |
-| **QC_EVIDENCE** | Difference heatmaps, failed frame captures | Cold | 90 Days post-approval |
-| **DELIVERY** | Final master exports (ProRes 422 HQ / H.264) | Glacier / Archive | Permanent Studio Archive |
+| Asset Category  | Representative Files & Modalities                      |   Storage Tier    | Retention Policy         |
+| :-------------- | :----------------------------------------------------- | :---------------: | :----------------------- |
+| **REFERENCE**   | Director moodboards, lighting references, style plates |     Standard      | Project Lifetime         |
+| **CHARACTER**   | Facial turnaround portraits, 512-d DNA embeddings      |        Hot        | Project Lifetime         |
+| **ENVIRONMENT** | Location concept art, 360° panoramas, HDRI maps        |     Standard      | Project Lifetime         |
+| **DESIGN**      | Prop blueprints, vehicle keys, wardrobe sheets         |     Standard      | Project Lifetime         |
+| **STORYBOARD**  | 2D/3D storyboard frames, animatic MP4 timelines        |        Hot        | Project Lifetime         |
+| **VIDEO**       | Raw shot renders from ComfyUI / Runway / Kling         |        Hot        | Active Production        |
+| **AUDIO**       | Dialogue voice stems, Foley effects, music cues        |        Hot        | Project Lifetime         |
+| **RENDER**      | Multi-shot timeline conforms, color-graded scenes      |     Standard      | Project Lifetime         |
+| **QC_EVIDENCE** | Difference heatmaps, failed frame captures             |       Cold        | 90 Days post-approval    |
+| **DELIVERY**    | Final master exports (ProRes 422 HQ / H.264)           | Glacier / Archive | Permanent Studio Archive |
 
 ---
 
@@ -118,7 +120,7 @@ flowchart TD
 ```mermaid
 stateDiagram-v2
     [*] --> UPLOADING: Ingress initiated via presigned URL / API
-    UPLOADING --> PROCESSING: Upload completed; SHA-256 verified
+    UPLOADING --> PROCESSING: Upload completed and SHA-256 verified
     PROCESSING --> AVAILABLE: Transcoded, validated, and linked to MPB
     AVAILABLE --> ARCHIVED: Shifted to cold tier upon project completion
     ARCHIVED --> DELETION_PENDING: Retention window expired
@@ -132,13 +134,13 @@ stateDiagram-v2
 
 ## 7. Risks and Mitigations
 
-| Risk | Impact | Implemented Mitigation Strategy |
-| :--- | :---: | :--- |
-| **Metadata / Binary Drift** | High | Atomic database transactions update status to `AVAILABLE` only after storage write and SHA-256 match. |
-| **Storage Cost Explosion** | Medium | Automated lifecycle workers transition inactive raw takes to cold storage; deduplicate via SHA-256. |
-| **Asset Leakage / IDOR** | Critical | No public buckets. Access granted solely via short-lived signed URLs (15 min) verified by RBAC. |
-| **Broken File References** | High | Absolute URLs are forbidden in DB. Store canonical URIs (`storage://projects/{id}/...`) resolved at runtime. |
-| **Provider Lock-in** | Medium | Abstract `AssetStoragePort` isolates application code from AWS/Cloudflare proprietary APIs. |
+| Risk                        |  Impact  | Implemented Mitigation Strategy                                                                              |
+| :-------------------------- | :------: | :----------------------------------------------------------------------------------------------------------- |
+| **Metadata / Binary Drift** |   High   | Atomic database transactions update status to `AVAILABLE` only after storage write and SHA-256 match.        |
+| **Storage Cost Explosion**  |  Medium  | Automated lifecycle workers transition inactive raw takes to cold storage; deduplicate via SHA-256.          |
+| **Asset Leakage / IDOR**    | Critical | No public buckets. Access granted solely via short-lived signed URLs (15 min) verified by RBAC.              |
+| **Broken File References**  |   High   | Absolute URLs are forbidden in DB. Store canonical URIs (`storage://projects/{id}/...`) resolved at runtime. |
+| **Provider Lock-in**        |  Medium  | Abstract `AssetStoragePort` isolates application code from AWS/Cloudflare proprietary APIs.                  |
 
 ---
 
@@ -151,10 +153,10 @@ stateDiagram-v2
 
 ## 9. Related Documents
 
-- [ARCHITECTURE.md](file:///home/ubuntu/MovieAIProducer/ARCHITECTURE.md)
-- [SECURITY.md](file:///home/ubuntu/MovieAIProducer/SECURITY.md)
-- [ADR-0001: Architecture Style](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0001-architecture-style.md)
-- [ADR-0004: Master Production Bible](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0004-master-production-bible.md)
-- [ADR-0006: Data Storage Strategy](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0006-data-storage-strategy.md)
-- [ADR-0010: Quality Control Engine](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0010-quality-control-engine.md)
-- [ADR-0011: Authentication & Authorization](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0011-authentication-authorization.md)
+- [ARCHITECTURE.md](../../ARCHITECTURE.md)
+- [SECURITY.md](../../SECURITY.md)
+- [ADR-0001: Architecture Style](ADR-0001-architecture-style.md)
+- [ADR-0004: Master Production Bible](ADR-0004-master-production-bible.md)
+- [ADR-0006: Data Storage Strategy](ADR-0006-data-storage-strategy.md)
+- [ADR-0010: Quality Control Engine](ADR-0010-quality-control-engine.md)
+- [ADR-0011: Authentication & Authorization](ADR-0011-authentication-authorization.md)

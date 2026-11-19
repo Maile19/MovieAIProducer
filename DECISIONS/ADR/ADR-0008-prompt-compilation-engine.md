@@ -6,7 +6,14 @@ date: 2026-11-19
 decision_owners: Product Architect & AI Technical Lead
 decision_scope: Hollywood cinematic prompt compilation, Intermediate Representation (IR), and provider token synthesis
 version: "1.2"
-tags: [prompt-compilation, hollywood-matrices, intermediate-representation, tokens, ai-generation]
+tags:
+  [
+    prompt-compilation,
+    hollywood-matrices,
+    intermediate-representation,
+    tokens,
+    ai-generation,
+  ]
 canonical_path: DECISIONS/ADR/ADR-0008-prompt-compilation-engine.md
 supersedes: []
 superseded_by: []
@@ -14,18 +21,18 @@ superseded_by: []
 
 # ADR-0008: Prompt Compilation Engine
 
-| Attribute | Specification |
-| :--- | :--- |
-| **ADR ID** | ADR-0008 |
-| **Title** | Prompt Compilation Engine: Intermediate Representation (IR) & Cinematic Matrices |
-| **Status** | ACCEPTED |
-| **Date** | 2026-11-19 |
-| **Decision Owners** | Product Architect & AI Technical Lead |
-| **Decision Scope** | Hollywood cinematic prompt compilation, Intermediate Representation (IR), and provider token synthesis |
-| **Version** | 1.2 |
-| **Canonical Source** | `DECISIONS/ADR/ADR-0008-prompt-compilation-engine.md` |
-| **Supersedes** | None |
-| **Superseded By** | None |
+| Attribute            | Specification                                                                                          |
+| :------------------- | :----------------------------------------------------------------------------------------------------- |
+| **ADR ID**           | ADR-0008                                                                                               |
+| **Title**            | Prompt Compilation Engine: Intermediate Representation (IR) & Cinematic Matrices                       |
+| **Status**           | ACCEPTED                                                                                               |
+| **Date**             | 2026-11-19                                                                                             |
+| **Decision Owners**  | Product Architect & AI Technical Lead                                                                  |
+| **Decision Scope**   | Hollywood cinematic prompt compilation, Intermediate Representation (IR), and provider token synthesis |
+| **Version**          | 1.2                                                                                                    |
+| **Canonical Source** | `DECISIONS/ADR/ADR-0008-prompt-compilation-engine.md`                                                  |
+| **Supersedes**       | None                                                                                                   |
+| **Superseded By**    | None                                                                                                   |
 
 ---
 
@@ -34,6 +41,7 @@ superseded_by: []
 MovieAIProducer is not a superficial prompt generator. The platform is engineered to translate professional directorial intent, dramatic narrative arcs, and Master Production Bible (MPB) specifications into executable, mathematically disciplined prompts across diverse AI generative engines.
 
 A production-grade cinematic prompt requires precise synthesis across multiple domains:
+
 - **Creative Strategy**: Premise, visual tone, emotional palette, genre conventions.
 - **Master Production Bible (MPB)**: Character visual DNA, wardrobe states, location keys, prop identities.
 - **Cinematography & Optics**: Sensor sizes, focal lengths (e.g. 35mm / 50mm Anamorphic), depth of field, framing.
@@ -51,6 +59,7 @@ Directly writing ad-hoc prompt strings leads to catastrophic style drift, charac
 ## 2. Problem Statement
 
 How should MovieAIProducer compile structured production intent into engine-specific prompt instructions while guaranteeing:
+
 1. Complete separation of artistic intent from vendor-specific syntax quirks.
 2. Lossless resolution of MPB character DNA, wardrobe, and environment constraints.
 3. Strict enforcement of Hollywood cinematic codes (#Style 01-18, #Light 01-14, #Act 01-24).
@@ -103,19 +112,19 @@ flowchart TD
 
 The Canonical Prompt IR decomposes scene generation into discrete, validated semantic blocks:
 
-| IR Component | Primary Responsibility | Sourced From |
-| :--- | :--- | :--- |
-| **Creative Intent** | Emotional tone, dramatic tension, narrative purpose | Creative Brief / Screenplay |
-| **Subject DNA** | Immutable facial structure, ethnicity, hair, biometric anchors | Character Bible (MPB) |
-| **Character State** | Micro-expression, sweat, physical exhaustion, eye gaze | Scene Direction / #Act 01-24 |
-| **Wardrobe & Props** | Garment materials, tears, battle wear, handheld prop state | Wardrobe & Prop Bible (MPB) |
-| **Environment DNA** | Architectural style, textures, spatial layout, time of day | Environment Bible (MPB) |
-| **Atmosphere & Light** | Key/fill ratio, volumetric fog, color temperature (Kelvin) | Lighting Bible / #Light 01-14 |
-| **Camera & Lens** | Focal length, lens distortion, anamorphic bokeh, camera movement | Cinematography Bible |
-| **Style DNA** | Film stock emulation, grain, color timing, aesthetic code | Style Catalog / #Style 01-18 |
-| **Continuity Locks** | Reference image URIs, vector embeddings, facial masks | Continuity Engine (ADR-0009) |
-| **Negative Constraints** | Prohibited elements, rendering artifacts, unapproved styles | Engine Negative Registry |
-| **Output Target** | Target resolution, aspect ratio (2.39:1 / 16:9), duration, FPS | Project Specifications |
+| IR Component             | Primary Responsibility                                           | Sourced From                  |
+| :----------------------- | :--------------------------------------------------------------- | :---------------------------- |
+| **Creative Intent**      | Emotional tone, dramatic tension, narrative purpose              | Creative Brief / Screenplay   |
+| **Subject DNA**          | Immutable facial structure, ethnicity, hair, biometric anchors   | Character Bible (MPB)         |
+| **Character State**      | Micro-expression, sweat, physical exhaustion, eye gaze           | Scene Direction / #Act 01-24  |
+| **Wardrobe & Props**     | Garment materials, tears, battle wear, handheld prop state       | Wardrobe & Prop Bible (MPB)   |
+| **Environment DNA**      | Architectural style, textures, spatial layout, time of day       | Environment Bible (MPB)       |
+| **Atmosphere & Light**   | Key/fill ratio, volumetric fog, color temperature (Kelvin)       | Lighting Bible / #Light 01-14 |
+| **Camera & Lens**        | Focal length, lens distortion, anamorphic bokeh, camera movement | Cinematography Bible          |
+| **Style DNA**            | Film stock emulation, grain, color timing, aesthetic code        | Style Catalog / #Style 01-18  |
+| **Continuity Locks**     | Reference image URIs, vector embeddings, facial masks            | Continuity Engine (ADR-0009)  |
+| **Negative Constraints** | Prohibited elements, rendering artifacts, unapproved styles      | Engine Negative Registry      |
+| **Output Target**        | Target resolution, aspect ratio (2.39:1 / 16:9), duration, FPS   | Project Specifications        |
 
 ---
 
@@ -123,25 +132,25 @@ The Canonical Prompt IR decomposes scene generation into discrete, validated sem
 
 Different diffusion and video models enforce strict context window limits. When the combined prompt tokens exceed the model's budget, the compiler applies **deterministic priority pruning**:
 
-1. **Priority 1 (Protected Anchors)**: Character DNA reference tokens, primary subject description, aspect ratio parameters. *Never pruned.*
-2. **Priority 2 (Cinematic Execution)**: Camera framing, lighting style codes, primary action. *Preserved with highest weight.*
-3. **Priority 3 (Environmental Nuance)**: Secondary background props, distant atmospheric textures. *Compressed or summarized.*
-4. **Priority 4 (Stylistic Modifiers)**: Generic quality boosters (e.g., "photorealistic", "masterpiece"). *Stripped first.*
+1. **Priority 1 (Protected Anchors)**: Character DNA reference tokens, primary subject description, aspect ratio parameters. _Never pruned._
+2. **Priority 2 (Cinematic Execution)**: Camera framing, lighting style codes, primary action. _Preserved with highest weight._
+3. **Priority 3 (Environmental Nuance)**: Secondary background props, distant atmospheric textures. _Compressed or summarized._
+4. **Priority 4 (Stylistic Modifiers)**: Generic quality boosters (e.g., "photorealistic", "masterpiece"). _Stripped first._
 
 ---
 
 ## 6. Implementation Status: ACCEPTED
 
-- Structured prompt schema and Hollywood cinematic code integration defined in [PROMPTS.md](file:///home/ubuntu/MovieAIProducer/PROMPTS.md).
+- Structured prompt schema and Hollywood cinematic code integration defined in [PROMPTS.md](../../PROMPTS.md).
 - Prompt compiler module scheduled for implementation in Phase 7 (Tasks 025-028).
 
 ---
 
 ## 7. Related Documents
 
-- [PROMPTS.md](file:///home/ubuntu/MovieAIProducer/PROMPTS.md)
-- [AI_PIPELINE.md](file:///home/ubuntu/MovieAIProducer/AI_PIPELINE.md)
-- [ADR-0003: Provider Adapter System](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0003-provider-adapter-system.md)
-- [ADR-0004: Master Production Bible](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0004-master-production-bible.md)
-- [ADR-0009: Continuity Engine](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0009-continuity-engine.md)
-- [CDA-0004: Canonical Event & Integration Contract Registry](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0004-canonical-event-integration-contract-registry.md)
+- [PROMPTS.md](../../PROMPTS.md)
+- [AI_PIPELINE.md](../../AI_PIPELINE.md)
+- [ADR-0003: Provider Adapter System](ADR-0003-provider-adapter-system.md)
+- [ADR-0004: Master Production Bible](ADR-0004-master-production-bible.md)
+- [ADR-0009: Continuity Engine](ADR-0009-continuity-engine.md)
+- [CDA-0004: Canonical Event & Integration Contract Registry](../CDA/CDA-0004-canonical-event-integration-contract-registry.md)

@@ -16,6 +16,7 @@
 MovieAIProducer utilizes an **Environment-Separated, Container-Ready Deployment Architecture** ensuring reproducible, zero-downtime releases from local developer workstations to the production deployment at `producer.apologets.com`.
 
 ### Core Engineering Invariants
+
 1. **Immutable Artifacts:** Releases are packaged as immutable Docker images tagged with the Git commit SHA and Semantic Version (`movieai-backend:v2.0.0-<git_sha>`).
 2. **Schema Migration Precedence:** Alembic database migrations (`alembic upgrade head`) run as an isolated pre-deployment job before new container traffic is admitted.
 3. **Automated Health Gating:** Deployments verify the `/ready` probe (`backend/app/api/health.py`) for 60 seconds post-start before traffic shifting. If database or CAS asset checks fail, the deployment automatically rolls back.
@@ -78,16 +79,16 @@ flowchart TD
 
 ## 3. Environment Strategy Matrix
 
-| Dimension | Local Development | Staging (`staging.producer.apologets.com`) | Production (`producer.apologets.com`) |
-| :--- | :--- | :--- | :--- |
-| **Runtime OS** | Linux / macOS / WSL2 | Ubuntu 22.04 LTS (Containerized) | Ubuntu 22.04 LTS (Docker Swarm / Compose) |
-| **Python Tooling** | `uv` package manager (v0.5+) | `uv` in multi-stage Docker build | `uv` in multi-stage Docker build |
-| **Database** | SQLite + `aiosqlite` (`./data/movieai.db`)| PostgreSQL 16 (`asyncpg`) | Managed PostgreSQL 16 with Read Replicas |
-| **Asset Storage** | Local directory (`./data/assets`) | Local NVMe mounted volume | Encrypted NVMe Volume + S3/R2 Offsite Mirror |
-| **Task Queue** | In-memory queue / Redis Local | Redis 7 container | Redis 7 High-Availability Sentinel |
-| **AI Providers** | Mock adapters + Local ComfyUI / GPT-SoVITS | Staging API keys + Local GPU workers | Production API keys (Veo, Kling, ElevenLabs) |
-| **Log Format** | Console colorized (`structlog`) | JSON formatted to stdout | Structured JSON shipped to Vector / Loki |
-| **TLS / SSL** | Self-signed / Plain HTTP | Automated Let's Encrypt Staging | Production Automated Let's Encrypt TLS 1.3 |
+| Dimension          | Local Development                          | Staging (`staging.producer.apologets.com`) | Production (`producer.apologets.com`)        |
+| :----------------- | :----------------------------------------- | :----------------------------------------- | :------------------------------------------- |
+| **Runtime OS**     | Linux / macOS / WSL2                       | Ubuntu 22.04 LTS (Containerized)           | Ubuntu 22.04 LTS (Docker Swarm / Compose)    |
+| **Python Tooling** | `uv` package manager (v0.5+)               | `uv` in multi-stage Docker build           | `uv` in multi-stage Docker build             |
+| **Database**       | SQLite + `aiosqlite` (`./data/movieai.db`) | PostgreSQL 16 (`asyncpg`)                  | Managed PostgreSQL 16 with Read Replicas     |
+| **Asset Storage**  | Local directory (`./data/assets`)          | Local NVMe mounted volume                  | Encrypted NVMe Volume + S3/R2 Offsite Mirror |
+| **Task Queue**     | In-memory queue / Redis Local              | Redis 7 container                          | Redis 7 High-Availability Sentinel           |
+| **AI Providers**   | Mock adapters + Local ComfyUI / GPT-SoVITS | Staging API keys + Local GPU workers       | Production API keys (Veo, Kling, ElevenLabs) |
+| **Log Format**     | Console colorized (`structlog`)            | JSON formatted to stdout                   | Structured JSON shipped to Vector / Loki     |
+| **TLS / SSL**      | Self-signed / Plain HTTP                   | Automated Let's Encrypt Staging            | Production Automated Let's Encrypt TLS 1.3   |
 
 ---
 
@@ -261,6 +262,7 @@ services:
 ## 6. Zero-Downtime Deployment & Migration Governance
 
 ### 6.1 Database Migration Protocol
+
 1. **Pre-Deployment Execution:** Before launching the new container image, CI executes:
    ```bash
    alembic upgrade head
@@ -270,6 +272,7 @@ services:
    - Dropping columns or renaming tables follows a two-stage deprecation cycle (Expand -> Contract) across consecutive releases.
 
 ### 6.2 Rolling Shift & Rollback Runbook
+
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail

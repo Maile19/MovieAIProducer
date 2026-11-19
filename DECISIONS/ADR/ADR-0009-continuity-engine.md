@@ -14,26 +14,27 @@ superseded_by: []
 
 # ADR-0009: Continuity Engine
 
-| Attribute | Specification |
-| :--- | :--- |
-| **ADR ID** | ADR-0009 |
-| **Title** | Continuity Engine: Multi-Shot Visual Locks & Embedding Consistency Verification |
-| **Status** | ACCEPTED |
-| **Date** | 2026-11-19 |
-| **Decision Owners** | Product Architect & Creative Technical Lead |
-| **Decision Scope** | Cross-shot visual and narrative continuity, facial locks, embedding similarity, and state tracking |
-| **Version** | 1.2 |
-| **Canonical Source** | `DECISIONS/ADR/ADR-0009-continuity-engine.md` |
-| **Supersedes** | None |
-| **Superseded By** | None |
+| Attribute            | Specification                                                                                      |
+| :------------------- | :------------------------------------------------------------------------------------------------- |
+| **ADR ID**           | ADR-0009                                                                                           |
+| **Title**            | Continuity Engine: Multi-Shot Visual Locks & Embedding Consistency Verification                    |
+| **Status**           | ACCEPTED                                                                                           |
+| **Date**             | 2026-11-19                                                                                         |
+| **Decision Owners**  | Product Architect & Creative Technical Lead                                                        |
+| **Decision Scope**   | Cross-shot visual and narrative continuity, facial locks, embedding similarity, and state tracking |
+| **Version**          | 1.2                                                                                                |
+| **Canonical Source** | `DECISIONS/ADR/ADR-0009-continuity-engine.md`                                                      |
+| **Supersedes**       | None                                                                                               |
+| **Superseded By**    | None                                                                                               |
 
 ---
 
 ## 1. Context
 
-AI-generated cinema fundamentally differs from traditional live-action filming: every individual shot may be produced asynchronously across different generative models, diffusion samplers, and random seeds. 
+AI-generated cinema fundamentally differs from traditional live-action filming: every individual shot may be produced asynchronously across different generative models, diffusion samplers, and random seeds.
 
 Without an active continuity governance system, consecutive shots exhibit severe, unwatchable discontinuities:
+
 - **Facial DNA Drift**: Character facial structure, eye spacing, or age shifting between cutaways.
 - **Wardrobe Inconsistencies**: Clothing colors, jacket styles, or damage states morphing between shots.
 - **Spatial Disorientation**: Breaking the 180-degree rule, inverted eyelines, or impossible actor positions.
@@ -47,6 +48,7 @@ Continuity cannot be maintained purely by text prompting; it requires mathematic
 ## 2. Problem Statement
 
 How should MovieAIProducer enforce and verify visual and narrative continuity across multi-scene film production to:
+
 1. Prevent visual identity drift across hundreds of generated shots.
 2. Track progressive entity states (e.g., progressive fatigue, wounding, wardrobe degradation across scenes).
 3. Validate spatial geometry, eyelines, and screen direction between adjacent shots.
@@ -125,29 +127,29 @@ flowchart TD
 
 Violations detected by the engine are classified into standardized severity tiers:
 
-| Finding Category | Severity | Confidence Threshold | Action Required |
-| :--- | :---: | :---: | :--- |
-| **Character Face Drift** | Critical | $\ge 0.90$ | Automatic rejection; trigger face-restore / IP-Adapter re-seed |
-| **Eyeline / 180° Inversion** | Critical | $\ge 0.85$ | Automatic rejection; invert camera azimuth prompt |
-| **Wardrobe Style Mismatch** | High | $\ge 0.88$ | Flagged for review; inpaint garment area |
-| **Missing Signature Prop** | High | $\ge 0.85$ | Re-inject prop conditioning image |
-| **Lighting Direction Flip** | Medium | $\ge 0.80$ | Adjust #Light schematic tokens |
-| **Background Detail Variation** | Low | $\ge 0.70$ | Advisory notification; acceptable within tolerance |
+| Finding Category                | Severity | Confidence Threshold | Action Required                                                |
+| :------------------------------ | :------: | :------------------: | :------------------------------------------------------------- |
+| **Character Face Drift**        | Critical |      $\ge 0.90$      | Automatic rejection; trigger face-restore / IP-Adapter re-seed |
+| **Eyeline / 180° Inversion**    | Critical |      $\ge 0.85$      | Automatic rejection; invert camera azimuth prompt              |
+| **Wardrobe Style Mismatch**     |   High   |      $\ge 0.88$      | Flagged for review; inpaint garment area                       |
+| **Missing Signature Prop**      |   High   |      $\ge 0.85$      | Re-inject prop conditioning image                              |
+| **Lighting Direction Flip**     |  Medium  |      $\ge 0.80$      | Adjust #Light schematic tokens                                 |
+| **Background Detail Variation** |   Low    |      $\ge 0.70$      | Advisory notification; acceptable within tolerance             |
 
 ---
 
 ## 6. Implementation Status: ACCEPTED
 
-- Continuity constraints and reference specifications established in [ADR-0004](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0004-master-production-bible.md) and [PROMPTS.md](file:///home/ubuntu/MovieAIProducer/PROMPTS.md).
+- Continuity constraints and reference specifications established in [ADR-0004](ADR-0004-master-production-bible.md) and [PROMPTS.md](../../PROMPTS.md).
 - Automated continuity engine inspection pipeline scheduled for implementation in Phase 9 (Tasks 032-035).
 
 ---
 
 ## 7. Related Documents
 
-- [AI_PIPELINE.md](file:///home/ubuntu/MovieAIProducer/AI_PIPELINE.md)
-- [ADR-0003: Provider Adapter System](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0003-provider-adapter-system.md)
-- [ADR-0004: Master Production Bible](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0004-master-production-bible.md)
-- [ADR-0008: Prompt Compilation Engine](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0008-prompt-compilation-engine.md)
-- [ADR-0010: Quality Control Engine](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0010-quality-control-engine.md)
-- [CDA-0003: Canonical Lifecycle & State Transition Matrix](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0003-canonical-lifecycle-state-transition-matrix.md)
+- [AI_PIPELINE.md](../../AI_PIPELINE.md)
+- [ADR-0003: Provider Adapter System](ADR-0003-provider-adapter-system.md)
+- [ADR-0004: Master Production Bible](ADR-0004-master-production-bible.md)
+- [ADR-0008: Prompt Compilation Engine](ADR-0008-prompt-compilation-engine.md)
+- [ADR-0010: Quality Control Engine](ADR-0010-quality-control-engine.md)
+- [CDA-0003: Canonical Lifecycle & State Transition Matrix](../CDA/CDA-0003-canonical-lifecycle-state-transition-matrix.md)

@@ -14,26 +14,27 @@ superseded_by: []
 
 # ADR-0002: Application Structure
 
-| Attribute | Specification |
-| :--- | :--- |
-| **ADR ID** | ADR-0002 |
-| **Title** | Application Structure: Layered Domain-Oriented Clean Architecture Layout |
-| **Status** | IMPLEMENTED |
-| **Date** | 2026-11-19 |
-| **Decision Owners** | Project Architecture & Core Engineering Team |
-| **Decision Scope** | Backend repository and package layout |
-| **Version** | 1.2 |
-| **Canonical Source** | `DECISIONS/ADR/ADR-0002-application-structure.md` |
-| **Supersedes** | None |
-| **Superseded By** | None |
+| Attribute            | Specification                                                            |
+| :------------------- | :----------------------------------------------------------------------- |
+| **ADR ID**           | ADR-0002                                                                 |
+| **Title**            | Application Structure: Layered Domain-Oriented Clean Architecture Layout |
+| **Status**           | IMPLEMENTED                                                              |
+| **Date**             | 2026-11-19                                                               |
+| **Decision Owners**  | Project Architecture & Core Engineering Team                             |
+| **Decision Scope**   | Backend repository and package layout                                    |
+| **Version**          | 1.2                                                                      |
+| **Canonical Source** | `DECISIONS/ADR/ADR-0002-application-structure.md`                        |
+| **Supersedes**       | None                                                                     |
+| **Superseded By**    | None                                                                     |
 
 ---
 
 ## 1. Context
 
-MovieAIProducer coordinates multiple interconnected film production domains across a 16-stage Hollywood cinematic lifecycle. 
+MovieAIProducer coordinates multiple interconnected film production domains across a 16-stage Hollywood cinematic lifecycle.
 
 The application structure must support:
+
 - Strict domain separation and encapsulation.
 - Clean Architecture / Hexagonal Ports and Adapters.
 - Independent testability of pure business rules without third-party frameworks.
@@ -48,6 +49,7 @@ The file organization must reflect business responsibilities and domain boundari
 ## 2. Problem Statement
 
 Without a formalized, enforced application structure, typical anti-patterns arise in AI-driven media pipelines:
+
 1. Business logic leaks into API endpoint handlers.
 2. Raw database queries and ORM models become tightly coupled with domain entities.
 3. Third-party provider SDKs are called directly from core business services.
@@ -74,7 +76,8 @@ A clear, standardized directory and package structure must be established and en
 ## 4. Options Considered
 
 ### Option A: Layer-Based Technical Structure
-```
+
+```text
 src/
 ├── controllers/
 ├── services/
@@ -82,24 +85,29 @@ src/
 ├── models/
 └── utils/
 ```
+
 - **Advantages:** Simple to set up initially.
 - **Disadvantages:** Domain concepts are fragmented across folders; lacks bounded context boundaries; high coupling.
 - **Assessment:** **Rejected.**
 
 ### Option B: Feature-Based Slice Structure
-```
+
+```text
 src/
 ├── projects/
 ├── screenplay/
 ├── characters/
 └── prompts/
 ```
+
 - **Advantages:** High cohesion within specific features.
 - **Disadvantages:** Leads to inconsistent architectural layers within features; infrastructure and domain code easily intermingle.
 - **Assessment:** **Rejected as standalone.**
 
 ### Option C: Domain-Oriented Modular Clean Architecture (Hybrid)
+
 Layered architecture at the system core (`domain/`, `application/`, `infrastructure/`, `core/`, `api/`), supporting modular domain slices internally.
+
 - **Advantages:** Combines rigorous layer boundaries with clear domain ownership; easily verifiable via automated import linter/tests.
 - **Assessment:** **Selected and Implemented.**
 
@@ -111,7 +119,7 @@ MovieAIProducer adopts a **Layered Domain-Oriented Clean Architecture** structur
 
 ### Implemented Repository Layout
 
-```
+```text
 MovieAIProducer/
 ├── pyproject.toml              # Project dependencies, build-system (Hatchling), tool config
 ├── alembic.ini                 # Database migration configuration
@@ -210,6 +218,7 @@ flowchart TD
 ```
 
 ### Strict Boundary Rules
+
 1. **Domain Layer:** Pure Python. May **never** import from `application`, `infrastructure`, `api`, or third-party web/database frameworks.
 2. **Application Layer:** May import only from `domain` and `core`. Never imports from `infrastructure` or `api`.
 3. **Infrastructure Layer:** Implements interfaces/protocols declared in `application` and `domain`. May import from `domain`, `application`, and `core`.
@@ -220,24 +229,25 @@ flowchart TD
 
 ## 7. Domain Module Ownership
 
-| Domain Module | Primary Business Capability | Directory Location |
-| :--- | :--- | :--- |
-| **Foundation & Metadata** | System baseline, schema versioning, operational flags | `backend/app/infrastructure/database/models/foundation.py` |
-| **Creative Brief** | Project intent, target audience, emotional palette, aspect ratio | `backend/app/domain/creative_brief/` (Phase 2) |
-| **Story & Screenplay** | Scene breakdown, script beats, dialogues, emotional arc | `backend/app/domain/screenplay/` (Phase 3) |
-| **Master Production Bible** | Canonical approved state for character DNA, environments, props | `backend/app/domain/mpb/` (Phase 4) |
-| **Visual Direction** | Styles (#Style 01-18), Lighting (#Light 01-14), Acting (#Act 01-24) | `backend/app/domain/visual_direction/` (Phase 5) |
-| **Previsualization** | Storyboard panels, animatic timing, shot blocking | `backend/app/domain/previs/` (Phase 6) |
-| **Prompt Engine** | 12-step Hollywood cinematic prompt compilation and tokenization | `backend/app/domain/prompts/` (Phase 7) |
-| **AI Orchestration** | Provider adapters, batch job queuing, generation dispatch | `backend/app/domain/orchestration/` (Phase 8) |
-| **Continuity Engine** | Multi-shot facial, wardrobe, lighting, and spatial lock checks | `backend/app/domain/continuity/` (Phase 9) |
-| **Quality Control (QC)** | Multi-tier validation gates, cinematic compliance scoring | `backend/app/domain/qc/` (Phase 10) |
+| Domain Module               | Primary Business Capability                                         | Directory Location                                         |
+| :-------------------------- | :------------------------------------------------------------------ | :--------------------------------------------------------- |
+| **Foundation & Metadata**   | System baseline, schema versioning, operational flags               | `backend/app/infrastructure/database/models/foundation.py` |
+| **Creative Brief**          | Project intent, target audience, emotional palette, aspect ratio    | `backend/app/domain/creative_brief/` (Phase 2)             |
+| **Story & Screenplay**      | Scene breakdown, script beats, dialogues, emotional arc             | `backend/app/domain/screenplay/` (Phase 3)                 |
+| **Master Production Bible** | Canonical approved state for character DNA, environments, props     | `backend/app/domain/mpb/` (Phase 4)                        |
+| **Visual Direction**        | Styles (#Style 01-18), Lighting (#Light 01-14), Acting (#Act 01-24) | `backend/app/domain/visual_direction/` (Phase 5)           |
+| **Previsualization**        | Storyboard panels, animatic timing, shot blocking                   | `backend/app/domain/previs/` (Phase 6)                     |
+| **Prompt Engine**           | 12-step Hollywood cinematic prompt compilation and tokenization     | `backend/app/domain/prompts/` (Phase 7)                    |
+| **AI Orchestration**        | Provider adapters, batch job queuing, generation dispatch           | `backend/app/domain/orchestration/` (Phase 8)              |
+| **Continuity Engine**       | Multi-shot facial, wardrobe, lighting, and spatial lock checks      | `backend/app/domain/continuity/` (Phase 9)                 |
+| **Quality Control (QC)**    | Multi-tier validation gates, cinematic compliance scoring           | `backend/app/domain/qc/` (Phase 10)                        |
 
 ---
 
 ## 8. Configuration & Environment Management
 
 Application configuration is centralized in `backend/app/core/config.py` using `pydantic-settings`:
+
 - Configuration values are validated at application bootstrap (`Settings()`).
 - Secrets and environment-specific settings (database URLs, API keys) are loaded from environment variables or `.env`.
 - Safe defaults are provided for local development (e.g., `sqlite+aiosqlite:///./data/movieai.db`).
@@ -249,25 +259,27 @@ Application configuration is centralized in `backend/app/core/config.py` using `
 
 The directory structure mirrors the test suite layout in `tests/`:
 
-| Test Category | Target Directory | Primary Focus |
-| :--- | :--- | :--- |
-| **Architecture Tests** | `tests/architecture/` | Validates layer import boundaries and dependency inversion rules via AST inspection. |
-| **Domain Unit Tests** | `tests/domain/` | Validates entity identity, value object immutability, and domain event creation. |
-| **Application Tests** | `tests/application/` | Tests use case interactors using in-memory test doubles (`InMemoryRepository`, `InMemoryEventBus`). |
-| **Infrastructure Tests** | `tests/infrastructure/` | Validates real SQLite WAL mode connections, Alembic migrations, and SQLAlchemy repository CRUD. |
-| **API Integration Tests** | `tests/test_health.py` | Validates FastAPI routers, correlation headers, and JSON error response structures using `TestClient`. |
+| Test Category             | Target Directory        | Primary Focus                                                                                          |
+| :------------------------ | :---------------------- | :----------------------------------------------------------------------------------------------------- |
+| **Architecture Tests**    | `tests/architecture/`   | Validates layer import boundaries and dependency inversion rules via AST inspection.                   |
+| **Domain Unit Tests**     | `tests/domain/`         | Validates entity identity, value object immutability, and domain event creation.                       |
+| **Application Tests**     | `tests/application/`    | Tests use case interactors using in-memory test doubles (`InMemoryRepository`, `InMemoryEventBus`).    |
+| **Infrastructure Tests**  | `tests/infrastructure/` | Validates real SQLite WAL mode connections, Alembic migrations, and SQLAlchemy repository CRUD.        |
+| **API Integration Tests** | `tests/test_health.py`  | Validates FastAPI routers, correlation headers, and JSON error response structures using `TestClient`. |
 
 ---
 
 ## 10. Consequences & Implementation Evidence
 
 ### Positive Consequences
+
 - Crystal-clear developer mental model.
 - Architecture tests provide rapid regression feedback in CI.
 - Autonomous AI coding agents can reliably locate contracts and implementations.
 - Zero cyclic dependencies.
 
 ### Implementation Evidence
+
 - Verified directory layout in `backend/app/`.
 - Verified passing layer boundary tests: `tests/architecture/test_layer_boundaries.py`.
 - Verified passing test suite: 50 tests passed in under 1 second.
@@ -276,7 +288,7 @@ The directory structure mirrors the test suite layout in `tests/`:
 
 ## 11. Related Documents
 
-- [ADR-0001: Architecture Style](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0001-architecture-style.md)
-- [ADR-0006: Data Storage Strategy](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0006-data-storage-strategy.md)
-- [CDA-0002: Canonical Glossary & Domain Ownership Matrix](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0002-canonical-glossary-domain-ownership-matrix.md)
-- [CDA-0005: Canonical Error & Failure Contract Registry](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0005-canonical-error-failure-contract-registry.md)
+- [ADR-0001: Architecture Style](ADR-0001-architecture-style.md)
+- [ADR-0006: Data Storage Strategy](ADR-0006-data-storage-strategy.md)
+- [CDA-0002: Canonical Glossary & Domain Ownership Matrix](../CDA/CDA-0002-canonical-glossary-domain-ownership-matrix.md)
+- [CDA-0005: Canonical Error & Failure Contract Registry](../CDA/CDA-0005-canonical-error-failure-contract-registry.md)

@@ -16,6 +16,7 @@
 MovieAIProducer coordinates creative filmmaking intent, strict relational databases, and non-deterministic generative AI models. A bug in business logic could trigger hundreds of dollars in redundant GPU compute, while a flaw in continuity logic can produce jarring visual discrepancies across a 50-scene movie.
 
 ### Core Testing Invariants
+
 1. **Deterministic Isolation:** Core domain logic, state machines, and prompt compilation engines are tested deterministically in pure memory without network access or live GPU dependencies.
 2. **Architectural Purity Gates:** Architectural boundary rules (Domain must never import Infrastructure or API) are enforced automatically via AST import analysis tests (`tests/architecture/test_layer_boundaries.py`).
 3. **Database Migration Reversibility:** Every Alembic schema migration must pass bidirectional upgrade and downgrade tests (`test_database_migrations.py`) before deployment.
@@ -65,24 +66,25 @@ flowchart TD
 
 The repository currently maintains 50 automated tests with 100% pass status across domain, application, infrastructure, and presentation layers:
 
-| Test Suite File | Test Count | Layer | What is Verified | Code Reference |
-| :--- | :---: | :--- | :--- | :--- |
-| **`tests/architecture/test_layer_boundaries.py`** | 3 | Architecture | Domain layer imports no outer layers; Application imports no Infra/API; Infra imports no API | `backend/app/domain/`, `backend/app/application/` |
-| **`tests/domain/test_primitives.py`** | 9 | Domain | `Entity` identity & timestamps; `AggregateRoot` event buffering/clearing; `ValueObject` immutability & hash; `DomainEvent` serializability | `backend/app/domain/common/` |
-| **`tests/application/test_use_case.py`** | 4 | Application | `UseCase` abstract execution; input/output DTO validation; error propagation | `backend/app/application/common/` |
-| **`tests/infrastructure/test_adapters.py`** | 4 | Infrastructure | `InMemoryEventBus` subscription/dispatch; `InMemoryUnitOfWork` lifecycle; `InMemoryRepository` CRUD | `backend/app/infrastructure/common/` |
-| **`tests/infrastructure/test_database_engine.py`**| 4 | Infrastructure | `create_database_engine`, connection pooling, SQLite URL handling, async disposal | `backend/app/infrastructure/database/engine.py` |
-| **`tests/infrastructure/test_database_repository.py`**| 6 | Infrastructure | `SqlAlchemyRepository` execution, entity mapping, query execution | `backend/app/infrastructure/database/repository.py` |
-| **`tests/infrastructure/test_database_uow.py`** | 4 | Infrastructure | `SqlAlchemyUnitOfWork` commit/rollback context manager transactions | `backend/app/infrastructure/database/unit_of_work.py` |
-| **`tests/infrastructure/test_database_migrations.py`**| 1 | Infrastructure | Alembic `0001_foundation` migration upgrade, schema validation, downgrade | `migrations/versions/0001_initial_database_foundation.py` |
-| **`tests/test_health.py`** | 15 | Presentation | Liveness `/health`; Readiness `/ready` (DB & CAS checks); `RequestIDMiddleware` echoing; `TrustedHostMiddleware` filtering; global 500 error envelope | `backend/app/api/health.py`, `backend/app/main.py` |
-| **Total** | **50** | **All Layers** | **Complete Foundation Baseline Verified** | **100% Passed (1.04s execution time)** |
+| Test Suite File                                        | Test Count | Layer          | What is Verified                                                                                                                                      | Code Reference                                            |
+| :----------------------------------------------------- | :--------: | :------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------- |
+| **`tests/architecture/test_layer_boundaries.py`**      |     3      | Architecture   | Domain layer imports no outer layers; Application imports no Infra/API; Infra imports no API                                                          | `backend/app/domain/`, `backend/app/application/`         |
+| **`tests/domain/test_primitives.py`**                  |     9      | Domain         | `Entity` identity & timestamps; `AggregateRoot` event buffering/clearing; `ValueObject` immutability & hash; `DomainEvent` serializability            | `backend/app/domain/common/`                              |
+| **`tests/application/test_use_case.py`**               |     4      | Application    | `UseCase` abstract execution; input/output DTO validation; error propagation                                                                          | `backend/app/application/common/`                         |
+| **`tests/infrastructure/test_adapters.py`**            |     4      | Infrastructure | `InMemoryEventBus` subscription/dispatch; `InMemoryUnitOfWork` lifecycle; `InMemoryRepository` CRUD                                                   | `backend/app/infrastructure/common/`                      |
+| **`tests/infrastructure/test_database_engine.py`**     |     4      | Infrastructure | `create_database_engine`, connection pooling, SQLite URL handling, async disposal                                                                     | `backend/app/infrastructure/database/engine.py`           |
+| **`tests/infrastructure/test_database_repository.py`** |     6      | Infrastructure | `SqlAlchemyRepository` execution, entity mapping, query execution                                                                                     | `backend/app/infrastructure/database/repository.py`       |
+| **`tests/infrastructure/test_database_uow.py`**        |     4      | Infrastructure | `SqlAlchemyUnitOfWork` commit/rollback context manager transactions                                                                                   | `backend/app/infrastructure/database/unit_of_work.py`     |
+| **`tests/infrastructure/test_database_migrations.py`** |     1      | Infrastructure | Alembic `0001_foundation` migration upgrade, schema validation, downgrade                                                                             | `migrations/versions/0001_initial_database_foundation.py` |
+| **`tests/test_health.py`**                             |     15     | Presentation   | Liveness `/health`; Readiness `/ready` (DB & CAS checks); `RequestIDMiddleware` echoing; `TrustedHostMiddleware` filtering; global 500 error envelope | `backend/app/api/health.py`, `backend/app/main.py`        |
+| **Total**                                              |   **50**   | **All Layers** | **Complete Foundation Baseline Verified**                                                                                                             | **100% Passed (1.04s execution time)**                    |
 
 ---
 
 ## 4. Planned Testing Suites `[PLANNED]`
 
 ### 4.1 Master Production Bible (MPB) & DNA Locking Tests
+
 - **Test File:** `tests/domain/test_master_production_bible.py`
 - **Scope:**
   - Verifies that visual style codes (`#Style 01`–`#Style 18`) are mandatory before approval.
@@ -90,6 +92,7 @@ The repository currently maintains 50 automated tests with 100% pass status acro
   - Tests revision branching, ensuring new versions copy all approved DNA elements with incremented version numbers.
 
 ### 4.2 12-Step Hollywood Prompt Compiler Tests
+
 - **Test File:** `tests/application/test_prompt_compiler.py`
 - **Scope:**
   - Tests compilation of `#Cam 01` to `#Cam 34`, `#Lens 01` to `#Lens 06`, and `#Light 01` to `#Light 14` into target syntax.
@@ -97,6 +100,7 @@ The repository currently maintains 50 automated tests with 100% pass status acro
   - Validates negative prompt injection armor and XML tag isolation.
 
 ### 4.3 Dialogue Pacing & 5-Second Calibration Tests
+
 - **Test File:** `tests/domain/test_dialogue_calibration.py`
 - **Scope:**
   - Verifies word and syllable counting algorithms for English and Indonesian dialogue lines.
@@ -104,6 +108,7 @@ The repository currently maintains 50 automated tests with 100% pass status acro
   - Tests J-Cut and L-Cut audio offset calculations.
 
 ### 4.4 AI Provider Adapter Conformance & Mock Tests
+
 - **Test File:** `tests/infrastructure/test_provider_adapters.py`
 - **Scope:**
   - **ComfyUI Local Adapter:** Simulates REST `POST /prompt` and WebSocket `/ws` event stream (`execution_start`, `progress`, `executed`), verifying proper asset ingestion into CAS.
@@ -111,6 +116,7 @@ The repository currently maintains 50 automated tests with 100% pass status acro
   - **Circuit Breaker Tests:** Simulates 5 consecutive HTTP 504 errors from Kling/Veo, verifying state transition to `OPEN` and immediate failover to secondary tier.
 
 ### 4.5 Content-Addressable Storage (CAS) Integrity Tests
+
 - **Test File:** `tests/infrastructure/test_asset_storage.py`
 - **Scope:**
   - Tests SHA-256 calculation and path layout (`./data/assets/{sha[0:2]}/{sha[2:4]}/{sha}.{ext}`).
@@ -122,6 +128,7 @@ The repository currently maintains 50 automated tests with 100% pass status acro
 ## 5. Execution Commands & Developer Workflow
 
 ### 5.1 Local Test Execution
+
 ```bash
 # Run complete test suite with fast test runner
 uv run pytest tests/
@@ -137,7 +144,9 @@ uv run pytest tests/infrastructure/test_database_*.py
 ```
 
 ### 5.2 Pre-Commit Automated Hooks
+
 Prior to every commit, the following automated checks run:
+
 1. **Linter / Formatter:** `ruff check . && ruff format --check .`
 2. **Type Checker:** `mypy backend`
 3. **Layer Boundary Check:** `pytest tests/architecture/test_layer_boundaries.py`
@@ -148,6 +157,7 @@ Prior to every commit, the following automated checks run:
 ## 6. Continuous Integration (CI) Quality Gates
 
 A pull request cannot merge into `main` unless:
+
 - [x] All 50 baseline tests pass with zero failures.
 - [x] Zero architectural layer violations detected.
 - [x] Code coverage on domain entities remains `>= 90%`.

@@ -16,6 +16,7 @@
 MovieAIProducer (`producer.apologets.com`) is a professional, studio-grade Non-Linear AI Film Production Environment. It abstracts generative AI complexity behind a tactile, director-centric interface inspired by DaVinci Resolve, Final Cut Pro, and Unreal Engine 5.
 
 ### Core UX Axioms
+
 1. **Director-Centric & Visual-First:** Filmmakers think in lenses, lighting, framing, and emotional beats—not CFG scales, random seeds, or latent diffusion steps. The UI translates Hollywood cinematic vocabulary directly into backend prompt compilation graphs.
 2. **Context Persistence & Zero Page Reloads:** A unified workspace keeps the active Project, 4-Act Storyboard, active Scene (1 of 50), and active Shot visible and navigable at all times.
 3. **Deterministic State Feedback:** The UI never fakes progress. Status badges, progress bars, and node execution rings mirror real backend WebSocket events originating from ComfyUI and external provider adapters.
@@ -29,7 +30,7 @@ The visual design language uses a **Cinematic Dark Slate & Neon Accent** aesthet
 
 ### 2.1 Color Tokens
 
-```
+```text
 +-----------------------------------------------------------------------------------------+
 | Token Name             | Hex Code   | Semantic Role in Studio UI                        |
 +-----------------------------------------------------------------------------------------+
@@ -50,11 +51,13 @@ The visual design language uses a **Cinematic Dark Slate & Neon Accent** aesthet
 ```
 
 ### 2.2 Typography System
-- **Cinematic Display Titles:** *Cinzel* / *Playfair Display* (Weight: 600, for film title, act transitions).
-- **Interface & Screenplay Typography:** *Inter* / *Plus Jakarta Sans* (Weight: 400, 500, 600, clean legibility).
-- **Technical Metrics & Matrix Codes:** *JetBrains Mono* (Weight: 400, 500, for `#Style 08`, `#Light 03`, `#Lens 04`, frame numbers, timecodes `00:01:24:12`, and SHA-256 digests).
+
+- **Cinematic Display Titles:** _Cinzel_ / _Playfair Display_ (Weight: 600, for film title, act transitions).
+- **Interface & Screenplay Typography:** _Inter_ / _Plus Jakarta Sans_ (Weight: 400, 500, 600, clean legibility).
+- **Technical Metrics & Matrix Codes:** _JetBrains Mono_ (Weight: 400, 500, for `#Style 08`, `#Light 03`, `#Lens 04`, frame numbers, timecodes `00:01:24:12`, and SHA-256 digests).
 
 ### 2.3 Elevation & Glassmorphism Tokens
+
 - **Backdrop Blur:** `backdrop-blur-md` (`12px` gaussian blur) with `rgba(15, 23, 42, 0.75)` for floating floating inspectors and modal overlays.
 - **Card Shadows:** `box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.5)` with `1px solid rgba(51, 65, 85, 0.5)`.
 
@@ -95,11 +98,13 @@ flowchart TD
 ## 4. Key Component Architecture & Blueprint Specifications
 
 ### 4.1 Global Showrunner Header
+
 - **Project Selector & Status:** Dropdown displaying current production title (`Chronicles of Nusantara 2099`), aspect ratio badge (`16:9`), and status (`IN_PRODUCTION`).
 - **12-Step Cinematic Scrubber:** Horizontal interactive pill sequence highlighting completed steps in emerald, active step in cyan with pulsing glow, and upcoming steps in slate.
 - **Worker & GPU Telemetry:** Live heartbeat indicator showing active ComfyUI workers, queue depth (`Queue: 2`), and current spend (`$14.20 / $50.00`).
 
 ### 4.2 The 50-Scene 4-Act Storyboard Canvas
+
 - **Act Categorization:**
   - **Act I (Scenes 01–12):** Slate border header with gold accent (`The Setup & Catalyst`).
   - **Act II-A (Scenes 13–25):** Cyan border header (`Rising Action & Promise of Premise`).
@@ -109,9 +114,10 @@ flowchart TD
 - **Drag-and-Drop Sequencing:** Direct reordering of shots with automatic duration re-calibration.
 
 ### 4.3 Matrix Selector UI Component
+
 The Matrix Selector eliminates freeform prompt errors by providing an interactive visual picker:
 
-```
+```text
 +------------------------------------------------------------------------------------+
 | CINEMATOGRAPHY & LIGHTING MATRIX INSPECTOR                                         |
 +------------------------------------------------------------------------------------+
@@ -133,11 +139,13 @@ The Matrix Selector eliminates freeform prompt errors by providing an interactiv
 ```
 
 ### 4.4 Shot Detail Studio & Dual-Viewport
+
 - **Left Viewport (Previs / Reference):** Displays locked Character Face DNA anchor, storyboard sketch, or previs frame.
 - **Right Viewport (Rendered Video / Daily):** HTML5 video player with frame-accurate scrubbing, audio waveform, and J/L cut markers.
 - **Live QC Overlay:** Toggleable heatmaps showing InsightFace facial alignment points and temporal flow vectors.
 
 ### 4.5 Dialogue Calibration & Waveform Visualizer
+
 - **5-Second Hard Constraint:** Visual progress bar tracking word and syllable counts. Turns red if line exceeds 14 words (`5.0s`).
 - **J/L-Cut Audio Handles:** Sliders adjusting audio lead (`-1.2s` J-cut) or audio overhang (`+1.0s` L-cut) over adjacent cuts.
 
@@ -174,25 +182,26 @@ flowchart LR
 
 ## 6. Keyboard Shortcuts & NLE Ergonomics
 
-| Shortcut Key | Action in Production Studio |
-| :--- | :--- |
-| **`Space`** | Play / Pause active shot video or audio preview |
-| **`J`** | Shuttle backward (`-1x`, `-2x`, `-4x` speed) |
-| **`K`** | Shuttle pause / stop |
-| **`L`** | Shuttle forward (`1x`, `2x`, `4x` speed) |
-| **`[` / `]`** | Jump to Previous / Next Shot in active scene |
-| **`Up` / `Down`** | Jump to Previous / Next Scene in 50-scene timeline |
-| **`A`** | Showrunner Quick-Approve active shot (locks into cut) |
-| **`R`** | Quick-Reject active shot (opens rework dialogue prompt) |
-| **`M`** | Toggle Matrix Selector Inspector drawer |
-| **`Q`** | Toggle Automated QC Scorecard & Defect Overlay |
-| **`Cmd/Ctrl + Enter`** | Compile and Submit Generation Job to GPU Queue |
+| Shortcut Key           | Action in Production Studio                             |
+| :--------------------- | :------------------------------------------------------ |
+| **`Space`**            | Play / Pause active shot video or audio preview         |
+| **`J`**                | Shuttle backward (`-1x`, `-2x`, `-4x` speed)            |
+| **`K`**                | Shuttle pause / stop                                    |
+| **`L`**                | Shuttle forward (`1x`, `2x`, `4x` speed)                |
+| **`[` / `]`**          | Jump to Previous / Next Shot in active scene            |
+| **`Up` / `Down`**      | Jump to Previous / Next Scene in 50-scene timeline      |
+| **`A`**                | Showrunner Quick-Approve active shot (locks into cut)   |
+| **`R`**                | Quick-Reject active shot (opens rework dialogue prompt) |
+| **`M`**                | Toggle Matrix Selector Inspector drawer                 |
+| **`Q`**                | Toggle Automated QC Scorecard & Defect Overlay          |
+| **`Cmd/Ctrl + Enter`** | Compile and Submit Generation Job to GPU Queue          |
 
 ---
 
 ## 7. Frontend Integration with Backend API
 
 The frontend directly binds to the grounded backend contracts:
+
 1. **Health Probes:** Periodic background polling of `/ready` to warn showrunners if database or CAS asset storage goes offline.
 2. **Asynchronous Generation Jobs:** Submits generation commands to `POST /api/v1/shots/{id}/generate`, immediately receiving `202 Accepted` with `job_id`.
 3. **WebSocket Event Stream:** Connects to `WS /api/v1/ws/projects/{id}/events` to update progress rings without HTTP polling.

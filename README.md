@@ -8,14 +8,14 @@ MovieAIProducer coordinates long-form generative AI cinema. Unlike simple prompt
 
 ## Key Features
 
-| Capability | Technical Implementation | Production Value |
-| :--- | :--- | :--- |
-| **12-Step Cinematic Pipeline** | Sequential workflow enforcing genre, style, 4-act story blueprint, character DNA, camera optics, lighting, acting, and motion dynamics. | Eliminates haphazard prompting; guarantees complete pre-production coverage before video generation. |
-| **Master Production Bible (MPB)** | Central domain registry managing immutable identifiers for characters, environments, wardrobe, and props. | Absolute visual continuity across 50 scenes with zero character or asset drift. |
-| **Provider-Agnostic Engine** | Decoupled adapter layer isolating domain logic from external inference APIs (Kling, Runway Gen-3, Google Veo, Midjourney, ElevenLabs). | Hot-swap generation providers without altering story specifications or prompt architectures. |
-| **Optical & Cinematic Matrices** | 34 camera angles (`#Cam 01-34`), 6 lens physics profiles (`#Lens 01-06`), 8 composition geometries (`#Comp 01-08`), and 14 lighting designs (`#Light 01-14`). | Studio-grade cinematography with strict adherence to the 180-degree rule and focal length physics. |
-| **Character State Evolution** | 5 discrete character condition states (`#State 01-05`) tracking costume damage, fatigue, and emotional progression. | Visual storytelling where character appearance evolves logically with plot developments. |
-| **Continuity & Quality Control** | Automated rule engine evaluating frame bridging, spatial orientation, audio synchronization (J/L-cuts), and color palettes. | Catches artifacts, lighting mismatches, and geometry errors prior to editorial assembly. |
+| Capability                        | Technical Implementation                                                                                                                                      | Production Value                                                                                     |
+| :-------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------ | :--------------------------------------------------------------------------------------------------- |
+| **12-Step Cinematic Pipeline**    | Sequential workflow enforcing genre, style, 4-act story blueprint, character DNA, camera optics, lighting, acting, and motion dynamics.                       | Eliminates haphazard prompting; guarantees complete pre-production coverage before video generation. |
+| **Master Production Bible (MPB)** | Central domain registry managing immutable identifiers for characters, environments, wardrobe, and props.                                                     | Absolute visual continuity across 50 scenes with zero character or asset drift.                      |
+| **Provider-Agnostic Engine**      | Decoupled adapter layer isolating domain logic from external inference APIs (Kling, Runway Gen-3, Google Veo, Midjourney, ElevenLabs).                        | Hot-swap generation providers without altering story specifications or prompt architectures.         |
+| **Optical & Cinematic Matrices**  | 34 camera angles (`#Cam 01-34`), 6 lens physics profiles (`#Lens 01-06`), 8 composition geometries (`#Comp 01-08`), and 14 lighting designs (`#Light 01-14`). | Studio-grade cinematography with strict adherence to the 180-degree rule and focal length physics.   |
+| **Character State Evolution**     | 5 discrete character condition states (`#State 01-05`) tracking costume damage, fatigue, and emotional progression.                                           | Visual storytelling where character appearance evolves logically with plot developments.             |
+| **Continuity & Quality Control**  | Automated rule engine evaluating frame bridging, spatial orientation, audio synchronization (J/L-cuts), and color palettes.                                   | Catches artifacts, lighting mismatches, and geometry errors prior to editorial assembly.             |
 
 ---
 
@@ -23,7 +23,7 @@ MovieAIProducer coordinates long-form generative AI cinema. Unlike simple prompt
 
 MovieAIProducer follows Clean Architecture principles, ensuring that creative and domain rules remain completely independent of external frameworks, databases, and AI provider SDKs.
 
-```
+```text
 MovieAIProducer/
 ├── backend/
 │   └── app/
@@ -72,28 +72,33 @@ MovieAIProducer uses [`uv`](https://github.com/astral-sh/uv) for fast, determini
 ### Installation & Setup
 
 1. **Clone the repository:**
+
    ```bash
    git clone https://github.com/your-org/MovieAIProducer.git
    cd MovieAIProducer
    ```
 
 2. **Sync virtual environment and dependencies:**
+
    ```bash
    uv sync
    ```
 
 3. **Configure environment variables:**
+
    ```bash
    cp .env.example .env
    # Edit .env to set application settings and provider credentials
    ```
 
 4. **Apply database migrations:**
+
    ```bash
    uv run alembic upgrade head
    ```
 
 5. **Start the FastAPI backend server:**
+
    ```bash
    uv run uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000
    ```
@@ -112,11 +117,13 @@ All development workflows are executed through `uv`.
 ### Running Tests
 
 Run the complete test suite:
+
 ```bash
 uv run pytest
 ```
 
 Run test categories selectively:
+
 ```bash
 # Architecture & layer boundary tests
 uv run pytest tests/architecture/
@@ -134,6 +141,7 @@ uv run pytest tests/test_health.py
 ### Code Formatting & Linting
 
 We enforce strict formatting and static code quality using `ruff`:
+
 ```bash
 # Check for lint violations
 uv run ruff check .
@@ -151,6 +159,7 @@ uv run ruff format .
 ### Database Migrations
 
 When altering models in `backend/app/infrastructure/database/models/`:
+
 ```bash
 # Generate a new migration revision
 uv run alembic revision --autogenerate -m "add_scene_and_shot_entities"
@@ -168,7 +177,7 @@ uv run alembic downgrade -1
 
 Every production initiated in MovieAIProducer traverses 12 immutable gates:
 
-```
+```text
 [1. Genre & Aspect] ──> [2. Visual Style] ──> [3. 4-Act Blueprint] ──> [4. Character DNA]
                                                                                │
 [8. Optics & Geometry] <── [7. Dialogue & Audio] <── [6. Environment] <── [5. Extras Sheet]

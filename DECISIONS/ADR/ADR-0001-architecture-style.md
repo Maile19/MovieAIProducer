@@ -14,18 +14,18 @@ superseded_by: []
 
 # ADR-0001: Architecture Style
 
-| Attribute | Specification |
-| :--- | :--- |
-| **ADR ID** | ADR-0001 |
-| **Title** | Architecture Style: Modular Monolith + Clean Architecture |
-| **Status** | IMPLEMENTED |
-| **Date** | 2026-11-19 |
-| **Decision Owners** | Project Architecture & Core Engineering Team |
-| **Decision Scope** | Overall application architecture |
-| **Version** | 1.2 |
-| **Canonical Source** | `DECISIONS/ADR/ADR-0001-architecture-style.md` |
-| **Supersedes** | None |
-| **Superseded By** | None |
+| Attribute            | Specification                                             |
+| :------------------- | :-------------------------------------------------------- |
+| **ADR ID**           | ADR-0001                                                  |
+| **Title**            | Architecture Style: Modular Monolith + Clean Architecture |
+| **Status**           | IMPLEMENTED                                               |
+| **Date**             | 2026-11-19                                                |
+| **Decision Owners**  | Project Architecture & Core Engineering Team              |
+| **Decision Scope**   | Overall application architecture                          |
+| **Version**          | 1.2                                                       |
+| **Canonical Source** | `DECISIONS/ADR/ADR-0001-architecture-style.md`            |
+| **Supersedes**       | None                                                      |
+| **Superseded By**    | None                                                      |
 
 ---
 
@@ -109,9 +109,11 @@ The architecture is not a commitment to remain monolithic forever. It establishe
 ## 4. Architecture Principles
 
 ### 4.1 Modular Monolith
+
 The application runs as a cohesive deployment unit initially, but its internal modules have explicit responsibilities. Each module owns its business rules and exposes controlled interfaces to other modules. Modules must not directly manipulate another module's internal implementation.
 
 ### 4.2 Clean Architecture
+
 Each domain module strictly follows the dependency inversion direction:
 
 $$\text{Presentation / Infrastructure} \longrightarrow \text{Application} \longrightarrow \text{Domain}$$
@@ -124,15 +126,19 @@ $$\text{Presentation / Infrastructure} \longrightarrow \text{Application} \longr
 Dependencies point strictly inward toward business rules. Domain logic does not depend on FastAPI, React, SQLite/PostgreSQL drivers, AI provider SDKs, or deployment infrastructure.
 
 ### 4.3 Separation of Concerns
+
 Each component has one clearly defined responsibility. Business rules, workflow coordination, external integrations, persistence, and user interface logic remain separated.
 
 ### 4.4 Explicit Contracts
+
 Modules communicate through documented interfaces, application services, or domain events. Direct access to another module's private repositories, tables, or internal services is prohibited.
 
 ### 4.5 Provider Independence
-AI provider integrations are isolated behind provider adapters and normalized contracts (see [ADR-0003](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0003-provider-adapter-system.md)). Core business logic never depends on any single vendor's SDK or proprietary payload format.
+
+AI provider integrations are isolated behind provider adapters and normalized contracts (see [ADR-0003](ADR-0003-provider-adapter-system.md)). Core business logic never depends on any single vendor's SDK or proprietary payload format.
 
 ### 4.6 Testability
+
 Domain and application logic must be testable without requiring live AI provider calls, production databases, external network access, a running frontend, or cloud infrastructure.
 
 ---
@@ -140,19 +146,25 @@ Domain and application logic must be testable without requiring live AI provider
 ## 5. Architecture Options Considered
 
 ### Option A: Traditional Monolith
+
 All application components are developed in one codebase with limited or informal internal boundaries.
+
 - **Advantages:** Simple initial deployment; low operational overhead; fast initial prototyping.
 - **Disadvantages:** High risk of tight coupling; unclear module ownership; difficult independent testing; high regression risk; difficult future extraction.
 - **Assessment:** **Rejected.** MovieAIProducer has multiple complex production domains requiring strict internal boundaries.
 
 ### Option B: Microservices
+
 Each major business domain operates as an independently deployed service.
+
 - **Advantages:** Independent deployment; independent scaling; clear service ownership; technology flexibility.
 - **Disadvantages:** Distributed data consistency; network failure handling; service discovery and communication overhead; complex observability; increased infrastructure and operational cost.
 - **Assessment:** **Rejected for MVP.** Current operational requirements do not justify distributed operational complexity.
 
 ### Option C: Modular Monolith + Clean Architecture
+
 One primary application deployment with independently structured business modules and enforced dependency boundaries.
+
 - **Advantages:** Simpler deployment than microservices; strong internal separation; clear domain ownership; easy unit and integration testing; low operational overhead; clear future extraction path.
 - **Disadvantages:** Requires architectural discipline; module boundaries must be actively enforced via tests.
 - **Assessment:** **Selected.** Provides the optimal balance between rapid delivery and long-term architectural integrity.
@@ -222,22 +234,22 @@ flowchart TD
 
 The canonical domain module boundaries are:
 
-| Module | Primary Responsibility | Target Bounded Context |
-| :--- | :--- | :--- |
-| **Creative Brief** | Project objectives, target audience, themes, and creative guidelines | `domain/creative_brief` |
-| **Story & Screenplay** | Narrative architecture, scene breakdown, beats, and dialogue | `domain/screenplay` |
-| **Character Casting** | Character visual DNA, psychological profile, voice models, wardrobe | `domain/character` |
-| **Production Design** | World building, environments, props, architecture, style bible | `domain/production_design` |
-| **Previsualization** | Storyboard keyframes, shot list, camera blocking, animatic | `domain/previs` |
-| **Cinematography & Light** | Shot framing, lenses, camera movement, 14 lighting styles (#Light 01-14) | `domain/cinematography` |
-| **Audio & Performance** | Voice synthesis, dialogue timing, Foley, ambient score, acting cues | `domain/audio` |
-| **Master Production Bible** | Canonical approved creative specifications and immutable snapshots | `domain/mpb` |
-| **Continuity Engine** | Multi-shot visual & narrative lock validation, CLIP consistency | `domain/continuity` |
-| **AI Orchestration** | Provider routing, prompt compiling, generation dispatch, fallbacks | `domain/orchestration` |
-| **Production Workflow** | 16-stage pipeline execution, step dependencies, human approvals | `domain/workflow` |
-| **Quality Control (QC)** | Multi-tier automated scoring, cinematic gates, compliance signoff | `domain/qc` |
-| **Asset Management** | Versioned media files, hashes, derivatives, storage references | `domain/asset` |
-| **Identity & Security** | User authentication, RBAC, tenant isolation, audit trails | `domain/identity` |
+| Module                      | Primary Responsibility                                                   | Target Bounded Context     |
+| :-------------------------- | :----------------------------------------------------------------------- | :------------------------- |
+| **Creative Brief**          | Project objectives, target audience, themes, and creative guidelines     | `domain/creative_brief`    |
+| **Story & Screenplay**      | Narrative architecture, scene breakdown, beats, and dialogue             | `domain/screenplay`        |
+| **Character Casting**       | Character visual DNA, psychological profile, voice models, wardrobe      | `domain/character`         |
+| **Production Design**       | World building, environments, props, architecture, style bible           | `domain/production_design` |
+| **Previsualization**        | Storyboard keyframes, shot list, camera blocking, animatic               | `domain/previs`            |
+| **Cinematography & Light**  | Shot framing, lenses, camera movement, 14 lighting styles (#Light 01-14) | `domain/cinematography`    |
+| **Audio & Performance**     | Voice synthesis, dialogue timing, Foley, ambient score, acting cues      | `domain/audio`             |
+| **Master Production Bible** | Canonical approved creative specifications and immutable snapshots       | `domain/mpb`               |
+| **Continuity Engine**       | Multi-shot visual & narrative lock validation, CLIP consistency          | `domain/continuity`        |
+| **AI Orchestration**        | Provider routing, prompt compiling, generation dispatch, fallbacks       | `domain/orchestration`     |
+| **Production Workflow**     | 16-stage pipeline execution, step dependencies, human approvals          | `domain/workflow`          |
+| **Quality Control (QC)**    | Multi-tier automated scoring, cinematic gates, compliance signoff        | `domain/qc`                |
+| **Asset Management**        | Versioned media files, hashes, derivatives, storage references           | `domain/asset`             |
+| **Identity & Security**     | User authentication, RBAC, tenant isolation, audit trails                | `domain/identity`          |
 
 ---
 
@@ -250,6 +262,7 @@ Modules interact strictly through approved mechanisms:
 3. **Explicit Query Contracts**: Read-only queries pass through explicit DTO interfaces.
 
 Prohibitions:
+
 - No circular dependencies between packages.
 - No direct access to internal repository implementations or raw database tables of another module.
 - No importing infrastructure adapters inside domain or application layers.
@@ -262,7 +275,7 @@ Prohibitions:
 - Each domain module strictly owns its entities and transactional invariants.
 - Modules share a single relational database for the MVP (SQLite in WAL mode for development, PostgreSQL target for production) coordinated via the `UnitOfWork` pattern.
 - Long-running AI generation jobs never hold database transactions open.
-- The Master Production Bible (MPB) acts as the immutable single source of truth for approved creative specifications (see [ADR-0004](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0004-master-production-bible.md)).
+- The Master Production Bible (MPB) acts as the immutable single source of truth for approved creative specifications (see [ADR-0004](ADR-0004-master-production-bible.md)).
 
 ---
 
@@ -275,7 +288,9 @@ flowchart LR
 ```
 
 ### Extraction Criteria
+
 A domain module will only be extracted into an independent microservice if at least one operational condition is satisfied:
+
 1. **Disproportionate Compute**: AI rendering or video generation requires dedicated GPU nodes or autoscaling independent of API traffic.
 2. **Distinct Lifecycle**: An integration module requires zero-downtime canary deployments independent of core business rules.
 3. **Security Boundary**: Credential management or asset rendering requires isolated network VPC boundaries.
@@ -285,6 +300,7 @@ A domain module will only be extracted into an independent microservice if at le
 ## 11. Security and Reliability Requirements
 
 The architecture mandates:
+
 - Authentication & authorization at application ingress (JWT Bearer tokens, RBAC).
 - Secure credential injection via environment variables (`pydantic-settings`).
 - Complete traceability with correlation IDs (`X-Correlation-ID`) across every request, log, and job.
@@ -296,12 +312,14 @@ The architecture mandates:
 ## 12. Consequences & Trade-offs
 
 ### Positive Consequences
+
 - Strict decoupling allows independent domain testing and parallel feature development.
 - Zero premature microservice overhead (no distributed tracing overhead, network latency, or split-brain states).
 - Fast local development with `uv` and automated test suite.
 - Clean migration path to distributed workers when workload scales.
 
 ### Negative Consequences
+
 - Developers must maintain architectural discipline and observe layer boundaries.
 - Boundary violations must be actively caught by architecture tests.
 
@@ -309,12 +327,12 @@ The architecture mandates:
 
 ## 13. Risks and Mitigations
 
-| Risk | Impact | Mitigation Strategy |
-| :--- | :--- | :--- |
-| **Layer Boundary Erosion** | High | Enforce automated AST/import layer tests in `tests/architecture/test_layer_boundaries.py` in CI. |
-| **Shared Database Coupling** | Medium | Isolate module schemas; enforce access strictly through domain repositories and UnitOfWork. |
-| **Provider SDK Lock-in** | High | Enforce Provider Adapter Pattern; domain interacts only with abstract ports. |
-| **Blocking API Threads** | Critical | Offload all AI generation and media processing to async workers via background event dispatcher. |
+| Risk                         | Impact   | Mitigation Strategy                                                                              |
+| :--------------------------- | :------- | :----------------------------------------------------------------------------------------------- |
+| **Layer Boundary Erosion**   | High     | Enforce automated AST/import layer tests in `tests/architecture/test_layer_boundaries.py` in CI. |
+| **Shared Database Coupling** | Medium   | Isolate module schemas; enforce access strictly through domain repositories and UnitOfWork.      |
+| **Provider SDK Lock-in**     | High     | Enforce Provider Adapter Pattern; domain interacts only with abstract ports.                     |
+| **Blocking API Threads**     | Critical | Offload all AI generation and media processing to async workers via background event dispatcher. |
 
 ---
 
@@ -323,6 +341,7 @@ The architecture mandates:
 ### Status: IMPLEMENTED
 
 The core foundations of ADR-0001 have been implemented and verified in the codebase:
+
 - [x] **Layer Separation**: `backend/app/domain/`, `backend/app/application/`, `backend/app/infrastructure/`, `backend/app/core/`, and `backend/app/api/` established.
 - [x] **Framework Independence**: Domain primitives (`Entity`, `ValueObject`, `DomainEvent`, `BaseRepository`) have zero external third-party dependencies.
 - [x] **Automated Architecture Tests**: Layer boundaries verified in `tests/architecture/test_layer_boundaries.py`.
@@ -333,10 +352,10 @@ The core foundations of ADR-0001 have been implemented and verified in the codeb
 
 ## 15. Related Documents
 
-- [README.md](file:///home/ubuntu/MovieAIProducer/README.md)
-- [ARCHITECTURE.md](file:///home/ubuntu/MovieAIProducer/ARCHITECTURE.md)
-- [ADR-0002: Application Structure](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0002-application-structure.md)
-- [ADR-0003: Provider Adapter System](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0003-provider-adapter-system.md)
-- [ADR-0006: Data Storage Strategy](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0006-data-storage-strategy.md)
-- [CDA-0002: Canonical Glossary & Domain Ownership Matrix](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0002-canonical-glossary-domain-ownership-matrix.md)
-- [CDA-0005: Canonical Error & Failure Contract Registry](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0005-canonical-error-failure-contract-registry.md)
+- [README.md](../../README.md)
+- [ARCHITECTURE.md](../../ARCHITECTURE.md)
+- [ADR-0002: Application Structure](ADR-0002-application-structure.md)
+- [ADR-0003: Provider Adapter System](ADR-0003-provider-adapter-system.md)
+- [ADR-0006: Data Storage Strategy](ADR-0006-data-storage-strategy.md)
+- [CDA-0002: Canonical Glossary & Domain Ownership Matrix](../CDA/CDA-0002-canonical-glossary-domain-ownership-matrix.md)
+- [CDA-0005: Canonical Error & Failure Contract Registry](../CDA/CDA-0005-canonical-error-failure-contract-registry.md)

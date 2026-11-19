@@ -55,7 +55,7 @@ uv run uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000
 
 The codebase is organized into three concentric architectural rings:
 
-```
+```text
 ┌────────────────────────────────────────────────────────┐
 │                  Infrastructure Layer                  │
 │       (FastAPI, SQLAlchemy, SQLite, Alembic,           │
@@ -90,9 +90,11 @@ The codebase is organized into three concentric architectural rings:
 ### Automated Layer Enforcement
 
 We run automated architecture tests to prevent dependency leakage:
+
 ```bash
 uv run pytest tests/architecture/test_layer_boundaries.py
 ```
+
 Any pull request introducing illegal outer-layer imports into domain modules will fail CI.
 
 ---
@@ -101,7 +103,7 @@ Any pull request introducing illegal outer-layer imports into domain modules wil
 
 Every feature or bug fix follows a strict TDD lifecycle:
 
-```
+```text
 [Write Failing Test] ──> [Verify Test Fails (Red)] ──> [Implement Code (Green)] ──> [Refactor & Clean]
 ```
 
@@ -135,7 +137,7 @@ uv run ruff format .
 
 - **Line Length:** 88 characters.
 - **Type Annotations:** Full type annotations required for all function arguments and return types.
-- **Docstrings:** Clear, concise docstrings explaining *why* a function exists, its parameters, and any raised exceptions.
+- **Docstrings:** Clear, concise docstrings explaining _why_ a function exists, its parameters, and any raised exceptions.
 - **Logging:** Use `structlog` for structured JSON logging. Avoid `print()` statements in production code.
 
 ---
@@ -176,7 +178,7 @@ uv run pytest tests/infrastructure/test_database_migrations.py
 
 Commit messages must follow the [Conventional Commits](https://www.conventionalcommits.org/) specification:
 
-```
+```text
 <type>(<scope>): <short imperative description>
 
 [optional body explaining motivation and architectural context]
@@ -185,6 +187,7 @@ Commit messages must follow the [Conventional Commits](https://www.conventionalc
 ```
 
 Allowed types:
+
 - `feat`: A new feature or pipeline capability.
 - `fix`: A bug fix or defect correction.
 - `refactor`: Code restructuring without behavioral change.
@@ -192,8 +195,9 @@ Allowed types:
 - `docs`: Documentation updates or additions.
 - `chore`: Tooling, dependency updates, or configuration adjustments.
 
-*Example:*
-```
+_Example:_
+
+```text
 feat(database): establish async database foundation
 
 Implement async SQLAlchemy 2.0 engine, Unit of Work pattern,
