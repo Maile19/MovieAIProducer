@@ -1,6 +1,6 @@
 from pathlib import Path
-from unittest.mock import patch
-import sqlite3
+from unittest.mock import AsyncMock, MagicMock
+from sqlalchemy.exc import OperationalError
 
 from fastapi.testclient import TestClient
 import structlog
@@ -169,16 +169,54 @@ def test_request_id_context_isolation_across_requests():
 def test_readiness_database_failure():
     app = create_app()
     with TestClient(app) as client:
-        with patch(
-            "backend.app.api.health.sqlite3.connect",
-            side_effect=sqlite3.OperationalError("disk I/O error"),
-        ):
-            response = client.get("/ready")
-            assert response.status_code == 503
-            data = response.json()
-            assert data["status"] == "not_ready"
-            assert data["checks"]["database"] is False
-            assert data["checks"]["asset_storage"] is True
+        # Simulate active database engine failure by assigning mock engine
+        mock_engine = MagicMock()
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__.side_effect = OperationalError(
+            "connection failed",
+            None,
+            Exception("disk I/O error"),
+        )
+        mock_engine.connect.return_value = mock_connect
+        app.state.db_engine = mock_engine
+
+        response = client.get("/ready")
+        assert response.status_code == 503
+        data = response.json()
+        assert data["status"] == "not_ready"
+        assert data["checks"]["database"] is False
+        assert data["checks"]["asset_storage"] is True
+        # Verify no connection or credential leakage
+        assert "connection failed" not in response.text
+        assert "disk I/O error" not in response.text
+
+
+def test_readiness_database_missing_engine():
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.db_engine = None
+        response = client.get("/ready")
+        assert response.status_code == 503
+        data = response.json()
+        assert data["status"] == "not_ready"
+        assert data["checks"]["database"] is False
+
+
+def test_readiness_custom_database_url(tmp_path: Path, monkeypatch):
+    custom_db = tmp_path / "custom_test.db"
+    app = create_app()
+    monkeypatch.setattr(
+        app.state.settings,
+        "database_url",
+        f"sqlite+aiosqlite:///{custom_db}",
+    )
+    with TestClient(app) as client:
+        response = client.get("/ready")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ready"
+        assert data["checks"]["database"] is True
+        assert data["checks"]["asset_storage"] is True
 
 
 def test_readiness_asset_storage_failure(monkeypatch):

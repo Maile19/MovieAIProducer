@@ -25,11 +25,18 @@ class Settings(BaseSettings):
     service_name: str = "movieai-producer"
 
     database_path: Path = Path("./data/movieai.db")
+    database_url: str | None = None
     asset_storage_path: Path = Path("./data/assets")
 
     allowed_hosts: str = (
         "localhost,127.0.0.1,testserver,producer.apologets.com"
     )
+
+    @property
+    def async_database_url(self) -> str:
+        if self.database_url:
+            return self.database_url
+        return f"sqlite+aiosqlite:///{self.database_path}"
 
     @property
     def allowed_host_list(self) -> list[str]:

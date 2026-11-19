@@ -1,7 +1,7 @@
-import sqlite3
-
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 router = APIRouter(tags=["Health"])
 
@@ -12,21 +12,20 @@ async def liveness():
 @router.get("/ready")
 async def readiness(request: Request):
     settings = request.app.state.settings
+    db_engine = getattr(request.app.state, "db_engine", None)
 
     checks = {
         "database": False,
         "asset_storage": False,
     }
 
-    try:
-        with sqlite3.connect(
-            str(settings.database_path),
-            timeout=2,
-        ) as connection:
-            connection.execute("SELECT 1")
-        checks["database"] = True
-    except (sqlite3.Error, OSError):
-        pass
+    if db_engine is not None:
+        try:
+            async with db_engine.connect() as connection:
+                await connection.execute(text("SELECT 1"))
+            checks["database"] = True
+        except (SQLAlchemyError, OSError, Exception):
+            checks["database"] = False
 
     try:
         checks["asset_storage"] = (

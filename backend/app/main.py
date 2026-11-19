@@ -1,15 +1,20 @@
-import sqlite3
 from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from backend.app.api.health import router as health_router
 from backend.app.core.config import get_settings
 from backend.app.core.logging import configure_logging
 from backend.app.core.middleware import RequestIDMiddleware
+from backend.app.infrastructure.database import (
+    create_database_engine,
+    create_session_factory,
+    dispose_database_engine,
+)
 
 def create_app() -> FastAPI:
     settings = get_settings()
@@ -19,21 +24,23 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        settings.database_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        if "sqlite" in settings.async_database_url:
+            settings.database_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
         settings.asset_storage_path.mkdir(
             parents=True,
             exist_ok=True,
         )
 
-        # Bootstrap database connectivity.
-        with sqlite3.connect(
-            str(settings.database_path),
-            timeout=5,
-        ) as connection:
-            connection.execute("SELECT 1")
+        db_engine = create_database_engine(settings.async_database_url)
+        app.state.db_engine = db_engine
+        app.state.session_factory = create_session_factory(db_engine)
+
+        # Bootstrap and verify database connectivity using active engine
+        async with db_engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
 
         logger.info(
             "application_started",
@@ -43,6 +50,7 @@ def create_app() -> FastAPI:
 
         yield
 
+        await dispose_database_engine(db_engine)
         logger.info("application_stopped")
 
     app = FastAPI(
