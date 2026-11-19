@@ -1,466 +1,282 @@
+---
+id: ADR-0002
+title: Application Structure
+status: IMPLEMENTED
+date: 2026-11-19
+decision_owners: Project Architecture & Core Engineering Team
+decision_scope: Backend and repository layout
+version: "1.2"
+tags: [application-structure, package-layout, clean-architecture, python]
+canonical_path: DECISIONS/ADR/ADR-0002-application-structure.md
+supersedes: []
+superseded_by: []
+---
+
 # ADR-0002: Application Structure
 
-Project: MovieAIProducer
-ADR ID: ADR-0002
-Status: Proposed
-Date: 2026-11-18
-Decision Owner: Project Architecture
+| Attribute | Specification |
+| :--- | :--- |
+| **ADR ID** | ADR-0002 |
+| **Title** | Application Structure: Layered Domain-Oriented Clean Architecture Layout |
+| **Status** | IMPLEMENTED |
+| **Date** | 2026-11-19 |
+| **Decision Owners** | Project Architecture & Core Engineering Team |
+| **Decision Scope** | Backend repository and package layout |
+| **Version** | 1.2 |
+| **Canonical Source** | `DECISIONS/ADR/ADR-0002-application-structure.md` |
+| **Supersedes** | None |
+| **Superseded By** | None |
 
-1. Context
+---
 
-MovieAIProducer memiliki banyak domain produksi film yang saling berhubungan.
+## 1. Context
 
-Struktur aplikasi harus mendukung:
+MovieAIProducer coordinates multiple interconnected film production domains across a 16-stage Hollywood cinematic lifecycle. 
 
-- Domain separation.
-- Clean Architecture.
-- Independent testing.
-- Reusable components.
-- Provider independence.
-- Background processing.
-- Future scalability.
-- Maintainable codebase.
+The application structure must support:
+- Strict domain separation and encapsulation.
+- Clean Architecture / Hexagonal Ports and Adapters.
+- Independent testability of pure business rules without third-party frameworks.
+- Provider independence for AI generation engines (ComfyUI, ElevenLabs, Runway, OpenAI).
+- Asynchronous background processing for long-running media rendering.
+- Maintainable and self-documenting directory structure for human engineers and autonomous AI coding agents.
 
-Struktur folder tidak boleh hanya mengikuti jenis file. Struktur harus mencerminkan tanggung jawab bisnis dan batas domain.
+The file organization must reflect business responsibilities and domain boundaries rather than mere technical file types.
 
-2. Problem Statement
+---
 
-Tanpa struktur aplikasi yang konsisten, risiko yang dapat muncul:
+## 2. Problem Statement
 
-1. Business logic tersebar di API routes.
-2. Database queries bercampur dengan business logic.
-3. Provider SDK digunakan langsung oleh domain.
-4. Modul saling mengakses internal implementation.
-5. Circular dependencies.
-6. Duplicate business rules.
-7. Testing menjadi sulit.
-8. Perubahan satu fitur merusak fitur lain.
+Without a formalized, enforced application structure, typical anti-patterns arise in AI-driven media pipelines:
+1. Business logic leaks into API endpoint handlers.
+2. Raw database queries and ORM models become tightly coupled with domain entities.
+3. Third-party provider SDKs are called directly from core business services.
+4. Modules directly mutate another module's internal state.
+5. Circular package imports paralyze test execution.
+6. Business rules are duplicated across API endpoints and background workers.
+7. Testing requires live external services or heavy database instances.
 
-Diperlukan standar application structure yang konsisten.
+A clear, standardized directory and package structure must be established and enforced across the repository.
 
-3. Decision Drivers
+---
 
-Prioritas:
+## 3. Decision Drivers
 
-- Clear module ownership.
-- Separation of concerns.
-- Dependency control.
-- Testability.
-- Maintainability.
-- Developer productivity.
-- AI coding agent compatibility.
-- Incremental implementation.
+- **Clear Module Ownership**: Unambiguous domain boundaries.
+- **Strict Separation of Concerns**: Isolating domain rules from delivery mechanisms.
+- **Dependency Inversion**: Dependencies flow inward toward business abstractions.
+- **High Testability**: Unit tests execute in milliseconds without external side effects.
+- **AI Agent Friendliness**: Predictable file placement enables autonomous coding agents to navigate the codebase accurately.
+- **Production Grounding**: File layout aligns with actual Python packaging standards (PEP 518/621, Hatchling, uv).
 
-4. Options Considered
+---
 
-Option A: Layer-Based Structure Only
+## 4. Options Considered
 
-Contoh:
-
+### Option A: Layer-Based Technical Structure
+```
 src/
 ├── controllers/
 ├── services/
 ├── repositories/
 ├── models/
-└── utilities/
+└── utils/
+```
+- **Advantages:** Simple to set up initially.
+- **Disadvantages:** Domain concepts are fragmented across folders; lacks bounded context boundaries; high coupling.
+- **Assessment:** **Rejected.**
 
-Advantages:
-
-- Mudah dipahami.
-- Cepat dibuat.
-- Cocok untuk aplikasi kecil.
-
-Disadvantages:
-
-- Domain tersebar di banyak folder.
-- Ownership tidak jelas.
-- Modul mudah saling bergantung.
-
-Option B: Feature-Based Structure
-
-Contoh:
-
+### Option B: Feature-Based Slice Structure
+```
 src/
 ├── projects/
 ├── screenplay/
 ├── characters/
-├── prompts/
-└── production/
-
-Advantages:
-
-- Domain lebih mudah ditemukan.
-- Feature ownership lebih jelas.
-- Cocok untuk pengembangan modular.
-
-Disadvantages:
-
-- Layer boundaries dapat tidak konsisten.
-- Infrastruktur dan business logic dapat bercampur.
-
-Option C: Domain Modules + Clean Architecture
-
-Setiap domain memiliki pemisahan tanggung jawab internal.
-
-Advantages:
-
-- Domain ownership jelas.
-- Dependency lebih terkendali.
-- Testing lebih mudah.
-- Mendukung pertumbuhan sistem.
-
-Disadvantages:
-
-- Struktur awal lebih kompleks.
-- Membutuhkan standar konsisten.
-- Memerlukan aturan komunikasi antar-modul.
-
-5. Proposed Decision
-
-Menggunakan Domain-Oriented Modular Structure dengan Clean Architecture boundaries.
-
-Struktur final harus disesuaikan dengan repository discovery dan stack yang benar-benar digunakan.
-
-6. Proposed Logical Structure
-
-movieai-producer/
-│
-├── apps/
-│   ├── api/
-│   ├── web/
-│   └── worker/
-│
-├── packages/
-│   ├── shared-contracts/
-│   ├── shared-types/
-│   └── shared-utils/
-│
-├── backend/
-│   └── src/
-│       ├── domain/
-│       │   ├── projects/
-│       │   ├── creative_brief/
-│       │   ├── story/
-│       │   ├── screenplay/
-│       │   ├── production_bible/
-│       │   ├── characters/
-│       │   ├── environments/
-│       │   ├── props/
-│       │   ├── wardrobe/
-│       │   ├── storyboard/
-│       │   ├── cinematography/
-│       │   ├── prompts/
-│       │   ├── production/
-│       │   ├── continuity/
-│       │   ├── quality_control/
-│       │   └── editorial/
-│       │
-│       ├── application/
-│       │   ├── projects/
-│       │   ├── screenplay/
-│       │   ├── production/
-│       │   ├── prompts/
-│       │   ├── continuity/
-│       │   └── quality_control/
-│       │
-│       ├── infrastructure/
-│       │   ├── database/
-│       │   ├── providers/
-│       │   ├── storage/
-│       │   ├── queue/
-│       │   ├── observability/
-│       │   └── security/
-│       │
-│       ├── presentation/
-│       │   └── api/
-│       │
-│       └── bootstrap/
-│
-├── frontend/
-│   └── src/
-│       ├── app/
-│       ├── features/
-│       ├── components/
-│       ├── layouts/
-│       ├── hooks/
-│       ├── services/
-│       ├── state/
-│       └── types/
-│
-├── migrations/
-├── tests/
-│   ├── unit/
-│   ├── integration/
-│   ├── contract/
-│   ├── e2e/
-│   └── fixtures/
-│
-├── docs/
-├── scripts/
-├── infrastructure/
-├── .github/
-│   └── workflows/
-│
-├── AGENTS.md
-├── README.md
-├── CONTRIBUTING.md
-└── CHANGELOG.md
-
-Đây là logical proposal. Tidak boleh membuat seluruh struktur tersebut secara otomatis sebelum audit repository.
-
-7. Domain Module Internal Structure
-
-Setiap domain module dapat menggunakan struktur:
-
-projects/
-├── domain/
-│   ├── entities.py
-│   ├── value_objects.py
-│   ├── events.py
-│   └── exceptions.py
-│
-├── application/
-│   ├── commands.py
-│   ├── queries.py
-│   ├── use_cases.py
-│   └── ports.py
-│
-├── infrastructure/
-│   └── repositories/
-│
-└── tests/
-
-Struktur dan ekstensi file mengikuti bahasa pemrograman aktual.
-
-Jangan membuat file kosong hanya untuk memenuhi template.
-
-8. Dependency Rules
-
-Aturan dependency:
-
-Presentation
-     |
-     v
-Application
-     |
-     v
-Domain
-
-Infrastructure
-     |
-     v
-Application Ports
-
-Ketentuan:
-
-1. Domain tidak bergantung pada framework.
-2. Domain tidak bergantung pada database SDK.
-3. Application layer mengatur use cases.
-4. Infrastructure mengimplementasikan interfaces.
-5. Presentation tidak menyimpan business rules.
-6. Provider SDK hanya digunakan melalui provider adapters.
-7. Shared packages tidak boleh menjadi tempat menumpuk business logic.
-
-Dependency harus mengarah ke abstraction yang stabil.
-
-9. Module Ownership
-
-Module| Responsibility
-Projects| Project lifecycle
-Creative Brief| Creative requirements
-Story| Story architecture
-Screenplay| Script and dialogue
-Production Bible| MPB source of truth
-Characters| Character DNA and states
-Environments| Location and environment states
-Props| Prop identity and continuity
-Wardrobe| Costume and appearance
-Storyboard| Visual scene planning
-Cinematography| Camera and lens direction
-Prompts| Prompt specification and compilation
-Production| Generation orchestration
-Continuity| Cross-scene consistency
-Quality Control| Quality evaluation
-Editorial| Editing and delivery
-
-Setiap domain memiliki owner yang bertanggung jawab atas business rules dan kontraknya.
-
-10. Cross-Module Communication
-
-Modul tidak boleh mengakses internal implementation modul lain secara bebas.
-
-Gunakan:
-
-- Public application interfaces.
-- Explicit commands and queries.
-- Domain events jika sesuai.
-- Shared contracts yang stabil.
-- Transaction boundaries yang jelas.
-
-Hindari:
-
-- Direct access ke private repositories modul lain.
-- Circular imports.
-- Shared mutable state.
-- Database table access tanpa ownership rules.
-
-11. Shared Code Policy
-
-Shared code hanya digunakan apabila benar-benar memiliki makna lintas domain.
-
-Contoh:
-
-- UUID utilities.
-- Time utilities.
-- Common error contracts.
-- Shared API types.
-- Trace context.
-- Common validation primitives.
-
-Jangan menempatkan semua fungsi ke dalam "common", "helpers", atau "utils".
-
-Business rules harus tetap berada di domain pemiliknya.
-
-12. Frontend Structure
-
-Frontend menggunakan feature-oriented architecture.
-
-Prinsip:
-
-- Feature components terisolasi.
-- Shared UI components terpusat.
-- API communication melalui service layer.
-- State management memiliki ownership jelas.
-- Business logic penting tidak hanya berada di UI.
-- Error, loading, empty, dan success states harus konsisten.
-
-Production workspace menggunakan landscape-oriented interface sesuai "UI_UX.md".
-
-13. Worker Structure
-
-Background worker harus menjadi execution boundary tersendiri.
-
-Tanggung jawab:
-
-- Process production jobs.
-- Execute provider tasks.
-- Process assets.
-- Run continuity checks.
-- Run QC tasks.
-- Handle retries.
-- Report job lifecycle.
-
-Worker menggunakan application use cases dan infrastructure adapters yang sama dengan API.
-
-Jangan menduplikasi business logic antara API dan worker.
-
-14. Configuration Management
-
-Konfigurasi dipisahkan berdasarkan environment:
-
-- Development.
-- Testing.
-- Staging.
-- Production.
-
-Aturan:
-
-- Tidak ada hardcoded secrets.
-- Gunakan validated configuration.
-- Tetapkan safe defaults.
-- Fail fast jika required configuration tidak tersedia.
-- Jangan menyimpan environment-specific values di domain layer.
-
-15. Testing Structure
-
-Tests harus mengikuti domain dan application boundaries.
-
-Minimum:
-
-- Domain unit tests.
-- Application use-case tests.
-- Infrastructure integration tests.
-- Provider contract tests.
-- API tests.
-- Frontend tests.
-- End-to-end workflow tests.
-
-Setiap modul harus memiliki test ownership yang jelas.
-
-16. Risks & Mitigation
-
-Risk| Mitigation
-Too many small modules| Domain boundary review
-Excessive abstraction| Require practical justification
-Circular dependencies| Automated dependency checks
-Shared package sprawl| Ownership policy
-Inconsistent module structure| Architecture conventions
-Premature monorepo complexity| Repository discovery first
-
-17. Implementation Requirements
-
-Sebelum menerapkan struktur:
-
-1. Audit repository.
-2. Identifikasi existing folder structure.
-3. Identifikasi entry points.
-4. Identifikasi existing domain modules.
-5. Identifikasi import dependencies.
-6. Periksa build dan deployment workflow.
-7. Susun target structure.
-8. Buat migration plan.
-9. Refactor secara bertahap.
-10. Jalankan regression tests.
-
-Tidak boleh melakukan rewrite besar tanpa alasan teknis dan migration strategy.
-
-18. Validation Criteria
-
-Keputusan ini dapat diterima apabila:
-
-- Setiap domain memiliki ownership.
-- Dependency direction konsisten.
-- Domain dapat diuji secara independen.
-- Provider SDK tidak bocor ke domain.
-- Cross-module contracts jelas.
-- Tidak ada circular dependencies.
-- API dan worker tidak menduplikasi business logic.
-- Struktur mendukung incremental development.
-
-19. Consequences
-
-Positive
-
-- Struktur lebih mudah dipahami.
-- Perubahan lebih terisolasi.
-- Testing lebih terarah.
-- AI coding agents lebih mudah menemukan konteks.
-- Pengembangan paralel lebih aman.
-
-Negative
-
-- Memerlukan disiplin boundaries.
-- Ada overhead awal dalam perancangan.
-- Cross-module operations membutuhkan contract design.
-
-20. Related Documents
-
-- "ARCHITECTURE.md"
-- "TASKS.md"
-- "DATA_MODEL.md"
-- "API_SPEC.md"
-- "AGENTS.md"
-- "CONTRIBUTING.md"
-- "TEST_STRATEGY.md"
-- "DEPLOYMENT.md"
-
-21. Final Principle
-
-Struktur aplikasi harus mengikuti domain dan tanggung jawab, bukan sekadar jenis file.
-
-Organize by business capability. Enforce architectural boundaries. Keep implementation replaceable.
+└── prompts/
+```
+- **Advantages:** High cohesion within specific features.
+- **Disadvantages:** Leads to inconsistent architectural layers within features; infrastructure and domain code easily intermingle.
+- **Assessment:** **Rejected as standalone.**
+
+### Option C: Domain-Oriented Modular Clean Architecture (Hybrid)
+Layered architecture at the system core (`domain/`, `application/`, `infrastructure/`, `core/`, `api/`), supporting modular domain slices internally.
+- **Advantages:** Combines rigorous layer boundaries with clear domain ownership; easily verifiable via automated import linter/tests.
+- **Assessment:** **Selected and Implemented.**
 
 ---
 
-ADR Status: Proposed
-Acceptance Condition: Repository discovery, dependency analysis, dan architecture review selesai.
+## 5. Architectural Decision
+
+MovieAIProducer adopts a **Layered Domain-Oriented Clean Architecture** structure rooted in `backend/app/`.
+
+### Implemented Repository Layout
+
+```
+MovieAIProducer/
+├── pyproject.toml              # Project dependencies, build-system (Hatchling), tool config
+├── alembic.ini                 # Database migration configuration
+├── .env.example                # Environment variable specification
+├── backend/
+│   └── app/
+│       ├── __init__.py
+│       ├── main.py             # FastAPI entrypoint, lifespan events, middleware
+│       ├── api/                # Presentation Layer: HTTP endpoints & routers
+│       │   ├── __init__.py
+│       │   └── health.py       # Health check, readiness & liveness probes
+│       ├── application/        # Application Layer: Use cases, DTOs & Port interfaces
+│       │   ├── __init__.py
+│       │   └── common/
+│       │       ├── __init__.py
+│       │       ├── dtos.py     # Request/Response data transfer objects
+│       │       ├── exceptions.py # Application-level exceptions (CDA-0005)
+│       │       ├── ports.py    # Clock, EventDispatcher, UnitOfWork protocols
+│       │       └── use_case.py # Abstract UseCase[TInput, TOutput] base
+│       ├── core/               # Cross-Cutting Infrastructure: Config, logging, security
+│       │   ├── __init__.py
+│       │   ├── config.py       # Pydantic Settings (environment validation)
+│       │   ├── logging.py      # Structlog structured JSON logger
+│       │   └── middleware.py   # Correlation ID (X-Correlation-ID) tracking
+│       ├── domain/             # Domain Layer: Pure enterprise business rules
+│       │   ├── __init__.py
+│       │   └── common/
+│       │       ├── __init__.py
+│       │       ├── entity.py   # Base Entity (UUID identity, timestamps)
+│       │       ├── event.py    # Base DomainEvent (event_id, occurred_at)
+│       │       ├── exceptions.py # Canonical DomainException hierarchy
+│       │       ├── repository.py # Generic BaseRepository[TEntity, TId] protocol
+│       │       └── value_object.py # Immutable frozen ValueObject
+│       └── infrastructure/     # Infrastructure Layer: Persistence & external adapters
+│           ├── __init__.py
+│           ├── common/
+│           │   ├── __init__.py
+│           │   ├── event_bus.py # In-memory async EventDispatcher adapter
+│           │   ├── in_memory_repository.py # Test double repository
+│           │   └── unit_of_work.py # In-memory test double UnitOfWork
+│           └── database/
+│               ├── __init__.py
+│               ├── base.py     # DeclarativeBase for SQLAlchemy ORM
+│               ├── engine.py   # AsyncEngine factory (SQLite WAL mode & PRAGMAs)
+│               ├── repository.py # SqlAlchemyBaseRepository[TModel, TEntity, TId]
+│               ├── session.py  # async_sessionmaker factory
+│               ├── types.py    # UTCDateTime custom SQLAlchemy TypeDecorator
+│               ├── unit_of_work.py # SqlAlchemyUnitOfWork transaction manager
+│               └── models/
+│                   ├── __init__.py
+│                   └── foundation.py # FoundationMetadataModel schema
+├── migrations/                 # Alembic database migrations
+│   ├── env.py                  # Async migration runtime harness
+│   ├── script.py.mako
+│   └── versions/
+│       └── 0001_initial_database_foundation.py
+├── tests/                      # Automated Test Suite
+│   ├── conftest.py
+│   ├── test_health.py
+│   ├── application/
+│   │   └── test_use_case.py
+│   ├── architecture/
+│   │   └── test_layer_boundaries.py # Enforces import rules across layers
+│   ├── domain/
+│   │   └── test_primitives.py
+│   └── infrastructure/
+│       ├── test_adapters.py
+│       ├── test_database_engine.py
+│       ├── test_database_migrations.py
+│       ├── test_database_repository.py
+│       └── test_database_uow.py
+├── DECISIONS/                  # Canonical SSOT: ADRs, Audits, CDAs
+└── docs/                       # Architectural reference documentation
+```
+
+---
+
+## 6. Layer Dependency Hierarchy
+
+```mermaid
+flowchart TD
+    API["API Layer (backend/app/api)\n[FastAPI, Endpoints, Routers]"]
+    APP["Application Layer (backend/app/application)\n[Use Cases, DTOs, Ports]"]
+    DOM["Domain Layer (backend/app/domain)\n[Entities, Value Objects, Domain Events]"]
+    INFRA["Infrastructure Layer (backend/app/infrastructure)\n[SQLAlchemy, SQLite WAL, Adapters]"]
+    CORE["Core Layer (backend/app/core)\n[Config, Structlog, Correlation ID]"]
+
+    API -->|invokes| APP
+    APP -->|manipulates| DOM
+    APP -->|declares| Ports["Ports / Protocols"]
+    INFRA -.->|implements| Ports
+    INFRA -->|maps to| DOM
+    API -->|reads| CORE
+    INFRA -->|reads| CORE
+    APP -->|reads| CORE
+```
+
+### Strict Boundary Rules
+1. **Domain Layer:** Pure Python. May **never** import from `application`, `infrastructure`, `api`, or third-party web/database frameworks.
+2. **Application Layer:** May import only from `domain` and `core`. Never imports from `infrastructure` or `api`.
+3. **Infrastructure Layer:** Implements interfaces/protocols declared in `application` and `domain`. May import from `domain`, `application`, and `core`.
+4. **API Layer:** Entry point for HTTP calls. May import from `application`, `core`, and `domain` (for response typing), but delegates business actions strictly to application use cases.
+5. **Boundary Verification:** Automatically tested by `tests/architecture/test_layer_boundaries.py`.
+
+---
+
+## 7. Domain Module Ownership
+
+| Domain Module | Primary Business Capability | Directory Location |
+| :--- | :--- | :--- |
+| **Foundation & Metadata** | System baseline, schema versioning, operational flags | `backend/app/infrastructure/database/models/foundation.py` |
+| **Creative Brief** | Project intent, target audience, emotional palette, aspect ratio | `backend/app/domain/creative_brief/` (Phase 2) |
+| **Story & Screenplay** | Scene breakdown, script beats, dialogues, emotional arc | `backend/app/domain/screenplay/` (Phase 3) |
+| **Master Production Bible** | Canonical approved state for character DNA, environments, props | `backend/app/domain/mpb/` (Phase 4) |
+| **Visual Direction** | Styles (#Style 01-18), Lighting (#Light 01-14), Acting (#Act 01-24) | `backend/app/domain/visual_direction/` (Phase 5) |
+| **Previsualization** | Storyboard panels, animatic timing, shot blocking | `backend/app/domain/previs/` (Phase 6) |
+| **Prompt Engine** | 12-step Hollywood cinematic prompt compilation and tokenization | `backend/app/domain/prompts/` (Phase 7) |
+| **AI Orchestration** | Provider adapters, batch job queuing, generation dispatch | `backend/app/domain/orchestration/` (Phase 8) |
+| **Continuity Engine** | Multi-shot facial, wardrobe, lighting, and spatial lock checks | `backend/app/domain/continuity/` (Phase 9) |
+| **Quality Control (QC)** | Multi-tier validation gates, cinematic compliance scoring | `backend/app/domain/qc/` (Phase 10) |
+
+---
+
+## 8. Configuration & Environment Management
+
+Application configuration is centralized in `backend/app/core/config.py` using `pydantic-settings`:
+- Configuration values are validated at application bootstrap (`Settings()`).
+- Secrets and environment-specific settings (database URLs, API keys) are loaded from environment variables or `.env`.
+- Safe defaults are provided for local development (e.g., `sqlite+aiosqlite:///./data/movieai.db`).
+- Hardcoded credentials in source code are strictly forbidden.
+
+---
+
+## 9. Testing Strategy Alignment
+
+The directory structure mirrors the test suite layout in `tests/`:
+
+| Test Category | Target Directory | Primary Focus |
+| :--- | :--- | :--- |
+| **Architecture Tests** | `tests/architecture/` | Validates layer import boundaries and dependency inversion rules via AST inspection. |
+| **Domain Unit Tests** | `tests/domain/` | Validates entity identity, value object immutability, and domain event creation. |
+| **Application Tests** | `tests/application/` | Tests use case interactors using in-memory test doubles (`InMemoryRepository`, `InMemoryEventBus`). |
+| **Infrastructure Tests** | `tests/infrastructure/` | Validates real SQLite WAL mode connections, Alembic migrations, and SQLAlchemy repository CRUD. |
+| **API Integration Tests** | `tests/test_health.py` | Validates FastAPI routers, correlation headers, and JSON error response structures using `TestClient`. |
+
+---
+
+## 10. Consequences & Implementation Evidence
+
+### Positive Consequences
+- Crystal-clear developer mental model.
+- Architecture tests provide rapid regression feedback in CI.
+- Autonomous AI coding agents can reliably locate contracts and implementations.
+- Zero cyclic dependencies.
+
+### Implementation Evidence
+- Verified directory layout in `backend/app/`.
+- Verified passing layer boundary tests: `tests/architecture/test_layer_boundaries.py`.
+- Verified passing test suite: 50 tests passed in under 1 second.
+
+---
+
+## 11. Related Documents
+
+- [ADR-0001: Architecture Style](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0001-architecture-style.md)
+- [ADR-0006: Data Storage Strategy](file:///home/ubuntu/MovieAIProducer/DECISIONS/ADR/ADR-0006-data-storage-strategy.md)
+- [CDA-0002: Canonical Glossary & Domain Ownership Matrix](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0002-canonical-glossary-domain-ownership-matrix.md)
+- [CDA-0005: Canonical Error & Failure Contract Registry](file:///home/ubuntu/MovieAIProducer/DECISIONS/CDA/CDA-0005-canonical-error-failure-contract-registry.md)
