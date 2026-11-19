@@ -20,6 +20,9 @@ from backend.app.api.deps import (
 )
 from backend.app.core.config import Settings, get_settings
 from backend.app.infrastructure.database.models.auth import UserModel
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -192,10 +195,13 @@ async def google_callback(
     # Enforce Access Whitelist dynamically
     if settings.auth_access_mode.lower() == "whitelist":
         if email not in settings.allowed_users_list:
+            logger.warning("oauth_access_denied_whitelist", email=email, allowed_users=settings.allowed_users_list)
             return RedirectResponse(
                 url=f"{frontend_url}/login?error=403",
                 status_code=status.HTTP_307_TEMPORARY_REDIRECT,
             )
+
+    logger.info("oauth_access_granted", email=email)
 
     # Upsert user record
     stmt = select(UserModel).where(UserModel.email == email)
