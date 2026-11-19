@@ -14,6 +14,22 @@ export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const sessionCookie = request.cookies.get("movieai_session")?.value;
 
+  // Direct root path redirect with valid Location header (fixes missing Location on static SSG 307)
+  if (pathname === "/") {
+    const targetUrl = request.nextUrl.clone();
+    const forwardedHost = request.headers.get("x-forwarded-host") || request.headers.get("host");
+    const forwardedProto = request.headers.get("x-forwarded-proto") || "https";
+    if (forwardedHost) {
+      const [hostname, port] = forwardedHost.split(":");
+      targetUrl.hostname = hostname;
+      targetUrl.port = port || "";
+      targetUrl.protocol = forwardedProto.endsWith(":") ? forwardedProto : `${forwardedProto}:`;
+    }
+    targetUrl.pathname = sessionCookie ? "/dashboard" : "/login";
+    targetUrl.search = "";
+    return NextResponse.redirect(targetUrl);
+  }
+
   // Protected application routes
   const isProtectedRoute = pathname.startsWith("/dashboard") || pathname.startsWith("/projects");
 
