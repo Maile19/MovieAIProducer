@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ShieldAlert, Lock, Clapperboard, ChevronRight, CheckCircle2 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 
-function LoginContent() {
+function AuthStatusAlerts() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const errorCode = searchParams.get("error");
@@ -22,10 +22,63 @@ function LoginContent() {
 
   const is403 = errorCode === "403";
 
-  const handleGoogleLogin = () => {
-    window.location.href = "/api/v1/auth/google/login";
-  };
+  return (
+    <>
+      {/* 403 Access Denied Alert */}
+      {is403 && (
+        <div className="mb-6 rounded-lg bg-rose-500/10 border border-rose-500/30 p-4 text-left animate-in fade-in slide-in-from-top-2 duration-300">
+          <div className="flex items-start gap-3">
+            <ShieldAlert className="w-5 h-5 text-rose-500 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <h3 className="text-sm font-semibold text-rose-400 font-sans">
+                Early Studio Access Required - Authorized Personnel Only
+              </h3>
+              <p className="text-xs text-obsidian-secondary leading-relaxed">
+                Your authenticated Google identity is not on the active showrunner whitelist. Please contact the studio lead or check your credentials.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
+      {/* Other Generic OAuth Errors */}
+      {errorCode && !is403 && (
+        <div className="mb-6 rounded-lg bg-rose-500/10 border border-rose-500/30 p-4 text-left">
+          <div className="flex items-center gap-2 text-rose-400 text-xs font-mono">
+            <ShieldAlert className="w-4 h-4 shrink-0" />
+            <span>Authorization Error: {errorCode}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Active Session Notice if already logged in */}
+      {isAuthenticated && user && !isLoading && (
+        <div className="mb-6 rounded-lg bg-emerald-500/10 border border-emerald-500/30 p-4 text-left">
+          <div className="flex items-center gap-3">
+            <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+            <div className="flex-1 min-w-0">
+              <div className="text-xs text-emerald-400 font-semibold truncate">
+                Logged in as {user.email}
+              </div>
+              <div className="text-[11px] text-obsidian-secondary">
+                Role: {user.role}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => router.push(redirectTarget)}
+              className="px-3 py-1 text-xs font-mono bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 rounded border border-emerald-500/40"
+            >
+              Continue &rarr;
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+export default function LoginPage() {
   return (
     <div className="relative min-h-screen w-full bg-canvas flex items-center justify-center p-4 sm:p-6 lg:p-8 overflow-hidden select-none">
       {/* Cinematic Ambient Background */}
@@ -65,62 +118,15 @@ function LoginContent() {
             </p>
           </div>
 
-          {/* 403 Access Denied Alert */}
-          {is403 && (
-            <div className="mb-6 rounded-lg bg-rose-500/10 border border-rose-500/30 p-4 text-left animate-in fade-in slide-in-from-top-2 duration-300">
-              <div className="flex items-start gap-3">
-                <ShieldAlert className="w-5 h-5 text-rose-500 shrink-0 mt-0.5" />
-                <div className="space-y-1">
-                  <h3 className="text-sm font-semibold text-rose-400 font-sans">
-                    Early Studio Access Required - Authorized Personnel Only
-                  </h3>
-                  <p className="text-xs text-obsidian-secondary leading-relaxed">
-                    Your authenticated Google identity is not on the active showrunner whitelist. Please contact the studio lead or check your credentials.
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Other Generic OAuth Errors */}
-          {errorCode && !is403 && (
-            <div className="mb-6 rounded-lg bg-rose-500/10 border border-rose-500/30 p-4 text-left">
-              <div className="flex items-center gap-2 text-rose-400 text-xs font-mono">
-                <ShieldAlert className="w-4 h-4 shrink-0" />
-                <span>Authorization Error: {errorCode}</span>
-              </div>
-            </div>
-          )}
-
-          {/* Active Session Notice if already logged in */}
-          {isAuthenticated && user && !isLoading && (
-            <div className="mb-6 rounded-lg bg-emerald-500/10 border border-emerald-500/30 p-4 text-left">
-              <div className="flex items-center gap-3">
-                <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs text-emerald-400 font-semibold truncate">
-                    Logged in as {user.email}
-                  </div>
-                  <div className="text-[11px] text-obsidian-secondary">
-                    Role: {user.role}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => router.push(redirectTarget)}
-                  className="px-3 py-1 text-xs font-mono bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 rounded border border-emerald-500/40"
-                >
-                  Continue &rarr;
-                </button>
-              </div>
-            </div>
-          )}
+          {/* Dynamic Status / Alerts wrapped safely in Suspense */}
+          <Suspense fallback={null}>
+            <AuthStatusAlerts />
+          </Suspense>
 
           {/* Sign In Options */}
           <div className="space-y-4">
-            <button
-              type="button"
-              onClick={handleGoogleLogin}
+            <a
+              href="/api/v1/auth/google/login"
               className="w-full group relative flex items-center justify-center gap-3 py-3.5 px-4 rounded-lg bg-canvas hover:bg-elevated border border-border hover:border-amber-500/60 transition-all duration-200 text-sm font-medium text-obsidian-primary shadow-sm hover:shadow-glow cursor-pointer"
             >
               {/* Google Brand SVG Icon */}
@@ -144,7 +150,7 @@ function LoginContent() {
               </svg>
               <span>Sign in with Google</span>
               <ChevronRight className="w-4 h-4 text-obsidian-muted group-hover:text-amber-500 group-hover:translate-x-0.5 transition-all ml-auto" />
-            </button>
+            </a>
 
             <div className="pt-2 flex items-center justify-center gap-2 text-[11px] text-obsidian-muted font-mono">
               <Lock className="w-3.5 h-3.5 text-amber-500/70" />
@@ -180,19 +186,5 @@ function LoginContent() {
         </div>
       </div>
     </div>
-  );
-}
-
-export default function LoginPage() {
-  return (
-    <Suspense
-      fallback={
-        <div className="min-h-screen w-full bg-canvas flex items-center justify-center text-obsidian-secondary font-mono text-sm">
-          Loading Studio Access Gate...
-        </div>
-      }
-    >
-      <LoginContent />
-    </Suspense>
   );
 }
