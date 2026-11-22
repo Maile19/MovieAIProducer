@@ -12,6 +12,7 @@ from backend.app.api.v1.qc import router as qc_router
 from backend.app.api.v1.scenes import router as scenes_router
 from backend.app.api.v1.shots import router as shots_router
 from backend.app.api.v1.transpile import router as transpile_router
+from backend.app.api.v1.hermes_nova import router as hermes_nova_router
 
 v1_router = APIRouter(prefix="/api/v1")
 
@@ -27,5 +28,6 @@ v1_router.include_router(qc_router)
 v1_router.include_router(export_router)
 v1_router.include_router(previews_router)
 v1_router.include_router(flow_router)
+v1_router.include_router(hermes_nova_router)
 
 __all__ = ["v1_router"]

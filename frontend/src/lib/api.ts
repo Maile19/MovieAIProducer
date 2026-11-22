@@ -63,6 +63,50 @@ export interface PresetCreateInput {
   preset_data: Record<string, any>;
 }
 
+export interface HermesCatalogItem {
+  id: string;
+  category: string;
+  trend_tag: string;
+  target_style_code: string;
+  target_style_name: string;
+  aspect_ratio: string;
+  avg_retention_pacing: string;
+  suggested_premise_seed: string;
+  seo_keywords: string[];
+}
+
+export interface HermesTitleItem {
+  rank: number;
+  title: string;
+  slug: string;
+  trend_hook: string;
+  target_keywords: string[];
+  hook_score: number;
+}
+
+export interface HermesSynopsisItem {
+  rank: number;
+  angle_label: string;
+  synopsis: string;
+  retention_hook: string;
+  target_audience: string;
+}
+
+export interface HermesTitlesResponse {
+  status: string;
+  source: "llm" | "procedural_fallback";
+  context_summary: string;
+  recommendations: HermesTitleItem[];
+  seo_description_tags?: string[];
+}
+
+export interface HermesSynopsesResponse {
+  status: string;
+  source: "llm" | "procedural_fallback";
+  locked_title: string;
+  synopses: HermesSynopsisItem[];
+}
+
 export interface ProjectUpdateInput {
   title?: string;
   aspect_ratio?: string;
@@ -282,6 +326,7 @@ export interface TranspileInput {
   aspect_ratio?: string;
   preset_rules?: Record<string, any>;
   is_non_verbal?: boolean;
+  model?: string;
 }
 
 export interface TranspileResult {
@@ -1066,6 +1111,38 @@ export const api = {
         body: JSON.stringify(payload || {}),
       });
     },
+    generateProjectPreview: async (
+      projectId: string,
+      payload?: {
+        prompt?: string;
+        negative_prompt?: string;
+        steps?: number;
+        aspect_ratio?: string;
+        provider?: "9router" | "sd35_large_hf" | "mock" | string;
+        model?: string;
+        enable_fallback?: boolean;
+      }
+    ): Promise<{
+      data: {
+        project_id: string;
+        scene_id?: string | null;
+        preview_url: string;
+        seed: number;
+        prompt: string;
+        width: number;
+        height: number;
+        steps: number;
+        provider: string;
+        model?: string | null;
+        rate_limit_info?: Record<string, any> | null;
+        created_at: string;
+      };
+    }> => {
+      return apiRequest(`/projects/${projectId}/generate-preview`, {
+        method: "POST",
+        body: JSON.stringify(payload || {}),
+      });
+    },
     getPreviewProviders: async (): Promise<{
       data: {
         default_provider: string;
@@ -1372,6 +1449,62 @@ export const api = {
     },
     listJobs: async (limit: number = 30): Promise<{ jobs: FlowJob[] }> => {
       return apiRequest(`/api/flow/images/jobs?limit=${limit}`);
+    },
+  },
+
+  // Hermes Nova (Polya AI) YouTube Trend Engine
+  hermesNova: {
+    getCatalog: async (): Promise<{ status: string; total: number; data: HermesCatalogItem[] }> => {
+      return apiRequest<{ status: string; total: number; data: HermesCatalogItem[] }>("/hermes-nova/catalog");
+    },
+    ideateTitles: async (payload: {
+      preset_name?: string;
+      category?: string;
+      target_style_code?: string;
+      target_style_desc?: string;
+      aspect_ratio?: string;
+      seed_premise?: string;
+    }): Promise<HermesTitlesResponse> => {
+      return apiRequest<HermesTitlesResponse>("/hermes-nova/ideate-titles", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    ideateSynopses: async (payload: {
+      locked_title: string;
+      preset_name?: string;
+      target_style_code?: string;
+      aspect_ratio?: string;
+      seed_premise?: string;
+      trend_keywords?: string[];
+    }): Promise<HermesSynopsesResponse> => {
+      return apiRequest<HermesSynopsesResponse>("/hermes-nova/ideate-synopses", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+  },
+
+  // 360p Previews Engine (Point 8 & Refinement 4)
+  previews: {
+    generateProjectPreview: async (
+      projectId: string,
+      payload?: { aspect_ratio?: string; provider?: string; model?: string; prompt?: string }
+    ): Promise<{ status: string; preview_url: string; width: number; height: number; provider: string; model?: string }> => {
+      return apiRequest(`/previews/projects/${projectId}/generate-preview`, {
+        method: "POST",
+        body: JSON.stringify(payload || {}),
+      });
+    },
+    generateScenePreview: async (
+      projectId: string,
+      sceneId: string,
+      payload?: { aspect_ratio?: string; provider?: string }
+    ): Promise<{ status: string; preview_url: string; width: number; height: number; provider: string }> => {
+      return apiRequest(`/previews/projects/${projectId}/scenes/${sceneId}/generate`, {
+        method: "POST",
+        body: JSON.stringify(payload || {}),
+      });
     },
   },
 };

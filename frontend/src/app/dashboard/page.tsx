@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -21,6 +22,7 @@ import {
   Ratio,
   Palette,
   Filter,
+  Bot,
 } from "lucide-react";
 import AppShell from "@/components/layout/AppShell";
 import { useAuth } from "@/hooks/useAuth";
@@ -28,6 +30,7 @@ import { api, Project, ProjectCreateInput } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { DEFAULT_STYLES } from "@/lib/studio-constants";
 import ObsidianDropdown from "@/components/ui/ObsidianDropdown";
+import HermesNovaDrawer from "@/components/hermes/HermesNovaDrawer";
 
 const ASPECT_RATIOS = [
   { value: "16:9", label: "16:9 Cinema Widescreen", desc: "Standard theatrical & streaming ratio" },
@@ -43,6 +46,22 @@ export default function DashboardPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [filterStage, setFilterStage] = useState<string>("all");
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  // Lock body scroll when create modal is open to prevent background scrolling on mobile
+  useEffect(() => {
+    if (isCreateModalOpen) {
+      const originalOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      return () => {
+        document.body.style.overflow = originalOverflow;
+      };
+    }
+  }, [isCreateModalOpen]);
 
   // Form State for Create Production Modal
   const [newTitle, setNewTitle] = useState("");
@@ -52,6 +71,7 @@ export default function DashboardPage() {
   const [newLogline, setNewLogline] = useState("");
   const [selectedPresetId, setSelectedPresetId] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
+  const [isHermesDrawerOpen, setIsHermesDrawerOpen] = useState(false);
 
   // Fetch Presets Library
   const { data: presetsData } = useQuery({
@@ -59,7 +79,23 @@ export default function DashboardPage() {
     queryFn: () => api.presets.list(),
     enabled: isAuthenticated,
   });
-  const presets = presetsData?.data || [];
+
+  // Refinement 5: Safe deduplication without mutating database rows
+  // Deduplicate presets by normalized name, prioritizing is_system === true, then most recent
+  const presets = React.useMemo(() => {
+    const raw = presetsData?.data || [];
+    const map = new Map<string, (typeof raw)[0]>();
+    for (const p of raw) {
+      const normKey = p.name.trim().toLowerCase();
+      const existing = map.get(normKey);
+      if (!existing) {
+        map.set(normKey, p);
+      } else if (p.is_system && !existing.is_system) {
+        map.set(normKey, p);
+      }
+    }
+    return Array.from(map.values());
+  }, [presetsData?.data]);
 
   // Fetch Projects Slate
   const {
@@ -110,6 +146,13 @@ export default function DashboardPage() {
   const handlePresetSelect = (presetId: string) => {
     setSelectedPresetId(presetId);
     if (!presetId) return;
+
+    if (presetId === "polya_ai") {
+      // Auto-Launch Event Listener for Polya AI Preset
+      setIsHermesDrawerOpen(true);
+      return;
+    }
+
     const p = presets.find((item) => item.id === presetId || item.slug === presetId);
     if (p) {
       const projDefaults = p.preset_data?.project_defaults || {};
@@ -119,10 +162,15 @@ export default function DashboardPage() {
       if (projDefaults.target_style_code) {
         setNewStyleCode(projDefaults.target_style_code);
       }
-      if (!newTitle) {
-        setNewTitle(p.name);
-      }
-      if (p.description && !newLogline) {
+      // Cleanly synchronize title and auto-generate kebab slug on preset switch
+      setNewTitle(p.name);
+      setNewSlug(
+        p.name
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-|-$/g, "")
+      );
+      if (p.description) {
         setNewLogline(p.description);
       }
     }
@@ -458,193 +506,248 @@ export default function DashboardPage() {
         )}
 
         {/* =========================================================================
-         * Create New Production Modal
+         * Create New Production Modal (Rendered via Portal to document.body)
          * ========================================================================= */}
-        {isCreateModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
-            <div className="w-full max-w-lg rounded-xl bg-panel border border-border shadow-studio overflow-hidden">
+        {isCreateModalOpen && mounted && createPortal(
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="w-full max-w-lg rounded-xl bg-panel border border-border shadow-studio overflow-hidden flex flex-col max-h-[90dvh] relative">
               {/* Modal Header */}
-              <div className="px-6 py-4 border-b border-border flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-7 h-7 rounded bg-canvas border border-border flex items-center justify-center text-amber-500">
+              <div className="px-5 sm:px-6 py-4 border-b border-border flex items-center justify-between shrink-0 bg-panel">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="w-7 h-7 rounded bg-canvas border border-border flex items-center justify-center text-amber-500 shrink-0">
                     <Clapperboard className="w-4 h-4" />
                   </div>
-                  <h3 className="font-cinzel font-bold text-base text-obsidian-primary">
+                  <h3 className="font-cinzel font-bold text-sm sm:text-base text-obsidian-primary truncate">
                     Commission New Production
                   </h3>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setIsCreateModalOpen(false)}
-                  className="p-1 rounded text-obsidian-muted hover:text-obsidian-primary hover:bg-canvas transition-colors"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              {/* Form Content */}
-              <form onSubmit={handleCreateSubmit} className="p-6 space-y-4">
-                {formError && (
-                  <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs flex items-center gap-2">
-                    <AlertCircle className="w-4 h-4 shrink-0" />
-                    <span>{formError}</span>
+                <div className="flex items-center gap-2 shrink-0">
+                  {/* Polya AI Live Status Indicator in Modal Header */}
+                  <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-[10px] font-mono text-emerald-400 font-semibold shrink-0 shadow-sm">
+                    <span className="relative flex h-1.5 w-1.5 shrink-0">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                      <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500" />
+                    </span>
+                    <span className="tracking-wide">Polya AI</span>
                   </div>
-                )}
-
-                {/* Production Preset Template Selector */}
-                <div>
-                  <ObsidianDropdown
-                    label="Load Production Preset Blueprint (Optional)"
-                    placeholder="-- Blank / Custom Production Slate --"
-                    icon={<Sparkles className="w-4 h-4 text-amber-500" />}
-                    options={[
-                      {
-                        value: "",
-                        title: "-- Blank / Custom Production Slate --",
-                        description: "Start from scratch without predefined bible blueprint",
-                        badge: "Custom",
-                      },
-                      ...presets.map((preset) => {
-                        const pDef = preset.preset_data?.project_defaults || {};
-                        const sDef = preset.preset_data?.storyboard_defaults || {};
-                        return {
-                          value: preset.id,
-                          title: `${preset.is_system ? "★ " : ""}${preset.name}`,
-                          description: preset.description || `Style: ${pDef.target_style_code || "#Style 01"} • Ratio: ${pDef.aspect_ratio || "16:9"} • ${sDef.total_scenes || 50} Scenes`,
-                          badge: preset.category.toUpperCase(),
-                        };
-                      }),
-                    ]}
-                    value={selectedPresetId}
-                    onChange={(val) => handlePresetSelect(val)}
-                  />
-
-                  {/* Preset Quick Summary Chip */}
-                  {selectedPresetId && (() => {
-                    const activeP = presets.find((p) => p.id === selectedPresetId || p.slug === selectedPresetId);
-                    if (!activeP) return null;
-                    const pDef = activeP.preset_data?.project_defaults || {};
-                    const sDef = activeP.preset_data?.storyboard_defaults || {};
-                    return (
-                      <div className="mt-2 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] font-mono text-amber-300 space-y-1">
-                        <div className="font-bold flex items-center justify-between">
-                          <span>{activeP.name}</span>
-                          <span className="text-[10px] uppercase px-1.5 py-0.2 bg-amber-500/20 rounded">
-                            {activeP.category}
-                          </span>
-                        </div>
-                        <div className="text-[10px] text-obsidian-secondary">
-                          Ratio: {pDef.aspect_ratio || "16:9"} &bull; Style: {pDef.target_style_code || "#Style 01"} &bull; {sDef.total_scenes || 50} Scenes &bull; Pacing: {sDef.pacing?.shot_duration_min || 4.0}-{sDef.pacing?.shot_duration_max || 5.0}s
-                        </div>
-                      </div>
-                    );
-                  })()}
-                </div>
-
-                {/* Project Title */}
-                <div>
-                  <label className="block text-xs font-mono uppercase text-obsidian-secondary mb-1">
-                    Production Title *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={newTitle}
-                    onChange={(e) => {
-                      setNewTitle(e.target.value);
-                      if (!newSlug) {
-                        setNewSlug(
-                          e.target.value
-                            .toLowerCase()
-                            .replace(/[^a-z0-9]+/g, "-")
-                            .replace(/^-|-$/g, "")
-                        );
-                      }
-                    }}
-                    placeholder="e.g. Chronicles of Aethelgard: The Red Sun"
-                    className="w-full bg-canvas border border-border rounded-lg px-3 py-2 text-sm text-obsidian-primary focus:outline-none focus:border-amber-500"
-                  />
-                </div>
-
-                {/* Slug */}
-                <div>
-                  <label className="block text-xs font-mono uppercase text-obsidian-secondary mb-1">
-                    URL Slug
-                  </label>
-                  <input
-                    type="text"
-                    value={newSlug}
-                    onChange={(e) => setNewSlug(e.target.value)}
-                    placeholder="chronicles-of-aethelgard"
-                    className="w-full bg-canvas border border-border rounded-lg px-3 py-2 text-xs font-mono text-obsidian-secondary focus:outline-none focus:border-amber-500"
-                  />
-                </div>
-
-                {/* Aspect Ratio Presets */}
-                <div>
-                  <label className="block text-xs font-mono uppercase text-obsidian-secondary mb-1.5 flex items-center gap-1.5">
-                    <Ratio className="w-3.5 h-3.5 text-amber-500" />
-                    <span>Aspect Ratio Preset</span>
-                  </label>
-                  <div className="grid grid-cols-3 gap-2">
-                    {ASPECT_RATIOS.map((ar) => (
-                      <button
-                        key={ar.value}
-                        type="button"
-                        onClick={() => setNewAspectRatio(ar.value)}
-                        className={cn(
-                          "p-2.5 rounded-lg border text-left transition-all",
-                          newAspectRatio === ar.value
-                            ? "bg-amber-500/10 border-amber-500 text-amber-400"
-                            : "bg-canvas border-border text-obsidian-secondary hover:border-obsidian-muted"
-                        )}
-                      >
-                        <div className="text-xs font-bold font-mono">{ar.value}</div>
-                        <div className="text-[10px] text-obsidian-muted truncate mt-0.5">
-                          {ar.label.split(" ")[1] || ar.label}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Target Visual Style Code */}
-                <div>
-                  <ObsidianDropdown
-                    label="Hollywood Visual Style (#Style Code)"
-                    placeholder="Select Visual Style (#Style 01 - 18)..."
-                    icon={<Palette className="w-4 h-4 text-amber-500" />}
-                    options={DEFAULT_STYLES.map((style) => ({
-                      value: style.code,
-                      title: `${style.code} - ${style.name}`,
-                      description: style.desc,
-                      badge: "Style Code",
-                    }))}
-                    value={newStyleCode}
-                    onChange={(val) => setNewStyleCode(val)}
-                  />
-                </div>
-
-                {/* Logline */}
-                <div>
-                  <label className="block text-xs font-mono uppercase text-obsidian-secondary mb-1">
-                    Logline / Premise Synopsis
-                  </label>
-                  <textarea
-                    rows={3}
-                    value={newLogline}
-                    onChange={(e) => setNewLogline(e.target.value)}
-                    placeholder="In a cybernetic metropolis under perpetual rain, a rogue synthesis engineer uncovers an anomaly in the planetary atmospheric matrix..."
-                    className="w-full bg-canvas border border-border rounded-lg px-3 py-2 text-xs text-obsidian-primary placeholder:text-obsidian-muted focus:outline-none focus:border-amber-500 resize-none font-sans"
-                  />
-                </div>
-
-                {/* Modal Footer Buttons */}
-                <div className="pt-3 border-t border-border flex items-center justify-end gap-3">
                   <button
                     type="button"
                     onClick={() => setIsCreateModalOpen(false)}
-                    className="px-4 py-2 rounded-lg bg-canvas border border-border text-xs text-obsidian-secondary hover:text-obsidian-primary"
+                    className="p-1 rounded text-obsidian-muted hover:text-obsidian-primary hover:bg-canvas transition-colors"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Form Content */}
+              <form onSubmit={handleCreateSubmit} className="flex flex-col min-h-0 flex-1 overflow-hidden">
+                <div className="p-5 sm:p-6 pb-32 sm:pb-12 space-y-4 overflow-y-auto flex-1 overscroll-contain">
+                  {formError && (
+                    <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0" />
+                      <span>{formError}</span>
+                    </div>
+                  )}
+
+                  {/* Production Preset Template Selector */}
+                  <div>
+                    <ObsidianDropdown
+                      label="Load Production Preset Blueprint (Optional)"
+                      placeholder="-- Blank / Custom Production Slate --"
+                      icon={<Sparkles className="w-4 h-4 text-amber-500" />}
+                      options={[
+                        {
+                          value: "polya_ai",
+                          title: "★ Polya AI Preset",
+                          description: "Dynamic YouTube trend & keyword AI ideation assistant",
+                          badge: "AI AGENT",
+                        },
+                        {
+                          value: "",
+                          title: "-- Blank / Custom Production Slate --",
+                          description: "Start from scratch without predefined bible blueprint",
+                          badge: "Custom",
+                        },
+                        ...presets.map((preset) => {
+                          const pDef = preset.preset_data?.project_defaults || {};
+                          const sDef = preset.preset_data?.storyboard_defaults || {};
+                          return {
+                            value: preset.id,
+                            title: `${preset.is_system ? "★ " : ""}${preset.name}`,
+                            description: preset.description || `Style: ${pDef.target_style_code || "#Style 01"} • Ratio: ${pDef.aspect_ratio || "16:9"} • ${sDef.total_scenes || 50} Scenes`,
+                            badge: preset.category.toUpperCase(),
+                          };
+                        }),
+                      ]}
+                      value={selectedPresetId}
+                      onChange={(val) => handlePresetSelect(val)}
+                    />
+
+                    {/* Preset Quick Summary Chip */}
+                    {selectedPresetId === "polya_ai" ? (
+                      <div className="mt-2 p-2.5 rounded-lg bg-amber-500/15 border border-amber-500/40 text-[11px] font-mono text-amber-300 flex items-center justify-between gap-2 animate-in fade-in duration-150">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Bot className="w-4 h-4 text-amber-400 shrink-0" />
+                          <div className="min-w-0">
+                            <span className="font-bold block truncate">★ Polya AI Preset</span>
+                            <span className="text-[10px] text-obsidian-secondary truncate block">
+                              Dynamic YouTube-trend ideation & 10-variation synopsis engine
+                            </span>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setIsHermesDrawerOpen(true)}
+                          className="px-2.5 py-1 rounded bg-amber-500 text-canvas font-bold text-[10px] hover:bg-amber-400 transition-colors shrink-0 shadow-glow"
+                        >
+                          Open Assistant
+                        </button>
+                      </div>
+                    ) : selectedPresetId && (() => {
+                      const activeP = presets.find((p) => p.id === selectedPresetId || p.slug === selectedPresetId);
+                      if (!activeP) return null;
+                      const pDef = activeP.preset_data?.project_defaults || {};
+                      const sDef = activeP.preset_data?.storyboard_defaults || {};
+                      return (
+                        <div className="mt-2 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] font-mono text-amber-300 space-y-1">
+                          <div className="font-bold flex items-center justify-between">
+                            <span>{activeP.name}</span>
+                            <span className="text-[10px] uppercase px-1.5 py-0.2 bg-amber-500/20 rounded">
+                              {activeP.category}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-obsidian-secondary">
+                            Ratio: {pDef.aspect_ratio || "16:9"} &bull; Style: {pDef.target_style_code || "#Style 01"} &bull; {sDef.total_scenes || 50} Scenes &bull; Pacing: {sDef.pacing?.shot_duration_min || 4.0}-{sDef.pacing?.shot_duration_max || 5.0}s
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
+
+                  {/* Project Title */}
+                  <div>
+                    <label className="block text-xs font-mono uppercase text-obsidian-secondary mb-1">
+                      Production Title *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={newTitle}
+                      onChange={(e) => {
+                        setNewTitle(e.target.value);
+                        if (!newSlug) {
+                          setNewSlug(
+                            e.target.value
+                              .toLowerCase()
+                              .replace(/[^a-z0-9]+/g, "-")
+                              .replace(/^-|-$/g, "")
+                          );
+                        }
+                      }}
+                      placeholder="e.g. Chronicles of Aethelgard: The Red Sun"
+                      className="w-full bg-canvas border border-border rounded-lg px-3 py-2 text-sm text-obsidian-primary focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+
+                  {/* Slug */}
+                  <div>
+                    <label className="block text-xs font-mono uppercase text-obsidian-secondary mb-1">
+                      URL Slug
+                    </label>
+                    <input
+                      type="text"
+                      value={newSlug}
+                      onChange={(e) => setNewSlug(e.target.value)}
+                      placeholder="chronicles-of-aethelgard"
+                      className="w-full bg-canvas border border-border rounded-lg px-3 py-2 text-xs font-mono text-obsidian-secondary focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+
+                  {/* Aspect Ratio Presets */}
+                  <div>
+                    <label className="block text-xs font-mono uppercase text-obsidian-secondary mb-1.5 flex items-center gap-1.5">
+                      <Ratio className="w-3.5 h-3.5 text-amber-500" />
+                      <span>Aspect Ratio Preset</span>
+                    </label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {ASPECT_RATIOS.map((ar) => (
+                        <button
+                          key={ar.value}
+                          type="button"
+                          onClick={() => setNewAspectRatio(ar.value)}
+                          className={cn(
+                            "p-2.5 rounded-lg border text-left transition-all",
+                            newAspectRatio === ar.value
+                              ? "bg-amber-500/10 border-amber-500 text-amber-400"
+                              : "bg-canvas border-border text-obsidian-secondary hover:border-obsidian-muted"
+                          )}
+                        >
+                          <div className="text-xs font-bold font-mono">{ar.value}</div>
+                          <div className="text-[10px] text-obsidian-muted truncate mt-0.5">
+                            {ar.label.split(" ")[1] || ar.label}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Target Visual Style Code */}
+                  <div>
+                    <ObsidianDropdown
+                      label="Hollywood Visual Style (#Style Code)"
+                      placeholder="Select Visual Style (#Style 01 - 18)..."
+                      icon={<Palette className="w-4 h-4 text-amber-500" />}
+                      options={DEFAULT_STYLES.map((style) => ({
+                        value: style.code,
+                        title: `${style.code} - ${style.name}`,
+                        description: style.desc,
+                        badge: "Style Code",
+                      }))}
+                      value={newStyleCode}
+                      onChange={(val) => setNewStyleCode(val)}
+                    />
+                  </div>
+
+                  {/* Logline */}
+                  <div>
+                    <label className="block text-xs font-mono uppercase text-obsidian-secondary mb-1">
+                      Logline / Premise Synopsis
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={newLogline}
+                      onChange={(e) => setNewLogline(e.target.value)}
+                      placeholder="In a cybernetic metropolis under perpetual rain, a rogue synthesis engineer uncovers an anomaly in the planetary atmospheric matrix..."
+                      className="w-full bg-canvas border border-border rounded-lg px-3 py-2 text-xs text-obsidian-primary placeholder:text-obsidian-muted focus:outline-none focus:border-amber-500 resize-none font-sans"
+                    />
+                  </div>
+                </div>
+
+                {/* Polya AI Floating Action Button (FAB) */}
+                <button
+                  type="button"
+                  onClick={() => setIsHermesDrawerOpen(true)}
+                  className="absolute bottom-16 sm:bottom-20 right-3 sm:right-5 z-40 px-3.5 py-2 rounded-full bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold text-xs shadow-glow flex items-center gap-2 transition-all group border border-amber-300/40"
+                  title="Open Polya AI Growth Agent"
+                >
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-slate-950 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-slate-950"></span>
+                  </span>
+                  <Bot className="w-3.5 h-3.5 text-slate-950" />
+                  <span>Polya AI</span>
+                  <span className="px-1.5 py-0.2 rounded bg-slate-950/20 text-[9px] uppercase font-mono tracking-wider">
+                    Agent
+                  </span>
+                </button>
+
+                {/* Modal Footer Buttons */}
+                <div className="px-5 sm:px-6 py-3 border-t border-border flex items-center justify-end gap-3 shrink-0 bg-panel/95">
+                  <button
+                    type="button"
+                    onClick={() => setIsCreateModalOpen(false)}
+                    className="px-4 py-2 rounded-lg bg-canvas border border-border text-xs text-obsidian-secondary hover:text-obsidian-primary transition-colors"
                   >
                     Cancel
                   </button>
@@ -668,7 +771,42 @@ export default function DashboardPage() {
                 </div>
               </form>
             </div>
-          </div>
+
+            {/* Polya AI Glassmorphic Overlay Drawer */}
+            <HermesNovaDrawer
+              isOpen={isHermesDrawerOpen}
+              onClose={() => setIsHermesDrawerOpen(false)}
+              activePresetName={
+                selectedPresetId === "polya_ai"
+                  ? "Polya AI Preset"
+                  : presets.find((p) => p.id === selectedPresetId)?.name || ""
+              }
+              activeCategory={
+                selectedPresetId === "polya_ai"
+                  ? "anime"
+                  : presets.find((p) => p.id === selectedPresetId)?.category || "general"
+              }
+              activeAspectRatio={newAspectRatio}
+              activeStyleCode={newStyleCode}
+              activeStyleDesc={DEFAULT_STYLES.find((s) => s.code === newStyleCode)?.desc}
+              seedPremise={newLogline}
+              onSelectCatalogItem={(item) => {
+                setNewAspectRatio(item.aspect_ratio);
+                setNewStyleCode(item.target_style_code);
+                if (!newLogline) {
+                  setNewLogline(item.suggested_premise_seed);
+                }
+              }}
+              onApplyTitleAndSlug={(title, slug) => {
+                setNewTitle(title);
+                setNewSlug(slug);
+              }}
+              onApplySynopsis={(synopsis) => {
+                setNewLogline(synopsis);
+              }}
+            />
+          </div>,
+          document.body
         )}
       </div>
     </AppShell>
