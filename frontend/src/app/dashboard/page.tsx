@@ -20,23 +20,14 @@ import {
   FastForward,
   Ratio,
   Palette,
+  Filter,
 } from "lucide-react";
 import AppShell from "@/components/layout/AppShell";
 import { useAuth } from "@/hooks/useAuth";
 import { api, Project, ProjectCreateInput } from "@/lib/api";
 import { cn } from "@/lib/utils";
-
-// Hollywood Style Codes Catalog
-const STYLE_OPTIONS = [
-  { code: "#Style 01", name: "Cyberpunk Neo-Noir", desc: "Blade Runner rain-slicked neon & anamorphic flares" },
-  { code: "#Style 02", name: "70s Panavision Vintage", desc: "Gritty Kodak 5247 grain with muted warm tones" },
-  { code: "#Style 03", name: "Ethereal High Fantasy", desc: "Lord of the Rings golden volumetric luminescence" },
-  { code: "#Style 04", name: "Hyper-Realistic Sci-Fi", desc: "Interstellar sterile chrome and stark space contrast" },
-  { code: "#Style 05", name: "Golden Hour Naturalism", desc: "Terrence Malick 35mm handheld magic hour" },
-  { code: "#Style 06", name: "Technicolor Vintage 1950s", desc: "High saturated 3-strip dye transfer film look" },
-  { code: "#Style 07", name: "Japanese Anime Cel", desc: "Makoto Shinkai vibrant cloudscapes & light refraction" },
-  { code: "#Style 08", name: "Psychological Monochrome", desc: "High contrast Fincher black & white with razor sharpness" },
-];
+import { DEFAULT_STYLES } from "@/lib/studio-constants";
+import ObsidianDropdown from "@/components/ui/ObsidianDropdown";
 
 const ASPECT_RATIOS = [
   { value: "16:9", label: "16:9 Cinema Widescreen", desc: "Standard theatrical & streaming ratio" },
@@ -59,7 +50,16 @@ export default function DashboardPage() {
   const [newAspectRatio, setNewAspectRatio] = useState("16:9");
   const [newStyleCode, setNewStyleCode] = useState("#Style 01");
   const [newLogline, setNewLogline] = useState("");
+  const [selectedPresetId, setSelectedPresetId] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
+
+  // Fetch Presets Library
+  const { data: presetsData } = useQuery({
+    queryKey: ["presets"],
+    queryFn: () => api.presets.list(),
+    enabled: isAuthenticated,
+  });
+  const presets = presetsData?.data || [];
 
   // Fetch Projects Slate
   const {
@@ -103,7 +103,29 @@ export default function DashboardPage() {
     setNewAspectRatio("16:9");
     setNewStyleCode("#Style 01");
     setNewLogline("");
+    setSelectedPresetId("");
     setFormError(null);
+  };
+
+  const handlePresetSelect = (presetId: string) => {
+    setSelectedPresetId(presetId);
+    if (!presetId) return;
+    const p = presets.find((item) => item.id === presetId || item.slug === presetId);
+    if (p) {
+      const projDefaults = p.preset_data?.project_defaults || {};
+      if (projDefaults.aspect_ratio) {
+        setNewAspectRatio(projDefaults.aspect_ratio);
+      }
+      if (projDefaults.target_style_code) {
+        setNewStyleCode(projDefaults.target_style_code);
+      }
+      if (!newTitle) {
+        setNewTitle(p.name);
+      }
+      if (p.description && !newLogline) {
+        setNewLogline(p.description);
+      }
+    }
   };
 
   const handleCreateSubmit = (e: React.FormEvent) => {
@@ -121,6 +143,7 @@ export default function DashboardPage() {
       settings: {
         logline: newLogline.trim(),
       },
+      preset_id: selectedPresetId || undefined,
     });
   };
 
@@ -173,7 +196,7 @@ export default function DashboardPage() {
          * Pipeline Metrics Summary Cards
          * ========================================================================= */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
-          <div className="p-3.5 sm:p-4 rounded-xl bg-panel border border-border">
+          <div className="p-3.5 sm:p-4 rounded-xl bg-panel/80 backdrop-blur-sm border border-border">
             <div className="flex items-center justify-between text-obsidian-muted mb-1 text-[11px] font-mono uppercase">
               <span>Active Slate</span>
               <Clapperboard className="w-4 h-4 text-amber-500" />
@@ -186,7 +209,7 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          <div className="p-3.5 sm:p-4 rounded-xl bg-panel border border-border">
+          <div className="p-3.5 sm:p-4 rounded-xl bg-panel/80 backdrop-blur-sm border border-border">
             <div className="flex items-center justify-between text-obsidian-muted mb-1 text-[11px] font-mono uppercase">
               <span>Pre-Production</span>
               <BookOpen className="w-4 h-4 text-blue-400" />
@@ -199,7 +222,7 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          <div className="p-3.5 sm:p-4 rounded-xl bg-panel border border-border">
+          <div className="p-3.5 sm:p-4 rounded-xl bg-panel/80 backdrop-blur-sm border border-border">
             <div className="flex items-center justify-between text-obsidian-muted mb-1 text-[11px] font-mono uppercase">
               <span>Generation & Inference</span>
               <Sparkles className="w-4 h-4 text-amber-400" />
@@ -212,7 +235,7 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          <div className="p-3.5 sm:p-4 rounded-xl bg-panel border border-border">
+          <div className="p-3.5 sm:p-4 rounded-xl bg-panel/80 backdrop-blur-sm border border-border">
             <div className="flex items-center justify-between text-obsidian-muted mb-1 text-[11px] font-mono uppercase">
               <span>Post & QC Master</span>
               <CheckCircle2 className="w-4 h-4 text-emerald-400" />
@@ -229,41 +252,34 @@ export default function DashboardPage() {
         {/* =========================================================================
          * Search & Filter Controls
          * ========================================================================= */}
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 p-2 rounded-xl bg-panel/70 border border-border">
+        <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 p-3 rounded-2xl bg-panel/70 border border-border">
           {/* Search Box */}
           <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-obsidian-muted" />
+            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-obsidian-muted" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search productions by title or keyword..."
-              className="w-full bg-canvas border border-border rounded-lg pl-9 pr-4 py-2 text-xs sm:text-sm text-obsidian-primary placeholder:text-obsidian-muted focus:outline-none focus:border-amber-500/60 font-sans"
+              className="w-full bg-canvas border border-border rounded-xl pl-10 pr-4 py-2.5 text-xs sm:text-sm text-obsidian-primary placeholder:text-obsidian-muted focus:outline-none focus:border-amber-500/60 font-sans"
             />
           </div>
 
-          {/* Filter Pills */}
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
-            {[
-              { id: "all", label: "All Slate" },
-              { id: "pre-prod", label: "Pre-Prod (1-5)" },
-              { id: "production", label: "Generation (6-11)" },
-              { id: "post", label: "Post/Master (12-16)" },
-            ].map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setFilterStage(tab.id)}
-                className={cn(
-                  "px-3 py-1.5 rounded-md text-xs font-mono whitespace-nowrap transition-colors",
-                  filterStage === tab.id
-                    ? "bg-amber-500/20 text-amber-400 border border-amber-500/40"
-                    : "text-obsidian-secondary hover:text-obsidian-primary hover:bg-canvas border border-transparent"
-                )}
-              >
-                {tab.label}
-              </button>
-            ))}
+          {/* Slate Filter Dropdown */}
+          <div className="w-full md:w-72 shrink-0">
+            <ObsidianDropdown
+              size="sm"
+              label="Slate Stage Filter"
+              icon={<Filter className="w-3.5 h-3.5 text-amber-500" />}
+              options={[
+                { value: "all", title: "All Slate Productions", description: `All ${projects.length} film projects`, badge: `${projects.length}` },
+                { value: "pre-prod", title: "Pre-Production", description: "Stages 1-5 (Bible, DNA, Script Breakdown)", badge: `${preProdCount}` },
+                { value: "production", title: "Active Generation", description: "Stages 6-11 (Act I-III Gen, QC)", badge: `${prodCount}` },
+                { value: "post", title: "Post / Master", description: "Stages 12-16 (Assembly, Delivery)", badge: `${postCount}` },
+              ]}
+              value={filterStage}
+              onChange={(val) => setFilterStage(val)}
+            />
           </div>
         </div>
 
@@ -319,7 +335,7 @@ export default function DashboardPage() {
               return (
                 <div
                   key={project.id}
-                  className="rounded-xl bg-panel border border-border hover:border-amber-500/50 transition-all duration-200 flex flex-col justify-between overflow-hidden shadow-studio group"
+                  className="rounded-xl bg-panel/80 backdrop-blur-md border border-border hover:border-amber-500/50 transition-all duration-200 flex flex-col justify-between overflow-hidden shadow-studio group"
                 >
                   {/* Top Bar / Visual Header */}
                   <div className="p-5 pb-3">
@@ -475,6 +491,56 @@ export default function DashboardPage() {
                   </div>
                 )}
 
+                {/* Production Preset Template Selector */}
+                <div>
+                  <ObsidianDropdown
+                    label="Load Production Preset Blueprint (Optional)"
+                    placeholder="-- Blank / Custom Production Slate --"
+                    icon={<Sparkles className="w-4 h-4 text-amber-500" />}
+                    options={[
+                      {
+                        value: "",
+                        title: "-- Blank / Custom Production Slate --",
+                        description: "Start from scratch without predefined bible blueprint",
+                        badge: "Custom",
+                      },
+                      ...presets.map((preset) => {
+                        const pDef = preset.preset_data?.project_defaults || {};
+                        const sDef = preset.preset_data?.storyboard_defaults || {};
+                        return {
+                          value: preset.id,
+                          title: `${preset.is_system ? "★ " : ""}${preset.name}`,
+                          description: preset.description || `Style: ${pDef.target_style_code || "#Style 01"} • Ratio: ${pDef.aspect_ratio || "16:9"} • ${sDef.total_scenes || 50} Scenes`,
+                          badge: preset.category.toUpperCase(),
+                        };
+                      }),
+                    ]}
+                    value={selectedPresetId}
+                    onChange={(val) => handlePresetSelect(val)}
+                  />
+
+                  {/* Preset Quick Summary Chip */}
+                  {selectedPresetId && (() => {
+                    const activeP = presets.find((p) => p.id === selectedPresetId || p.slug === selectedPresetId);
+                    if (!activeP) return null;
+                    const pDef = activeP.preset_data?.project_defaults || {};
+                    const sDef = activeP.preset_data?.storyboard_defaults || {};
+                    return (
+                      <div className="mt-2 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] font-mono text-amber-300 space-y-1">
+                        <div className="font-bold flex items-center justify-between">
+                          <span>{activeP.name}</span>
+                          <span className="text-[10px] uppercase px-1.5 py-0.2 bg-amber-500/20 rounded">
+                            {activeP.category}
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-obsidian-secondary">
+                          Ratio: {pDef.aspect_ratio || "16:9"} &bull; Style: {pDef.target_style_code || "#Style 01"} &bull; {sDef.total_scenes || 50} Scenes &bull; Pacing: {sDef.pacing?.shot_duration_min || 4.0}-{sDef.pacing?.shot_duration_max || 5.0}s
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+
                 {/* Project Title */}
                 <div>
                   <label className="block text-xs font-mono uppercase text-obsidian-secondary mb-1">
@@ -544,21 +610,19 @@ export default function DashboardPage() {
 
                 {/* Target Visual Style Code */}
                 <div>
-                  <label className="block text-xs font-mono uppercase text-obsidian-secondary mb-1 flex items-center gap-1.5">
-                    <Palette className="w-3.5 h-3.5 text-amber-500" />
-                    <span>Hollywood Visual Style (#Style Code)</span>
-                  </label>
-                  <select
+                  <ObsidianDropdown
+                    label="Hollywood Visual Style (#Style Code)"
+                    placeholder="Select Visual Style (#Style 01 - 18)..."
+                    icon={<Palette className="w-4 h-4 text-amber-500" />}
+                    options={DEFAULT_STYLES.map((style) => ({
+                      value: style.code,
+                      title: `${style.code} - ${style.name}`,
+                      description: style.desc,
+                      badge: "Style Code",
+                    }))}
                     value={newStyleCode}
-                    onChange={(e) => setNewStyleCode(e.target.value)}
-                    className="w-full bg-canvas border border-border rounded-lg px-3 py-2 text-xs font-mono text-obsidian-primary focus:outline-none focus:border-amber-500"
-                  >
-                    {STYLE_OPTIONS.map((style) => (
-                      <option key={style.code} value={style.code}>
-                        {style.code} - {style.name} ({style.desc.slice(0, 45)}...)
-                      </option>
-                    ))}
-                  </select>
+                    onChange={(val) => setNewStyleCode(val)}
+                  />
                 </div>
 
                 {/* Logline */}

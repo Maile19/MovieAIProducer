@@ -11,9 +11,11 @@ import {
   AlertTriangle,
   Loader2,
   CheckCircle,
+  BookmarkPlus,
 } from "lucide-react";
 import { api, MasterProductionBible } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import SavePresetModal from "@/components/presets/SavePresetModal";
 
 interface RevisionLockTabProps {
   projectId: string;
@@ -32,6 +34,7 @@ export default function RevisionLockTab({
   );
   const [lockModalOpen, setLockModalOpen] = useState(false);
   const [isDownloading, setIsDownloading] = useState<string | null>(null);
+  const [savePresetModalOpen, setSavePresetModalOpen] = useState(false);
 
   const isLocked = bible?.is_locked || false;
 
@@ -239,7 +242,40 @@ export default function RevisionLockTab({
             </button>
           </div>
         </div>
+
+        {/* Reusable Production Preset Library Action */}
+        <div className="p-4 rounded-xl bg-canvas border border-border flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-500 shrink-0">
+              <BookmarkPlus className="w-5 h-5" />
+            </div>
+            <div>
+              <h5 className="font-mono text-xs font-bold text-obsidian-primary">
+                Reusable Production Preset Library
+              </h5>
+              <p className="text-xs text-obsidian-muted">
+                Save this project&apos;s visual DNA, cinematography rules, and QC thresholds as a template for new productions.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSavePresetModalOpen(true)}
+            className="flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-canvas font-bold text-xs shadow-glow transition-all shrink-0 cursor-pointer"
+          >
+            <BookmarkPlus className="w-4 h-4" />
+            <span>Save as Reusable Preset</span>
+          </button>
+        </div>
       </div>
+
+      {/* Save as Preset Modal */}
+      <SavePresetModal
+        isOpen={savePresetModalOpen}
+        onClose={() => setSavePresetModalOpen(false)}
+        projectId={projectId}
+        defaultTitle={`Production v${bible?.version || 1}`}
+      />
 
       {/* Confirmation Lock Modal */}
       {lockModalOpen && (

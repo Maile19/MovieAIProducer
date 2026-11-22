@@ -47,7 +47,7 @@ export default function ApprovalGateModal({
     "DNA Drift Detected",
     "Lighting Inconsistency",
     "Motion Blur Artifact",
-    "Dialogue Overflow (>5s)",
+    "Dialogue Overflow",
     "Anamorphic Flare Misaligned",
     "Pacing Approved",
     "Cinematography Golden Cut",

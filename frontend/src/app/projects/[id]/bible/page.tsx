@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
@@ -38,10 +38,14 @@ export default function ProductionBiblePage() {
   const [bible, setBible] = useState<MasterProductionBible | null>(null);
   const [characters, setCharacters] = useState<Character[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const hasLoadedRef = useRef(false);
 
-  const loadBibleData = useCallback(async () => {
+  const loadBibleData = useCallback(async (options?: { silent?: boolean }) => {
     try {
-      setIsLoading(true);
+      const isInitial = !hasLoadedRef.current;
+      if (isInitial && !options?.silent) {
+        setIsLoading(true);
+      }
       const [projRes, bibleRes, charRes] = await Promise.allSettled([
         api.projects.get(projectId),
         api.bible.get(projectId),
@@ -50,7 +54,7 @@ export default function ProductionBiblePage() {
 
       if (projRes.status === "fulfilled" && projRes.value?.data) {
         setProject(projRes.value.data);
-      } else {
+      } else if (!project) {
         setProject({
           id: projectId,
           title: "Cyberpunk Hollywood Master Cut",
@@ -67,7 +71,7 @@ export default function ProductionBiblePage() {
 
       if (bibleRes.status === "fulfilled" && bibleRes.value?.data) {
         setBible(bibleRes.value.data);
-      } else {
+      } else if (!bible) {
         setBible({
           id: "bible_1",
           project_id: projectId,
@@ -93,12 +97,52 @@ export default function ProductionBiblePage() {
       if (charRes.status === "fulfilled" && charRes.value?.data) {
         setCharacters(charRes.value.data);
       }
+      hasLoadedRef.current = true;
     } catch (err) {
       console.error(err);
     } finally {
       setIsLoading(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
+
+  const handlePatchCharacterAsset = useCallback(
+    (characterId: string, slot: string, imageUrl: string, metaPatch?: Record<string, any>) => {
+      setCharacters((prev) =>
+        prev.map((c) => {
+          if (c.id !== characterId) return c;
+
+          const colMap: Record<string, keyof Character> = {
+            closeup: "closeup_image_url" as any,
+            front: "front_image_url",
+            side: "side_image_url",
+            three_quarter: "three_quarter_image_url",
+            back: "back_image_url",
+            tpose: "tpose_image_url",
+            action: "action_image_url",
+            expression: "expression_image_url",
+          };
+          const targetCol = colMap[slot] || ("front_image_url" as any);
+
+          const updatedMetadata = {
+            ...(c.sheet_metadata || {}),
+            [slot]: {
+              image_url: imageUrl,
+              status: "completed",
+              ...(metaPatch || {}),
+            },
+          };
+
+          return {
+            ...c,
+            [targetCol]: imageUrl,
+            sheet_metadata: updatedMetadata,
+          };
+        })
+      );
+    },
+    []
+  );
 
   useEffect(() => {
     if (projectId) {
@@ -144,7 +188,7 @@ export default function ProductionBiblePage() {
     { id: "revision_lock", label: "Revision Lock & Export", icon: bible?.is_locked ? Lock : Unlock },
   ] as const;
 
-  if (isLoading) {
+  if (isLoading && !bible && characters.length === 0) {
     return (
       <AppShell activeProjectId={projectId}>
         <div className="flex flex-col items-center justify-center min-h-[60vh] gap-3">
@@ -220,7 +264,7 @@ export default function ProductionBiblePage() {
             </Link>
             <button
               type="button"
-              onClick={loadBibleData}
+              onClick={() => loadBibleData()}
               title="Refresh Bible State"
               className="p-1.5 rounded-lg bg-canvas hover:bg-elevated border border-border text-obsidian-muted hover:text-obsidian-primary transition-colors"
             >
@@ -271,9 +315,12 @@ export default function ProductionBiblePage() {
           {activeTab === "character_matrix" && (
             <CharacterMatrixTab
               projectId={projectId}
+              project={project}
               characters={characters}
               isLocked={isLocked}
               onRefresh={loadBibleData}
+              onSilentRefresh={() => loadBibleData({ silent: true })}
+              onPatchCharacterAsset={handlePatchCharacterAsset}
             />
           )}
 

@@ -80,7 +80,7 @@ function AuthStatusAlerts() {
 
 export default function LoginPage() {
   return (
-    <div className="relative min-h-screen w-full bg-canvas flex items-center justify-center p-4 sm:p-6 lg:p-8 overflow-hidden select-none">
+    <div className="relative min-h-screen w-full bg-canvas/75 backdrop-blur-[2px] flex items-center justify-center p-4 sm:p-6 lg:p-8 overflow-hidden select-none">
       {/* Cinematic Ambient Background */}
       <div className="absolute inset-0 pointer-events-none">
         <div className="absolute -top-40 -left-40 w-96 h-96 bg-amber-500/10 rounded-full blur-3xl animate-pulse" />
@@ -101,7 +101,7 @@ export default function LoginPage() {
 
       {/* Main Login Card */}
       <div className="relative z-10 w-full max-w-md mx-auto">
-        <div className="rounded-xl bg-panel/95 backdrop-blur-xl border border-border p-8 shadow-studio relative overflow-hidden">
+        <div className="rounded-xl bg-panel/85 backdrop-blur-xl border border-border p-8 shadow-studio relative overflow-hidden">
           {/* Top Amber Accent Line */}
           <div className="absolute top-0 inset-x-0 h-[2px] bg-gradient-to-r from-transparent via-amber-500 to-transparent" />
 

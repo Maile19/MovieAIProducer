@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.deps import get_current_user, get_session
 from backend.app.infrastructure.database.models.auth import ProjectMemberModel, UserModel
+from backend.app.infrastructure.database.models.preset import ProductionPresetModel
 from backend.app.infrastructure.database.models.project import (
     MasterProductionBibleModel,
     ProjectModel,
@@ -52,6 +53,7 @@ class ProjectCreateRequest(BaseModel):
     aspect_ratio: str = Field(default="16:9", description="16:9 or 9:16")
     target_style_code: str = Field(default="#Style 01", description="#Style 01 to #Style 18")
     settings: dict[str, Any] = Field(default_factory=dict, description="Project settings")
+    preset_id: str | None = Field(default=None, description="Optional preset ID or slug to apply")
 
 
 class ProjectUpdateRequest(BaseModel):
@@ -126,16 +128,47 @@ async def create_project(
     project_id = uuid.uuid4()
     now = datetime.now(timezone.utc)
 
+    # Check and load preset if provided
+    preset_data = {}
+    preset_obj = None
+    if payload.preset_id:
+        try:
+            p_uuid = uuid.UUID(payload.preset_id)
+            preset_stmt = select(ProductionPresetModel).where(ProductionPresetModel.id == p_uuid)
+        except ValueError:
+            preset_stmt = select(ProductionPresetModel).where(ProductionPresetModel.slug == payload.preset_id)
+        preset_obj = (await session.execute(preset_stmt)).scalar_one_or_none()
+        if preset_obj:
+            preset_data = preset_obj.preset_data or {}
+
+    proj_defaults = preset_data.get("project_defaults", {})
+    bible_blueprint = preset_data.get("bible_blueprint", {})
+
+    final_aspect_ratio = payload.aspect_ratio
+    if payload.aspect_ratio == "16:9" and "aspect_ratio" in proj_defaults:
+        final_aspect_ratio = proj_defaults["aspect_ratio"]
+
+    final_style_code = payload.target_style_code
+    if payload.target_style_code == "#Style 01" and "target_style_code" in proj_defaults:
+        final_style_code = proj_defaults["target_style_code"]
+
+    final_settings = dict(payload.settings or {})
+    if preset_obj:
+        final_settings["preset_id"] = str(preset_obj.id)
+        final_settings["preset_slug"] = preset_obj.slug
+        final_settings["preset_name"] = preset_obj.name
+        final_settings["preset_data"] = preset_data
+
     project = ProjectModel(
         id=project_id,
         title=payload.title,
         slug=final_slug,
         status="PLANNING",
-        aspect_ratio=payload.aspect_ratio,
-        target_style_code=payload.target_style_code,
+        aspect_ratio=final_aspect_ratio,
+        target_style_code=final_style_code,
         operational_stage=1,
         owner_id=current_user.id,
-        settings=payload.settings,
+        settings=final_settings,
         created_at=now,
         updated_at=now,
     )
@@ -152,7 +185,22 @@ async def create_project(
     )
     session.add(member)
 
-    # Initialize default Master Production Bible (version 1)
+    # Initialize Master Production Bible with preset blueprint if present
+    initial_styles = {
+        "master_style_code": final_style_code,
+        "render_pipeline": "Photorealistic 35mm Film Grain",
+        "aspect_ratio": final_aspect_ratio,
+    }
+    if "style_parameters" in bible_blueprint:
+        initial_styles.update(bible_blueprint["style_parameters"])
+
+    initial_rules = {
+        "gravity": "earth_standard",
+        "atmosphere": "naturalistic",
+    }
+    if "world_rules" in bible_blueprint:
+        initial_rules.update(bible_blueprint["world_rules"])
+
     bible = MasterProductionBibleModel(
         id=uuid.uuid4(),
         project_id=project_id,
@@ -160,15 +208,8 @@ async def create_project(
         is_locked=False,
         locked_at=None,
         locked_by_user_id=None,
-        style_parameters={
-            "master_style_code": payload.target_style_code,
-            "render_pipeline": "Photorealistic 35mm Film Grain",
-            "aspect_ratio": payload.aspect_ratio,
-        },
-        world_rules={
-            "gravity": "earth_standard",
-            "atmosphere": "naturalistic",
-        },
+        style_parameters=initial_styles,
+        world_rules=initial_rules,
         created_at=now,
         updated_at=now,
     )

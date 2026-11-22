@@ -49,8 +49,18 @@ class LivePromptTranspiler:
         dialogue: str | None = None,
         transition_type: str = "NONE",
         aspect_ratio: str = "16:9",
+        preset_rules: dict[str, Any] | None = None,
+        is_non_verbal: bool = False,
     ) -> dict[str, Any]:
         target = provider_target.lower().strip()
+
+        preset_cfg = preset_rules or {}
+        non_verbal = (
+            is_non_verbal
+            or preset_cfg.get("is_non_verbal", False)
+            or preset_cfg.get("visual_non_verbal_mode", {}).get("enabled", False)
+            or preset_cfg.get("world_rules", {}).get("visual_non_verbal_mode", {}).get("enabled", False)
+        )
 
         style_name = _lookup_name(STYLE_CATALOG, style_code)
         camera_name = _lookup_name(CAMERA_MATRIX, camera_code)
@@ -67,6 +77,9 @@ class LivePromptTranspiler:
             char_part += f" ({state_code})"
 
         action_part = action_description or f"performing with {act_name}"
+        if non_verbal and "slapstick" not in action_part.lower():
+            action_part += " (expressive slapstick non-verbal physical comedy)"
+
         env_part = env_dna or "cinematic environment"
 
         fg_bg_parts = []
@@ -75,6 +88,13 @@ class LivePromptTranspiler:
         if bg_description:
             fg_bg_parts.append(f"Background: {bg_description}")
         fg_bg_text = "; ".join(fg_bg_parts) if fg_bg_parts else "balanced depth layers"
+
+        if non_verbal:
+            effective_dialogue = None
+            effective_transition = transition_type if transition_type != "NONE" else "J_CUT"
+        else:
+            effective_dialogue = dialogue
+            effective_transition = transition_type
 
         if target in ("veo", "google_veo", "google_flow", "flow"):
             # Google Veo / Google Flow: Rich descriptive cinematic phrasing
@@ -145,6 +165,51 @@ class LivePromptTranspiler:
             )
             engine = "openai_sora_v1"
 
+        elif target in ("9router", "nine_router", "9router_ai", "gemini_image", "multimodel"):
+            # 9Router Multi-Model Combo Target: High prompt adherence for multimodal and image generation
+            positive = (
+                f"Cinematic keyframe film still in {aspect_ratio} aspect ratio. "
+                f"Visual Style: {style_name} ({style_code}). "
+                f"Optics: {lens_name} ({lens_code}) paired with {camera_name} ({camera_code}), framed in {comp_name} ({comp_code}). "
+                f"Subject: {char_part}, {action_part}. "
+                f"Scene Environment: {env_part}. "
+                f"Lighting Setup: {light_name} ({light_code}). "
+                f"Spatial Dynamics: {speed_name} ({speed_code}), {fg_bg_text}. "
+                f"35mm motion picture film stock, anamorphic bokeh, photorealistic, 8k uhd, master color grade."
+            )
+            negative = (
+                "blurry, low quality, oversaturated, deformed anatomy, extra limbs, bad eyes, "
+                "CGI render artifacts, plastic skin, 3d cartoon, text, watermark, signature, cropped"
+            )
+            engine = "9router_multimodel_v1"
+
+        elif target in ("sd35", "sd35_large", "huggingface", "sd35_large_hf"):
+            # Hugging Face Stable Diffusion 3.5 Large
+            positive = (
+                f"cinematic film still, {style_name}, shot on {lens_name}, {camera_name}, {comp_name}, "
+                f"{char_part}, {action_part}, {env_part}, dramatic {light_name}, "
+                f"{fg_bg_text}, 35mm film grain, masterpiece, 8k uhd, photorealistic, cinematic composition"
+            )
+            negative = (
+                "blurry, distorted, oversaturated, deformed, bad anatomy, lowres, text, watermark, "
+                "bad proportions, missing fingers, extra limbs, cartoon, illustration"
+            )
+            engine = "sd35_large_hf"
+
+        elif target in ("flux", "flux_dev", "flux_schnell"):
+            # FLUX.1 Flow Transformer
+            positive = (
+                f"Cinematic photograph, {aspect_ratio}. {style_name}. "
+                f"{char_part}, {action_part}. Setting: {env_part}. "
+                f"Lighting: {light_name}. Shot on {lens_name}, {camera_name}. "
+                f"Composition: {comp_name}. {fg_bg_text}. "
+                f"Photorealistic textures, natural skin details, volumetric lighting, award-winning cinematography."
+            )
+            negative = (
+                "ugly, deformed, noisy, blurry, distorted, out of focus, low quality"
+            )
+            engine = "flux.1_dev"
+
         else:
             # Default / ComfyUI / Local reference
             positive = (
@@ -157,6 +222,15 @@ class LivePromptTranspiler:
                 "fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark"
             )
             engine = "comfyui_wan2.1_t2v_14b"
+
+        # Invalidate/enrich with preset modifiers if provided
+        pos_mod = preset_cfg.get("positive_prompt_modifiers", "")
+        neg_add = preset_cfg.get("negative_prompt_additions", "")
+
+        if pos_mod and pos_mod not in positive:
+            positive = f"{positive} {pos_mod}"
+        if neg_add and neg_add not in negative:
+            negative = f"{negative}, {neg_add}"
 
         metadata = {
             "target_engine": engine,
@@ -172,8 +246,11 @@ class LivePromptTranspiler:
                 "state": state_code,
             },
             "audio_bridge": {
-                "dialogue": dialogue,
-                "transition_type": transition_type,
+                "dialogue": effective_dialogue,
+                "transition_type": effective_transition,
+                "non_verbal_mode": non_verbal,
+                "j_cut_offset_seconds": -1.2 if non_verbal else None,
+                "l_cut_offset_seconds": 1.0 if non_verbal else None,
             },
         }
 

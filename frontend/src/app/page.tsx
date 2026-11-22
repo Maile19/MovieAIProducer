@@ -11,7 +11,7 @@ export default function HomePage() {
   }, [router]);
 
   return (
-    <div className="min-h-screen w-full bg-canvas flex items-center justify-center text-obsidian-secondary font-mono text-sm">
+    <div className="min-h-screen w-full bg-canvas/75 backdrop-blur-sm flex items-center justify-center text-obsidian-secondary font-mono text-sm">
       Entering Studio Slate...
     </div>
   );

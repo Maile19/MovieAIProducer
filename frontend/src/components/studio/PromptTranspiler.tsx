@@ -10,7 +10,7 @@ import {
   Flame,
 } from "lucide-react";
 import { api, TranspileInput, TranspileResult } from "@/lib/api";
-import { cn } from "@/lib/utils";
+import ObsidianDropdown from "@/components/ui/ObsidianDropdown";
 
 interface PromptTranspilerProps {
   styleCode: string;
@@ -23,6 +23,8 @@ interface PromptTranspilerProps {
   aspectRatio?: string;
   characterDna?: string;
   actionDescription?: string;
+  presetRules?: Record<string, any>;
+  isNonVerbal?: boolean;
 }
 
 export default function PromptTranspiler({
@@ -36,15 +38,19 @@ export default function PromptTranspiler({
   aspectRatio = "16:9",
   characterDna = "Protagonist, 35mm cybernetic operative, neon reflections",
   actionDescription = "Slowly turns towards the camera, drawing high-frequency energy blade",
+  presetRules,
+  isNonVerbal = false,
 }: PromptTranspilerProps) {
   const [selectedEngine, setSelectedEngine] = useState<
-    "veo" | "kling" | "runway" | "sora" | "comfyui"
-  >("veo");
+    "veo" | "kling" | "runway" | "sora" | "comfyui" | "9router" | "sd35"
+  >("9router");
   const [transpileResult, setTranspileResult] = useState<TranspileResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   const engines = [
+    { id: "9router", label: "9Router AI", badge: "Multi-Combo" },
+    { id: "sd35", label: "SD 3.5 Large", badge: "HuggingFace" },
     { id: "veo", label: "Google Veo / Flow", badge: "Veo 2.0" },
     { id: "kling", label: "Kling 1.5", badge: "Pro" },
     { id: "runway", label: "Runway Gen-3", badge: "Alpha" },
@@ -71,6 +77,8 @@ export default function PromptTranspiler({
           character_dna: characterDna,
           action_description: actionDescription,
           aspect_ratio: aspectRatio === "2.39:1" ? "16:9" : aspectRatio,
+          preset_rules: presetRules,
+          is_non_verbal: isNonVerbal,
         };
 
         const res = await api.transpile.transpilePrompt(payload);
@@ -111,6 +119,8 @@ export default function PromptTranspiler({
     aspectRatio,
     characterDna,
     actionDescription,
+    presetRules,
+    isNonVerbal,
   ]);
 
   const handleCopy = (text: string, key: string) => {
@@ -141,27 +151,20 @@ export default function PromptTranspiler({
         )}
       </div>
 
-      {/* Engine Tabs */}
-      <div className="flex items-center gap-1 overflow-x-auto pb-1 scrollbar-none">
-        {engines.map((eng) => (
-          <button
-            key={eng.id}
-            type="button"
-            onClick={() => setSelectedEngine(eng.id)}
-            className={cn(
-              "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-mono shrink-0 transition-all border",
-              selectedEngine === eng.id
-                ? "bg-amber-500/20 text-amber-400 border-amber-500/40 shadow-sm font-bold"
-                : "bg-canvas text-obsidian-muted hover:text-obsidian-secondary border-border"
-            )}
-          >
-            <span>{eng.label}</span>
-            <span className="text-[9px] px-1 py-0.2 rounded bg-black/40 text-obsidian-muted">
-              {eng.badge}
-            </span>
-          </button>
-        ))}
-      </div>
+      {/* Engine / Provider Selector Dropdown */}
+      <ObsidianDropdown
+        size="sm"
+        label="Generative AI Engine / Provider Target"
+        icon={<Cpu className="w-4 h-4 text-amber-500" />}
+        options={engines.map((eng) => ({
+          value: eng.id,
+          title: eng.label,
+          description: `Generates cinematic prompt syntax tailored for ${eng.label}`,
+          badge: eng.badge,
+        }))}
+        value={selectedEngine}
+        onChange={(val) => setSelectedEngine(val as any)}
+      />
 
       {/* Compiled Positive Prompt Box */}
       <div className="space-y-1.5">

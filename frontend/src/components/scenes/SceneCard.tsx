@@ -2,7 +2,7 @@
 
 import React from "react";
 import { Scene } from "@/lib/api";
-import { Film, Clock, ArrowUpRight } from "lucide-react";
+import { Film, Clock, ArrowUpRight, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface SceneCardProps {
@@ -71,7 +71,7 @@ export default function SceneCard({ scene, isSelected, onSelect }: SceneCardProp
               actInfo.numberColor
             )}
           >
-            #{scene.scene_number.toString().padStart(2, "0")}
+            #{scene.scene_number.toString().padStart(scene.scene_number >= 100 ? 3 : 2, "0")}
           </span>
           <span
             className={cn(
@@ -85,15 +85,19 @@ export default function SceneCard({ scene, isSelected, onSelect }: SceneCardProp
         <div className="flex items-center gap-1">
           <span
             className={cn(
-              "text-[9px] font-mono px-1.5 py-0.2 rounded uppercase font-bold",
-              scene.status === "QC_PASSED" || scene.status === "COMPLETED"
+              "text-[9px] font-mono px-1.5 py-0.2 rounded uppercase font-bold flex items-center gap-1",
+              scene.status === "FALLBACK"
+                ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                : scene.status === "QC_PASSED" || scene.status === "COMPLETED"
                 ? "bg-emerald-500/20 text-emerald-400"
                 : scene.status === "GENERATING"
                 ? "bg-amber-500/20 text-amber-400"
                 : "bg-canvas text-obsidian-muted border border-border/80"
             )}
+            title={scene.status === "FALLBACK" ? "Procedural Fallback (Click Blueprint to Retry Act)" : undefined}
           >
-            {scene.status || "PLANNED"}
+            {scene.status === "FALLBACK" && <AlertTriangle className="w-2.5 h-2.5" />}
+            <span>{scene.status || "PLANNED"}</span>
           </span>
           <ArrowUpRight className="w-3.5 h-3.5 text-obsidian-muted group-hover:text-amber-400 transition-colors" />
         </div>

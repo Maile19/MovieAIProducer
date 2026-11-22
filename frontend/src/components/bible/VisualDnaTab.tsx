@@ -4,6 +4,7 @@ import React, { useState } from "react";
 import { Palette, Camera, Sliders, Check, Copy, Sparkles, Save } from "lucide-react";
 import { DEFAULT_STYLES } from "@/lib/studio-constants";
 import { cn } from "@/lib/utils";
+import ObsidianDropdown from "@/components/ui/ObsidianDropdown";
 
 interface VisualDnaTabProps {
   styleParameters: Record<string, any>;
@@ -127,22 +128,19 @@ export default function VisualDnaTab({
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Style Code Selector */}
         <div className="p-4 rounded-xl bg-panel border border-border space-y-3">
-          <label className="font-cinzel text-xs font-bold uppercase tracking-wider text-obsidian-primary flex items-center gap-1.5">
-            <Sparkles className="w-4 h-4 text-amber-500" />
-            <span>Master Style Code (#Style 01-18)</span>
-          </label>
-          <select
+          <ObsidianDropdown
+            label="Master Style Code (#Style 01-18)"
+            icon={<Sparkles className="w-4 h-4 text-amber-500" />}
+            options={DEFAULT_STYLES.map((s) => ({
+              value: s.code,
+              title: `${s.code}: ${s.name}`,
+              description: s.desc,
+              badge: "Master Style",
+            }))}
             value={styleCode}
             disabled={isLocked}
-            onChange={(e) => setStyleCode(e.target.value)}
-            className="w-full px-3 py-2 rounded-lg bg-canvas border border-border text-xs text-obsidian-primary font-mono focus:border-amber-500 focus:outline-none disabled:opacity-50"
-          >
-            {DEFAULT_STYLES.map((s) => (
-              <option key={s.code} value={s.code}>
-                {s.code}: {s.name}
-              </option>
-            ))}
-          </select>
+            onChange={(val) => setStyleCode(val)}
+          />
           <div className="p-3 rounded-lg bg-canvas/60 border border-border/80 text-xs text-obsidian-secondary font-mono">
             Directives: {DEFAULT_STYLES.find((s) => s.code === styleCode)?.desc || "Cinematic Hollywood aesthetic"}
           </div>

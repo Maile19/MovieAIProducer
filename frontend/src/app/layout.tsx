@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Cinzel, Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import Providers from "@/components/Providers";
+import ParticlesComponent from "@/components/ui/particles-bg";
 
 const cinzel = Cinzel({
   subsets: ["latin"],
@@ -34,8 +35,9 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark">
       <body
-        className={`${inter.variable} ${cinzel.variable} ${jetbrainsMono.variable} font-sans bg-canvas text-obsidian-primary antialiased min-h-screen selection:bg-amber-500/20 selection:text-amber-400`}
+        className={`${inter.variable} ${cinzel.variable} ${jetbrainsMono.variable} font-sans bg-transparent text-obsidian-primary antialiased min-h-screen selection:bg-amber-500/20 selection:text-amber-400`}
       >
+        <ParticlesComponent />
         <Providers>{children}</Providers>
       </body>
     </html>

@@ -13,6 +13,7 @@ import {
   Menu,
   X,
   ChevronDown,
+  Settings,
 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { cn } from "@/lib/utils";
@@ -45,6 +46,12 @@ export default function AppShell({
       icon: LayoutDashboard,
       active: pathname === "/dashboard",
     },
+    {
+      name: "Settings & Flow Pool",
+      href: "/settings",
+      icon: Settings,
+      active: pathname === "/settings",
+    },
     ...(activeProjectId
       ? [
           {
@@ -70,7 +77,7 @@ export default function AppShell({
   ];
 
   return (
-    <div className="min-h-screen bg-canvas text-obsidian-primary flex flex-col selection:bg-amber-500/20 selection:text-amber-400">
+    <div className="min-h-screen bg-canvas/75 backdrop-blur-[2px] text-obsidian-primary flex flex-col selection:bg-amber-500/20 selection:text-amber-400">
       {/* =========================================================================
        * Global Showrunner Header (Sticky, 1440px desktop & 390px mobile responsive)
        * ========================================================================= */}
@@ -202,6 +209,15 @@ export default function AppShell({
                       <div className="px-3 py-1.5 text-[10px] font-mono text-obsidian-muted uppercase">
                         Role: <span className="text-amber-400 font-bold">{user.role}</span>
                       </div>
+
+                      <Link
+                        href="/settings"
+                        onClick={() => setUserDropdownOpen(false)}
+                        className="w-full flex items-center gap-2 px-3 py-2 rounded text-obsidian-secondary hover:text-obsidian-primary hover:bg-elevated transition-colors text-left font-medium text-xs border-t border-border/40 mt-1"
+                      >
+                        <Settings className="w-3.5 h-3.5 text-amber-500" />
+                        <span>Settings & Flow Pool</span>
+                      </Link>
 
                       <button
                         type="button"

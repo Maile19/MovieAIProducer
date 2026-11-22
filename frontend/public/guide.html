@@ -1,0 +1,1325 @@
+<!DOCTYPE html>
+<html lang="id" class="dark scroll-smooth">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Panduan Penggunaan MovieAI Producer | DaVinci Obsidian Studio</title>
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Mermaid.js for diagrams -->
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  
+  <!-- Google Fonts: Inter, Cinzel, JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;800;900&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            obsidian: {
+              950: '#050709',
+              900: '#090B0E',
+              850: '#0D1117',
+              800: '#141A23',
+              700: '#1F2937',
+              600: '#374151',
+            },
+            amber: {
+              400: '#FBBF24',
+              500: '#F59E0B',
+              600: '#D97706',
+            }
+          },
+          fontFamily: {
+            cinzel: ['Cinzel', 'serif'],
+            sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background-color: #07090C;
+      color: #E2E8F0;
+      line-height: 1.75;
+    }
+    h1, h2, h3, .font-cinzel {
+      font-family: 'Cinzel', serif;
+      letter-spacing: 0.03em;
+    }
+    code, pre, .font-mono {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .custom-scrollbar::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-track {
+      background: #090B0E;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+      background: #1F2937;
+      border-radius: 9999px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+      background: #F59E0B;
+    }
+    .mermaid svg {
+      max-width: 100% !important;
+      height: auto !important;
+      margin: 0 auto;
+    }
+  </style>
+</head>
+<body class="min-h-screen bg-[#07090C] text-slate-200 selection:bg-amber-500/25 selection:text-amber-300 antialiased">
+
+  <!-- Ambient Cinematic Glow Background -->
+  <div class="fixed inset-0 pointer-events-none z-0 overflow-hidden">
+    <div class="absolute -top-40 left-1/2 -translate-x-1/2 w-[900px] h-[450px] bg-amber-500/5 blur-[140px] rounded-full"></div>
+    <div class="absolute top-1/3 -left-48 w-[500px] h-[500px] bg-blue-500/5 blur-[150px] rounded-full"></div>
+    <div class="absolute bottom-1/4 -right-48 w-[500px] h-[500px] bg-amber-600/5 blur-[150px] rounded-full"></div>
+  </div>
+
+  <div class="relative z-10 max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
+    
+    <!-- Top Header & Navigation -->
+    <header class="border-b border-gray-800/80 pb-8 mb-10">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-5">
+        <div class="flex items-center gap-4">
+          <div class="w-12 h-12 rounded-2xl bg-gradient-to-br from-amber-500/20 to-amber-900/10 border border-amber-500/30 flex items-center justify-center text-amber-400 font-bold text-2xl shadow-lg shadow-amber-500/5">
+            🎬
+          </div>
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="text-xs font-mono font-semibold tracking-wider text-amber-500 uppercase px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">Studio Suite v2.4</span>
+              <span class="text-xs font-mono text-gray-400">• Official Guide</span>
+            </div>
+            <h1 class="text-2xl sm:text-3xl font-extrabold tracking-wide text-white font-cinzel mt-1">
+              MOVIEAI PRODUCER
+            </h1>
+          </div>
+        </div>
+        <div class="flex items-center gap-3">
+          <a href="#daftar-isi" class="text-xs sm:text-sm px-3.5 py-2 rounded-xl bg-gray-900/90 border border-gray-700/80 text-gray-300 hover:text-white hover:border-gray-500 transition-all font-mono flex items-center gap-1.5">
+            <span>📑</span> Daftar Isi
+          </a>
+          <a href="/" class="text-xs sm:text-sm px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 text-black font-semibold hover:from-amber-400 hover:to-amber-500 transition-all shadow-md shadow-amber-500/20 flex items-center gap-1.5">
+            <span>Masuk Studio</span> &rarr;
+          </a>
+        </div>
+      </div>
+
+      <!-- Hero Banner -->
+      <div class="mt-8 bg-gradient-to-br from-[#0D1117] via-[#0E1520] to-[#0A0D12] border border-amber-500/20 rounded-3xl p-6 sm:p-8 shadow-2xl relative overflow-hidden">
+        <div class="absolute right-0 top-0 translate-x-12 -translate-y-12 w-64 h-64 bg-amber-500/10 rounded-full blur-3xl pointer-events-none"></div>
+        
+        <p class="text-xs font-mono uppercase tracking-widest text-amber-400/90 mb-2 font-semibold">
+          DaVinci Obsidian Engine // Hollywood Autonomous Film Production
+        </p>
+        <h2 class="text-2xl sm:text-4xl font-extrabold text-white font-cinzel leading-tight mb-4">
+          Panduan Lengkap Penggunaan Platform Web MovieAIProducer
+        </h2>
+        <p class="text-base sm:text-lg text-slate-300 leading-relaxed max-w-3xl">
+          Dokumen tutorial resmi bagi Showrunner, Sutradara, dan Produser untuk merancang, mengunci visual DNA, mengkalibrasi durasi adegan dinamis (5s, 10s, 15s) dengan multi-shot auto-split, dan memproduksi film sinematik layar lebar secara presisi dengan AI.
+        </p>
+
+        <!-- Meta Info Pills -->
+        <div class="flex flex-wrap items-center gap-3 mt-6 pt-6 border-t border-gray-800/80 text-xs sm:text-sm font-mono text-gray-300">
+          <div class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-900/80 border border-gray-800">
+            <span class="text-amber-400">🌐</span> URL: <a href="https://producer.apologets.com" class="text-amber-400 font-semibold hover:underline">producer.apologets.com</a>
+          </div>
+          <div class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-900/80 border border-gray-800">
+            <span>⏱️</span> Estimasi Baca: <strong class="text-white">~7 Menit</strong>
+          </div>
+          <div class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-900/80 border border-gray-800">
+            <span>🎯</span> Role: <strong class="text-amber-400">Showrunner / Director</strong>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Table of Contents Section -->
+    <section id="daftar-isi" class="mb-14 scroll-mt-6">
+      <div class="flex items-center justify-between mb-6">
+        <div class="flex items-center gap-2">
+          <span class="w-2.5 h-6 bg-amber-500 rounded-full"></span>
+          <h2 class="text-xl sm:text-2xl font-bold text-white font-cinzel">Daftar Isi Tutorial</h2>
+        </div>
+        <span class="text-xs font-mono text-gray-400">8 Langkah Terstruktur</span>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+        <a href="#langkah-1" class="group p-4 rounded-2xl bg-[#0B0F15] border border-gray-800/80 hover:border-amber-500/40 hover:bg-[#0E1520] transition-all flex items-start gap-3.5">
+          <span class="w-8 h-8 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 font-mono font-bold flex items-center justify-center text-sm shrink-0 group-hover:scale-105 transition-transform">01</span>
+          <div>
+            <h3 class="text-sm sm:text-base font-semibold text-white group-hover:text-amber-400 transition-colors">Akses &amp; Autentikasi Google OAuth</h3>
+            <p class="text-xs text-gray-400 mt-0.5">Showrunner Gate, whitelist akun, dan proteksi sesi HttpOnly</p>
+          </div>
+        </a>
+
+        <a href="#langkah-2" class="group p-4 rounded-2xl bg-[#0B0F15] border border-gray-800/80 hover:border-amber-500/40 hover:bg-[#0E1520] transition-all flex items-start gap-3.5">
+          <span class="w-8 h-8 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 font-mono font-bold flex items-center justify-center text-sm shrink-0 group-hover:scale-105 transition-transform">02</span>
+          <div>
+            <h3 class="text-sm sm:text-base font-semibold text-white group-hover:text-amber-400 transition-colors">Navigasi Dashboard (Production Slate)</h3>
+            <p class="text-xs text-gray-400 mt-0.5">Pencarian, filter tahapan produksi, dan Quick Advance Stage</p>
+          </div>
+        </a>
+
+        <a href="#langkah-3" class="group p-4 rounded-2xl bg-[#0B0F15] border border-gray-800/80 hover:border-amber-500/40 hover:bg-[#0E1520] transition-all flex items-start gap-3.5">
+          <span class="w-8 h-8 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 font-mono font-bold flex items-center justify-center text-sm shrink-0 group-hover:scale-105 transition-transform">03</span>
+          <div>
+            <h3 class="text-sm sm:text-base font-semibold text-white group-hover:text-amber-400 transition-colors">Membuat Proyek Film Baru (+ New Production)</h3>
+            <p class="text-xs text-gray-400 mt-0.5">Pemilihan Aspect Ratio sinematik dan 8 Hollywood Visual Style</p>
+          </div>
+        </a>
+
+        <a href="#langkah-4" class="group p-4 rounded-2xl bg-[#0B0F15] border border-gray-800/80 hover:border-amber-500/40 hover:bg-[#0E1520] transition-all flex items-start gap-3.5">
+          <span class="w-8 h-8 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 font-mono font-bold flex items-center justify-center text-sm shrink-0 group-hover:scale-105 transition-transform">04</span>
+          <div>
+            <h3 class="text-sm sm:text-base font-semibold text-white group-hover:text-amber-400 transition-colors">Bekerja di NLE AI Studio Suite</h3>
+            <p class="text-xs text-gray-400 mt-0.5">Dual Viewport, Matrix 7 Dimensi, Prompt Transpiler, &amp; 16 Gates</p>
+          </div>
+        </a>
+
+        <a href="#langkah-5" class="group p-4 rounded-2xl bg-[#0B0F15] border border-gray-800/80 hover:border-amber-500/40 hover:bg-[#0E1520] transition-all flex items-start gap-3.5">
+          <span class="w-8 h-8 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 font-mono font-bold flex items-center justify-center text-sm shrink-0 group-hover:scale-105 transition-transform">05</span>
+          <div>
+            <h3 class="text-sm sm:text-base font-semibold text-white group-hover:text-amber-400 transition-colors">Mengunci Visual DNA di Production Bible</h3>
+            <p class="text-xs text-gray-400 mt-0.5">Single Source of Truth, Karakter Biometrik, dan Revision Freeze</p>
+          </div>
+        </a>
+
+        <a href="#langkah-6" class="group p-4 rounded-2xl bg-[#0B0F15] border border-gray-800/80 hover:border-amber-500/40 hover:bg-[#0E1520] transition-all flex items-start gap-3.5">
+          <span class="w-8 h-8 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 font-mono font-bold flex items-center justify-center text-sm shrink-0 group-hover:scale-105 transition-transform">06</span>
+          <div>
+            <h3 class="text-sm sm:text-base font-semibold text-white group-hover:text-amber-400 transition-colors">Storyboard 50 Adegan, Durasi Dinamis (5s/10s/15s) &amp; Kalibrasi Dialog</h3>
+            <p class="text-xs text-gray-400 mt-0.5">Struktur 4-Babak, durasi dinamis 5s/10s/15s, Auto-Split Multi-Shot, dan Audio Bridge L/J-Cut</p>
+          </div>
+        </a>
+
+        <a href="#langkah-7" class="group p-4 rounded-2xl bg-[#0B0F15] border border-gray-800/80 hover:border-amber-500/40 hover:bg-[#0E1520] transition-all flex items-start gap-3.5">
+          <span class="w-8 h-8 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 font-mono font-bold flex items-center justify-center text-sm shrink-0 group-hover:scale-105 transition-transform">07</span>
+          <div>
+            <h3 class="text-sm sm:text-base font-semibold text-white group-hover:text-amber-400 transition-colors">Quality Control (QC Scorecard) &amp; Ekspor</h3>
+            <p class="text-xs text-gray-400 mt-0.5">Multi-metrik InsightFace, CLIP, Anti-jitter, dan paket JSON/ZIP</p>
+          </div>
+        </a>
+
+        <a href="#langkah-8" class="group p-4 rounded-2xl bg-[#0B0F15] border border-gray-800/80 hover:border-amber-500/40 hover:bg-[#0E1520] transition-all flex items-start gap-3.5">
+          <span class="w-8 h-8 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 font-mono font-bold flex items-center justify-center text-sm shrink-0 group-hover:scale-105 transition-transform">08</span>
+          <div>
+            <h3 class="text-sm sm:text-base font-semibold text-white group-hover:text-amber-400 transition-colors">Tips &amp; Troubleshooting Umum</h3>
+            <p class="text-xs text-gray-400 mt-0.5">Optimalisasi mobile, pembaharuan token sesi, dan keamanan DNA</p>
+          </div>
+        </a>
+      </div>
+    </section>
+
+    <!-- Visual Production Flow Overview -->
+    <section class="mb-16">
+      <div class="bg-gradient-to-b from-[#0D121B] to-[#0A0D12] border border-gray-800/90 rounded-3xl p-6 sm:p-8 shadow-xl">
+        <div class="flex items-center gap-2 mb-2">
+          <span class="px-2.5 py-0.5 rounded-full text-xs font-mono font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20 uppercase">
+            Overview Pipeline
+          </span>
+        </div>
+        <h2 class="text-xl sm:text-2xl font-bold text-white font-cinzel mb-2">Alur Kerja Produksi Studio (Production Flow)</h2>
+        <p class="text-sm sm:text-base text-gray-300 leading-relaxed mb-6">
+          Setiap produksi film di MovieAI Producer melalui 6 fase terintegrasi yang menjamin konsistensi sinematik dari naskah awal hingga rilis paket master:
+        </p>
+
+        <!-- Pipeline Step Cards (Horizontal Visual Chain) -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 mb-6">
+          <div class="p-3.5 rounded-2xl bg-gray-900/80 border border-gray-800 flex flex-col justify-between">
+            <span class="text-xs font-mono font-bold text-amber-400">FASE 1</span>
+            <p class="text-xs sm:text-sm font-semibold text-white mt-1">Google OAuth</p>
+            <span class="text-[11px] text-gray-400 mt-1">Showrunner Whitelist Gate</span>
+          </div>
+          <div class="p-3.5 rounded-2xl bg-gray-900/80 border border-gray-800 flex flex-col justify-between">
+            <span class="text-xs font-mono font-bold text-amber-400">FASE 2</span>
+            <p class="text-xs sm:text-sm font-semibold text-white mt-1">Dashboard Slate</p>
+            <span class="text-[11px] text-gray-400 mt-1">Inisiasi Judul &amp; Style</span>
+          </div>
+          <div class="p-3.5 rounded-2xl bg-gray-900/80 border border-gray-800 flex flex-col justify-between">
+            <span class="text-xs font-mono font-bold text-amber-400">FASE 3</span>
+            <p class="text-xs sm:text-sm font-semibold text-white mt-1">Production Bible</p>
+            <span class="text-[11px] text-gray-400 mt-1">Visual DNA Freeze</span>
+          </div>
+          <div class="p-3.5 rounded-2xl bg-gray-900/80 border border-gray-800 flex flex-col justify-between">
+            <span class="text-xs font-mono font-bold text-amber-400">FASE 4</span>
+            <p class="text-xs sm:text-sm font-semibold text-white mt-1">50 Storyboard</p>
+            <span class="text-[11px] text-gray-400 mt-1">Durasi 5s/10s/15s &amp; Auto-Split</span>
+          </div>
+          <div class="p-3.5 rounded-2xl bg-gray-900/80 border border-gray-800 flex flex-col justify-between">
+            <span class="text-xs font-mono font-bold text-amber-400">FASE 5</span>
+            <p class="text-xs sm:text-sm font-semibold text-white mt-1">Studio Suite</p>
+            <span class="text-[11px] text-gray-400 mt-1">Matrix &amp; Transpile</span>
+          </div>
+          <div class="p-3.5 rounded-2xl bg-gray-900/80 border border-gray-800 flex flex-col justify-between">
+            <span class="text-xs font-mono font-bold text-amber-400">FASE 6</span>
+            <p class="text-xs sm:text-sm font-semibold text-white mt-1">QC &amp; Release</p>
+            <span class="text-[11px] text-gray-400 mt-1">Scorecard &amp; Export</span>
+          </div>
+        </div>
+
+        <!-- Mermaid Container -->
+        <div class="p-4 rounded-2xl bg-[#07090C] border border-gray-800/80 overflow-x-auto text-center">
+          <pre class="mermaid text-xs">
+flowchart LR
+    A["1. Google OAuth (Whitelist)"] --> B["2. Dashboard Slate (Buat Proyek)"]
+    B --> C["3. Production Bible (DNA Freeze)"]
+    D["4. 50-Scene Storyboard & Durasi (5s/10s/15s)"]
+    C --> D
+    D --> E["5. Studio Suite (Matrix & Transpile)"]
+    E --> F["6. QC Scorecard & Final Release"]
+    
+    style A fill:#0E1520,stroke:#F59E0B,stroke-width:1.5px,color:#F8FAFC
+    style B fill:#0E1520,stroke:#3B82F6,stroke-width:1.5px,color:#F8FAFC
+    style C fill:#0E1520,stroke:#10B981,stroke-width:1.5px,color:#F8FAFC
+    style D fill:#0E1520,stroke:#8B5CF6,stroke-width:1.5px,color:#F8FAFC
+    style E fill:#0E1520,stroke:#EC4899,stroke-width:1.5px,color:#F8FAFC
+    style F fill:#0E1520,stroke:#EAB308,stroke-width:1.5px,color:#F8FAFC
+          </pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- CONTENT SECTIONS -->
+    <div class="space-y-14">
+
+      <!-- ========================================== -->
+      <!-- LANGKAH 1 -->
+      <!-- ========================================== -->
+      <section id="langkah-1" class="scroll-mt-6 bg-[#0B0F15] border border-gray-800/90 rounded-3xl p-6 sm:p-10 shadow-xl transition-all">
+        <div class="flex items-center gap-3 mb-4">
+          <span class="px-3 py-1 rounded-full text-xs font-mono font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30">
+            LANGKAH 01
+          </span>
+          <span class="text-xs font-mono text-gray-400">Autentikasi &amp; Akses</span>
+        </div>
+
+        <h2 class="text-2xl sm:text-3xl font-extrabold text-white font-cinzel mb-4">
+          Akses &amp; Autentikasi Google OAuth (Showrunner Gate)
+        </h2>
+
+        <p class="text-base sm:text-lg text-slate-300 leading-relaxed mb-6">
+          MovieAI Producer menerapkan sistem otorisasi ketat berbasis peran <em class="text-amber-300/90 not-italic font-mono text-xs px-1.5 py-0.5 rounded bg-black/40 border border-gray-800">Role-Based Showrunner Access</em> untuk menjaga kerahasiaan materi film dan IP studio.
+        </p>
+
+        <!-- Step List -->
+        <div class="space-y-4 mb-8">
+          <div class="flex items-start gap-4 p-4 rounded-2xl bg-gray-900/60 border border-gray-800/80">
+            <span class="w-8 h-8 rounded-full bg-amber-500 text-black font-mono font-bold flex items-center justify-center text-sm shrink-0 mt-0.5">1</span>
+            <div class="text-sm sm:text-base text-slate-200">
+              <strong class="text-white">Buka Browser Resmi:</strong> Gunakan browser modern (Google Chrome, Safari, atau Firefox) lalu kunjungi alamat web studio:
+              <div class="mt-2">
+                <a href="https://producer.apologets.com" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-black/60 border border-amber-500/30 text-amber-400 font-mono text-sm hover:border-amber-400 transition-colors">
+                  <span>🔗</span> https://producer.apologets.com
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <div class="flex items-start gap-4 p-4 rounded-2xl bg-gray-900/60 border border-gray-800/80">
+            <span class="w-8 h-8 rounded-full bg-amber-500 text-black font-mono font-bold flex items-center justify-center text-sm shrink-0 mt-0.5">2</span>
+            <div class="text-sm sm:text-base text-slate-200">
+              <strong class="text-white">Pengalihan Otomatis ke Gate:</strong> Jika Anda belum memiliki sesi aktif, sistem akan secara otomatis mengarahkan browser ke portal <code class="px-2 py-0.5 rounded bg-black/60 text-amber-300 font-mono text-xs">/login</code> (Studio Access Gate).
+            </div>
+          </div>
+
+          <div class="flex items-start gap-4 p-4 rounded-2xl bg-gray-900/60 border border-gray-800/80">
+            <span class="w-8 h-8 rounded-full bg-amber-500 text-black font-mono font-bold flex items-center justify-center text-sm shrink-0 mt-0.5">3</span>
+            <div class="text-sm sm:text-base text-slate-200">
+              <strong class="text-white">Klik Tombol Autentikasi:</strong> Klik tombol resmi berlabel <code class="px-2 py-0.5 rounded bg-black/60 text-white font-mono text-xs font-semibold">Sign in with Google</code>.
+            </div>
+          </div>
+
+          <div class="flex items-start gap-4 p-4 rounded-2xl bg-gray-900/60 border border-gray-800/80">
+            <span class="w-8 h-8 rounded-full bg-amber-500 text-black font-mono font-bold flex items-center justify-center text-sm shrink-0 mt-0.5">4</span>
+            <div class="text-sm sm:text-base text-slate-200 w-full">
+              <div class="flex items-center justify-between flex-wrap gap-2">
+                <strong class="text-white">Pilih Akun Whitelist:</strong>
+                <span class="text-[11px] font-mono text-amber-400/90 flex items-center gap-1.5 bg-amber-500/10 px-2.5 py-0.5 rounded-full border border-amber-500/20">
+                  <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> Alamat Email Disamarkan (Privacy Protected)
+                </span>
+              </div>
+              <p class="text-xs sm:text-sm text-gray-400 mt-1">
+                Pilih salah satu akun Google Showrunner resmi yang telah terdaftar dalam sistem otorisasi whitelist studio:
+              </p>
+              
+              <!-- Whitelist Email Grid (Masked / Disamarkan) -->
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 mt-3">
+                <div class="p-3 rounded-xl bg-black/40 border border-gray-800 flex items-center justify-between">
+                  <div class="flex items-center gap-2">
+                    <span class="text-gray-500 text-xs">🔒</span>
+                    <span class="font-mono text-xs sm:text-sm text-slate-200 tracking-wide">nee***19@gmail.com</span>
+                  </div>
+                  <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/20 text-amber-400 border border-amber-500/30">SHOWRUNNER</span>
+                </div>
+                <div class="p-3 rounded-xl bg-black/40 border border-gray-800 flex items-center justify-between">
+                  <div class="flex items-center gap-2">
+                    <span class="text-gray-500 text-xs">🔒</span>
+                    <span class="font-mono text-xs sm:text-sm text-slate-200 tracking-wide">nur***09@gmail.com</span>
+                  </div>
+                  <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/20 text-amber-400 border border-amber-500/30">SHOWRUNNER</span>
+                </div>
+                <div class="p-3 rounded-xl bg-black/40 border border-gray-800 flex items-center justify-between">
+                  <div class="flex items-center gap-2">
+                    <span class="text-gray-500 text-xs">🔒</span>
+                    <span class="font-mono text-xs sm:text-sm text-slate-200 tracking-wide">mei***y0@gmail.com</span>
+                  </div>
+                  <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/20 text-amber-400 border border-amber-500/30">SHOWRUNNER</span>
+                </div>
+                <div class="p-3 rounded-xl bg-black/40 border border-gray-800 flex items-center justify-between">
+                  <div class="flex items-center gap-2">
+                    <span class="text-gray-500 text-xs">🔒</span>
+                    <span class="font-mono text-xs sm:text-sm text-slate-200 tracking-wide">ari***ey@gmail.com</span>
+                  </div>
+                  <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/20 text-amber-400 border border-amber-500/30">SHOWRUNNER</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="flex items-start gap-4 p-4 rounded-2xl bg-gray-900/60 border border-gray-800/80">
+            <span class="w-8 h-8 rounded-full bg-amber-500 text-black font-mono font-bold flex items-center justify-center text-sm shrink-0 mt-0.5">5</span>
+            <div class="text-sm sm:text-base text-slate-200">
+              <strong class="text-white">Redirect Otomatis:</strong> Setelah verifikasi berhasil, sesi aman <code class="px-2 py-0.5 rounded bg-black/60 text-amber-300 font-mono text-xs">HttpOnly Cookie</code> dibuat dan Anda langsung diarahkan ke halaman utama <strong class="text-white font-semibold">Production Slate (Dashboard)</strong>.
+            </div>
+          </div>
+        </div>
+
+        <!-- Note Admonition -->
+        <div class="p-5 rounded-2xl bg-blue-950/20 border border-blue-500/40 text-blue-200 flex items-start gap-3.5">
+          <span class="text-2xl shrink-0">ℹ️</span>
+          <div class="text-sm sm:text-base leading-relaxed">
+            <strong class="text-blue-100 block mb-1 font-semibold">Pemberitahuan Akses Whitelist (Error 403)</strong>
+            Jika Anda mencoba masuk menggunakan alamat email di luar daftar whitelist di atas, sistem akan menampilkan notifikasi penolakan: <code class="px-2 py-0.5 rounded bg-blue-950/60 text-blue-300 font-mono text-xs">Error 403: Early Studio Access Required - Authorized Personnel Only</code>. Hubungi administrator studio untuk mendaftarkan akun baru.
+          </div>
+        </div>
+      </section>
+
+      <!-- ========================================== -->
+      <!-- LANGKAH 2 -->
+      <!-- ========================================== -->
+      <section id="langkah-2" class="scroll-mt-6 bg-[#0B0F15] border border-gray-800/90 rounded-3xl p-6 sm:p-10 shadow-xl transition-all">
+        <div class="flex items-center gap-3 mb-4">
+          <span class="px-3 py-1 rounded-full text-xs font-mono font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30">
+            LANGKAH 02
+          </span>
+          <span class="text-xs font-mono text-gray-400">Pusat Kendali</span>
+        </div>
+
+        <h2 class="text-2xl sm:text-3xl font-extrabold text-white font-cinzel mb-4">
+          Navigasi Dashboard (Production Slate)
+        </h2>
+
+        <p class="text-base sm:text-lg text-slate-300 leading-relaxed mb-6">
+          Halaman Dashboard adalah pusat komando bagi produser untuk memantau seluruh portofolio judul film yang sedang dalam fase pra-produksi, produksi visual, hingga tahap finishing akhir.
+        </p>
+
+        <!-- 5 Feature Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div class="p-5 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <div class="flex items-center gap-2.5 mb-2">
+              <span class="text-xl">🔍</span>
+              <h3 class="text-base font-bold text-white font-cinzel">1. Search Bar Instan</h3>
+            </div>
+            <p class="text-sm text-gray-300 leading-relaxed">
+              Ketik judul film atau kode slug untuk menyaring proyek yang sedang dicari secara seketika tanpa me-refresh halaman.
+            </p>
+          </div>
+
+          <div class="p-5 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <div class="flex items-center gap-2.5 mb-2">
+              <span class="text-xl">🏷️</span>
+              <h3 class="text-base font-bold text-white font-cinzel">2. Stage Filter (Tahapan Produksi)</h3>
+            </div>
+            <p class="text-sm text-gray-300 leading-relaxed">
+              Pilah proyek berdasarkan tahapan aktif saat ini, mulai dari <em class="text-amber-400">Stage 1 Concept</em>, <em class="text-amber-400">Stage 3 Blueprint</em>, hingga <em class="text-amber-400">Stage 16 Final Master</em>.
+            </p>
+          </div>
+
+          <div class="p-5 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <div class="flex items-center gap-2.5 mb-2">
+              <span class="text-xl">🎴</span>
+              <h3 class="text-base font-bold text-white font-cinzel">3. Kartu Film (Project Cards)</h3>
+            </div>
+            <p class="text-sm text-gray-300 leading-relaxed">
+              Setiap kartu menyajikan informasi komprehensif: poster/rasio aspek, kode gaya sinematik (contoh: <code class="text-amber-400 font-mono text-xs">#Style 01 Neo-Noir</code>), jumlah adegan selesai, serta indikator gembok DNA.
+            </p>
+          </div>
+
+          <div class="p-5 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <div class="flex items-center gap-2.5 mb-2">
+              <span class="text-xl">⚡</span>
+              <h3 class="text-base font-bold text-white font-cinzel">4. Quick Advance Stage</h3>
+            </div>
+            <p class="text-sm text-gray-300 leading-relaxed">
+              Tombol cepat untuk memajukan gerbang produksi proyek ke tahap berikutnya secara instan langsung dari dashboard tanpa harus masuk ke studio.
+            </p>
+          </div>
+
+          <div class="p-5 rounded-2xl bg-gray-900/60 border border-gray-800 md:col-span-2">
+            <div class="flex items-center gap-2.5 mb-2">
+              <span class="text-xl">🚀</span>
+              <h3 class="text-base font-bold text-white font-cinzel">5. Tombol Masuk Studio NLE</h3>
+            </div>
+            <p class="text-sm text-gray-300 leading-relaxed">
+              Klik pada badan kartu proyek atau klik tombol panah kanan (<code class="text-amber-400">&rarr;</code>) untuk membuka lingkungan kerja lengkap <strong class="text-white font-semibold">NLE AI Studio Suite</strong> bagi proyek tersebut.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========================================== -->
+      <!-- LANGKAH 3 -->
+      <!-- ========================================== -->
+      <section id="langkah-3" class="scroll-mt-6 bg-[#0B0F15] border border-gray-800/90 rounded-3xl p-6 sm:p-10 shadow-xl transition-all">
+        <div class="flex items-center gap-3 mb-4">
+          <span class="px-3 py-1 rounded-full text-xs font-mono font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30">
+            LANGKAH 03
+          </span>
+          <span class="text-xs font-mono text-gray-400">Inisiasi Produksi</span>
+        </div>
+
+        <h2 class="text-2xl sm:text-3xl font-extrabold text-white font-cinzel mb-4">
+          Membuat Proyek Film Baru (+ New Production)
+        </h2>
+
+        <p class="text-base sm:text-lg text-slate-300 leading-relaxed mb-6">
+          Untuk memulai produksi film baru dari awal, klik tombol berwarna amber <code class="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-400 font-mono text-sm border border-amber-500/30 font-bold">+ New Production</code> di pojok kanan atas Dashboard.
+        </p>
+
+        <!-- Creation Flow Chart -->
+        <div class="p-4 rounded-2xl bg-[#07090C] border border-gray-800/80 mb-8 overflow-x-auto text-center">
+          <pre class="mermaid text-xs">
+flowchart TD
+    ClickBtn["1. Klik '+ New Production'"] --> FillForm["2. Isi Judul & Logline"]
+    FillForm --> SelectAspect["3. Tentukan Aspect Ratio (16:9, 2.39:1, 9:16)"]
+    SelectAspect --> SelectStyle["4. Pilih Hollywood Visual Style (#Style 01-08)"]
+    SelectStyle --> Submit["5. Klik 'Initialize Studio Project'"]
+
+    style ClickBtn fill:#0E1520,stroke:#F59E0B,stroke-width:1.5px,color:#F8FAFC
+    style FillForm fill:#0E1520,stroke:#3B82F6,stroke-width:1.5px,color:#F8FAFC
+    style SelectAspect fill:#0E1520,stroke:#10B981,stroke-width:1.5px,color:#F8FAFC
+    style SelectStyle fill:#0E1520,stroke:#8B5CF6,stroke-width:1.5px,color:#F8FAFC
+    style Submit fill:#0E1520,stroke:#EC4899,stroke-width:1.5px,color:#F8FAFC
+          </pre>
+        </div>
+
+        <!-- Form Parameter Explanation -->
+        <h3 class="text-lg sm:text-xl font-bold text-white font-cinzel mb-4">Parameter Formulir Inisiasi:</h3>
+        
+        <div class="space-y-4 mb-8">
+          <div class="p-4 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <div class="flex items-center gap-2 mb-1">
+              <span class="text-amber-400 font-mono font-bold text-sm">A.</span>
+              <h4 class="font-bold text-white text-sm sm:text-base">Production Title &amp; Slug</h4>
+            </div>
+            <p class="text-sm text-gray-300">
+              Ketikkan judul resmi film Anda (misal: <em class="text-amber-300">"The Jakarta Syndicate 2099"</em>). Sistem secara otomatis merumuskan slug URL yang bersih dan dapat disesuaikan.
+            </p>
+          </div>
+
+          <!-- Aspect Ratio Options -->
+          <div class="p-5 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <div class="flex items-center gap-2 mb-3">
+              <span class="text-amber-400 font-mono font-bold text-sm">B.</span>
+              <h4 class="font-bold text-white text-sm sm:text-base">Cinematic Aspect Ratio (Pilihan Rasio Aspek)</h4>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div class="p-3.5 rounded-xl bg-black/40 border border-gray-800">
+                <div class="text-xs font-mono font-bold text-amber-400">16:9 Cinema Widescreen</div>
+                <p class="text-xs text-gray-300 mt-1">Standar penyiaran TV resolusi tinggi, YouTube 4K, dan platform streaming OTT utama.</p>
+              </div>
+              <div class="p-3.5 rounded-xl bg-black/40 border border-gray-800">
+                <div class="text-xs font-mono font-bold text-amber-400">2.39:1 Anamorphic Scope</div>
+                <p class="text-xs text-gray-300 mt-1">Format layar lebar bioskop <em class="text-amber-300/90 not-italic font-mono text-xs px-1.5 py-0.5 rounded bg-black/40 border border-gray-800">Hollywood Panavision</em> dengan lensa anamorphic dan horizontal flare.</p>
+              </div>
+              <div class="p-3.5 rounded-xl bg-black/40 border border-gray-800">
+                <div class="text-xs font-mono font-bold text-amber-400">9:16 Vertical Cinema</div>
+                <p class="text-xs text-gray-300 mt-1">Format sinematik vertikal khusus audiens mobile modern (TikTok, IG Reels, YouTube Shorts).</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- 8 Hollywood Style Grid -->
+          <div class="p-5 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <div class="flex items-center justify-between mb-3">
+              <div class="flex items-center gap-2">
+                <span class="text-amber-400 font-mono font-bold text-sm">C.</span>
+                <h4 class="font-bold text-white text-sm sm:text-base">8 Target Hollywood Style Codes</h4>
+              </div>
+              <span class="text-xs font-mono text-amber-400">Presets Sinematik</span>
+            </div>
+            <p class="text-xs text-gray-400 mb-4">
+              Pilih identitas visual master yang akan menjadi acuan seluruh transpilasi prompt kamera:
+            </p>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div class="p-3.5 rounded-xl bg-black/40 border border-gray-800/80 hover:border-amber-500/30 transition-all">
+                <span class="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">#Style 01</span>
+                <h5 class="text-sm font-bold text-white mt-1.5">Cyberpunk Neo-Noir</h5>
+                <p class="text-xs text-gray-400 mt-0.5">Hujan neon Blade Runner, flare anamorphic biru-oranye, dan jalanan kota futuristik basah.</p>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-black/40 border border-gray-800/80 hover:border-amber-500/30 transition-all">
+                <span class="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">#Style 02</span>
+                <h5 class="text-sm font-bold text-white mt-1.5">70s Panavision Vintage</h5>
+                <p class="text-xs text-gray-400 mt-0.5">Kodak 5247 film stock, grain hangat organik, palet warna bersahaja bernuansa sinema klasik.</p>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-black/40 border border-gray-800/80 hover:border-amber-500/30 transition-all">
+                <span class="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">#Style 03</span>
+                <h5 class="text-sm font-bold text-white mt-1.5">Ethereal High Fantasy</h5>
+                <p class="text-xs text-gray-400 mt-0.5">Pencahayaan volumetrik keemasan (God rays ala Lord of the Rings), atmosfer kabut magis dan megah.</p>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-black/40 border border-gray-800/80 hover:border-amber-500/30 transition-all">
+                <span class="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">#Style 04</span>
+                <h5 class="text-sm font-bold text-white mt-1.5">Hyper-Realistic Sci-Fi</h5>
+                <p class="text-xs text-gray-400 mt-0.5">Krom steril, kontras kedalaman ruang hampa, interior stasiun presisi tinggi seperti Interstellar.</p>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-black/40 border border-gray-800/80 hover:border-amber-500/30 transition-all">
+                <span class="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">#Style 05</span>
+                <h5 class="text-sm font-bold text-white mt-1.5">Golden Hour Naturalism</h5>
+                <p class="text-xs text-gray-400 mt-0.5">Kamera genggam 35mm natural, cahaya senja hangat khas karya puitis Terrence Malick.</p>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-black/40 border border-gray-800/80 hover:border-amber-500/30 transition-all">
+                <span class="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">#Style 06</span>
+                <h5 class="text-sm font-bold text-white mt-1.5">Technicolor Vintage 1950s</h5>
+                <p class="text-xs text-gray-400 mt-0.5">Saturasi warna 3-strip dye transfer film, rona warna primer mencolok khas era keemasan Hollywood.</p>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-black/40 border border-gray-800/80 hover:border-amber-500/30 transition-all">
+                <span class="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">#Style 07</span>
+                <h5 class="text-sm font-bold text-white mt-1.5">Japanese Anime Cel</h5>
+                <p class="text-xs text-gray-400 mt-0.5">Pencahayaan refraksi awan melukis, warna langit bergradasi spektakuler khas Makoto Shinkai.</p>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-black/40 border border-gray-800/80 hover:border-amber-500/30 transition-all">
+                <span class="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">#Style 08</span>
+                <h5 class="text-sm font-bold text-white mt-1.5">Psychological Monochrome</h5>
+                <p class="text-xs text-gray-400 mt-0.5">Hitam-putih bergradasi kontras ekstrem <em class="text-amber-300/90 not-italic font-mono text-xs px-1.5 py-0.5 rounded bg-black/40 border border-gray-800">chiaroscuro</em>, bayangan tajam dan suram khas David Fincher.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Logline -->
+          <div class="p-4 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <div class="flex items-center gap-2 mb-1">
+              <span class="text-amber-400 font-mono font-bold text-sm">D.</span>
+              <h4 class="font-bold text-white text-sm sm:text-base">Logline / Narrative Concept</h4>
+            </div>
+            <p class="text-sm text-gray-300">
+              Tulis ringkasan premis film dalam 1 hingga 2 kalimat kuat yang menjelaskan tokoh utama, konflik sentral, dan taruhan <em class="text-amber-300/90 not-italic font-mono text-xs px-1.5 py-0.5 rounded bg-black/40 border border-gray-800">stakes</em>.
+            </p>
+          </div>
+        </div>
+
+        <div class="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center gap-3">
+          <span class="text-2xl">✨</span>
+          <p class="text-sm sm:text-base text-amber-200">
+            Setelah klik <strong class="text-white font-mono">Initialize Studio Project</strong>, database proyek dibentuk secara instan, Master Bible v1 diaktifkan, dan Anda langsung dibawa ke ruang kerja <strong>NLE AI Studio</strong>.
+          </p>
+        </div>
+      </section>
+
+      <!-- ========================================== -->
+      <!-- LANGKAH 4 -->
+      <!-- ========================================== -->
+      <section id="langkah-4" class="scroll-mt-6 bg-[#0B0F15] border border-gray-800/90 rounded-3xl p-6 sm:p-10 shadow-xl transition-all">
+        <div class="flex items-center gap-3 mb-4">
+          <span class="px-3 py-1 rounded-full text-xs font-mono font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30">
+            LANGKAH 04
+          </span>
+          <span class="text-xs font-mono text-gray-400">Workstation Utama</span>
+        </div>
+
+        <h2 class="text-2xl sm:text-3xl font-extrabold text-white font-cinzel mb-2">
+          Bekerja di NLE AI Studio Suite
+        </h2>
+
+        <div class="inline-flex items-center gap-2 px-3 py-1 rounded-lg bg-black/60 border border-gray-800 text-xs font-mono text-gray-400 mb-6">
+          <span>Path URL:</span>
+          <span class="text-amber-400 font-semibold">/projects/{id}/studio</span>
+        </div>
+
+        <p class="text-base sm:text-lg text-slate-300 leading-relaxed mb-8">
+          Workstation ini merupakan ruang kendali kreatif tempat sutradara meracik parameter sinematik, mengoperasikan kamera virtual, menghasilkan prompt generative AI, serta memantau hasil rendering secara real-time.
+        </p>
+
+        <!-- 4 Pillars of Studio -->
+        <div class="space-y-6">
+          
+          <!-- 1. Dual Viewport -->
+          <div class="p-6 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <div class="flex items-center gap-3 mb-3">
+              <span class="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center font-bold text-sm font-mono">1</span>
+              <h3 class="text-lg font-bold text-white font-cinzel">Dual Viewport Player (Komparasi Berdampingan)</h3>
+            </div>
+            <p class="text-sm sm:text-base text-gray-300 leading-relaxed mb-4">
+              Sistem menyajikan dua layar berdampingan untuk memastikan akurasi visual dan kontinuitas adegan tidak menyimpang:
+            </p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+              <div class="p-4 rounded-xl bg-black/40 border border-gray-800">
+                <span class="text-xs font-mono font-bold text-sky-400">VIEWPORT A (Master Reference)</span>
+                <p class="text-xs text-gray-300 mt-1">Menampilkan gambar acuan karakter dari Bible, storyboard patokan, atau benchmark palet warna.</p>
+              </div>
+              <div class="p-4 rounded-xl bg-black/40 border border-gray-800">
+                <span class="text-xs font-mono font-bold text-emerald-400">VIEWPORT B (AI Render Output)</span>
+                <p class="text-xs text-gray-300 mt-1">Menampilkan hasil klip video keluaran mesin generative AI untuk dievaluasi sutradara.</p>
+              </div>
+            </div>
+            <p class="text-xs text-gray-400">
+              * Dilengkapi tombol navigasi presisi: <strong class="text-white">Play / Pause</strong>, <strong class="text-white">Looping</strong>, <strong class="text-white">Mute</strong>, dan pengatur kecepatan (<strong class="text-white">0.5x, 1.0x, 2.0x</strong>).
+            </p>
+          </div>
+
+          <!-- 2. Matrix Selector -->
+          <div class="p-6 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <div class="flex items-center gap-3 mb-3">
+              <span class="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center font-bold text-sm font-mono">2</span>
+              <h3 class="text-lg font-bold text-white font-cinzel">Matrix Selector (Parameter 7 Dimensi Sinematik)</h3>
+            </div>
+            <p class="text-sm sm:text-base text-gray-300 leading-relaxed mb-4">
+              Pilih perpaduan parameter sinematik pada panel matrix interaktif untuk menentukan arahan estetika:
+            </p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 text-xs font-mono">
+              <div class="p-3 rounded-lg bg-black/40 border border-gray-800"><strong class="text-amber-400">#Style:</strong> Gaya visual film (Neo-Noir, 70s, dll)</div>
+              <div class="p-3 rounded-lg bg-black/40 border border-gray-800"><strong class="text-amber-400">#Light:</strong> Pencahayaan (Chiaroscuro, Rim Light)</div>
+              <div class="p-3 rounded-lg bg-black/40 border border-gray-800"><strong class="text-amber-400">#Act:</strong> Panduan emosi &amp; mikro-ekspresi karakter</div>
+              <div class="p-3 rounded-lg bg-black/40 border border-gray-800"><strong class="text-amber-400">#Cam:</strong> Gerak kamera (Dolly In, Steadicam, Static)</div>
+              <div class="p-3 rounded-lg bg-black/40 border border-gray-800"><strong class="text-amber-400">#Lens:</strong> Panjang fokal (35mm Anamorphic, 85mm Prime)</div>
+              <div class="p-3 rounded-lg bg-black/40 border border-gray-800"><strong class="text-amber-400">#Comp:</strong> Framing (Rule of Thirds, Dutch Angle)</div>
+              <div class="p-3 rounded-lg bg-black/40 border border-gray-800 sm:col-span-2 lg:col-span-3"><strong class="text-amber-400">#Speed:</strong> Kecepatan gerak (24fps Film Look, 48fps High Motion, 120fps Slow-Mo)</div>
+            </div>
+          </div>
+
+          <!-- 3. Prompt Transpiler Engine -->
+          <div class="p-6 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <div class="flex items-center gap-3 mb-3">
+              <span class="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center font-bold text-sm font-mono">3</span>
+              <h3 class="text-lg font-bold text-white font-cinzel">Prompt Transpiler Engine (Multi-Engine AI)</h3>
+            </div>
+            <p class="text-sm sm:text-base text-gray-300 leading-relaxed mb-4">
+              Mesin penerjemah otomatis yang mengubah parameter 7 dimensi sutradara menjadi prompt native berstandar Hollywood untuk masing-masing model AI:
+            </p>
+            <div class="flex flex-wrap gap-2 mb-4">
+              <span class="px-3 py-1 rounded-lg bg-amber-500/10 text-amber-300 border border-amber-500/30 text-xs font-mono font-bold">Google Veo</span>
+              <span class="px-3 py-1 rounded-lg bg-amber-500/10 text-amber-300 border border-amber-500/30 text-xs font-mono font-bold">Kling v1.5 / v2</span>
+              <span class="px-3 py-1 rounded-lg bg-amber-500/10 text-amber-300 border border-amber-500/30 text-xs font-mono font-bold">Runway Gen-3 Alpha</span>
+              <span class="px-3 py-1 rounded-lg bg-amber-500/10 text-amber-300 border border-amber-500/30 text-xs font-mono font-bold">OpenAI Sora</span>
+              <span class="px-3 py-1 rounded-lg bg-amber-500/10 text-amber-300 border border-amber-500/30 text-xs font-mono font-bold">ComfyUI Local</span>
+            </div>
+            <div class="space-y-2 text-xs sm:text-sm text-gray-300">
+              <div class="p-3 rounded-lg bg-black/40 border border-gray-800">
+                <strong class="text-emerald-400 font-mono">Positive Prompt:</strong> Instruksi mendalam dengan terminologi optik, lensa Panavision, sudut fokal, pencahayaan rim-lighting, dan tekstur kulit alami.
+              </div>
+              <div class="p-3 rounded-lg bg-black/40 border border-gray-800">
+                <strong class="text-rose-400 font-mono">Negative Prompt:</strong> Filter otomatis untuk menolak distorsi anatomi, artefak motion-blur berlebihan, deformasi jari, dan tekstur CGI plastik/kartun.
+              </div>
+            </div>
+          </div>
+
+          <!-- 4. 16-Stage Pipeline Gate -->
+          <div class="p-6 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <div class="flex items-center gap-3 mb-3">
+              <span class="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center font-bold text-sm font-mono">4</span>
+              <h3 class="text-lg font-bold text-white font-cinzel">16-Stage Pipeline Gate &amp; Approval System</h3>
+            </div>
+            <p class="text-sm sm:text-base text-gray-300 leading-relaxed mb-4">
+              Di bilah sisi kiri <em class="text-amber-300/90 not-italic font-mono text-xs px-1.5 py-0.5 rounded bg-black/40 border border-gray-800">LeftNavPipeline</em>, sutradara mengontrol evolusi 16 gerbang tahap produksi film dengan 3 tindakan formal:
+            </p>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div class="p-3.5 rounded-xl bg-emerald-950/20 border border-emerald-500/30 text-emerald-200">
+                <strong class="font-mono text-emerald-400 block mb-1">✅ APPROVE</strong>
+                <p class="text-xs">Menyetujui hasil tahap ini dan secara otomatis memajukan timeline ke gerbang produksi selanjutnya.</p>
+              </div>
+              <div class="p-3.5 rounded-xl bg-amber-950/20 border border-amber-500/30 text-amber-200">
+                <strong class="font-mono text-amber-400 block mb-1">🔄 REVISE</strong>
+                <p class="text-xs">Mengembalikan status untuk perbaikan ulang disertai catatan revisi teknis sutradara.</p>
+              </div>
+              <div class="p-3.5 rounded-xl bg-rose-950/20 border border-rose-500/30 text-rose-200">
+                <strong class="font-mono text-rose-400 block mb-1">🔒 LOCK</strong>
+                <p class="text-xs">Mengunci tahap secara permanen agar tidak ada perubahan yang tidak disengaja oleh tim.</p>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ========================================== -->
+      <!-- LANGKAH 5 -->
+      <!-- ========================================== -->
+      <section id="langkah-5" class="scroll-mt-6 bg-[#0B0F15] border border-gray-800/90 rounded-3xl p-6 sm:p-10 shadow-xl transition-all">
+        <div class="flex items-center gap-3 mb-4">
+          <span class="px-3 py-1 rounded-full text-xs font-mono font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30">
+            LANGKAH 05
+          </span>
+          <span class="text-xs font-mono text-gray-400">Kontinuitas &amp; DNA</span>
+        </div>
+
+        <h2 class="text-2xl sm:text-3xl font-extrabold text-white font-cinzel mb-2">
+          Mengunci Visual DNA di Master Production Bible (MPB)
+        </h2>
+
+        <div class="inline-flex items-center gap-2 px-3 py-1 rounded-lg bg-black/60 border border-gray-800 text-xs font-mono text-gray-400 mb-6">
+          <span>Akses:</span> Menu <strong class="text-amber-400">Production Bible</strong> di Header atau URL <span class="text-amber-400">/projects/{id}/bible</span>
+        </div>
+
+        <p class="text-base sm:text-lg text-slate-300 leading-relaxed mb-6">
+          Master Production Bible adalah dokumen acuan tunggal (<strong class="text-amber-400">Single Source of Truth / SSOT</strong>). Keberadaan dokumen ini mencegah masalah klasik AI video: wajah karakter yang berganti-ganti, kostum yang tidak konsisten, atau tone warna yang meloncat antar-adegan.
+        </p>
+
+        <!-- 5 Tabs Grid -->
+        <h3 class="text-lg font-bold text-white font-cinzel mb-4">5 Tab Pengaturan Bible:</h3>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+          
+          <div class="p-5 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <h4 class="font-bold text-white text-base mb-2 flex items-center gap-2">
+              <span class="text-amber-400 font-mono">1.</span> Visual DNA Tab
+            </h4>
+            <p class="text-sm text-gray-300 leading-relaxed">
+              Menetapkan master color palette, film stock acuan (seperti Kodak Vision3 500T), serta rasio aspek baku untuk seluruh shot produksi.
+            </p>
+          </div>
+
+          <div class="p-5 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <h4 class="font-bold text-white text-base mb-2 flex items-center gap-2">
+              <span class="text-amber-400 font-mono">2.</span> Character Matrix Tab
+            </h4>
+            <p class="text-sm text-gray-300 leading-relaxed">
+              Mendaftarkan tokoh, peran naratif <em class="text-amber-300/90 not-italic font-mono text-xs px-1.5 py-0.5 rounded bg-black/40 border border-gray-800">Protagonist / Antagonist</em>, deskripsi wajah biometrik permanen, wardrobe khusus, dan kondisi luka <em class="text-amber-300/90 not-italic font-mono text-xs px-1.5 py-0.5 rounded bg-black/40 border border-gray-800">injuries &amp; wear</em>.
+            </p>
+          </div>
+
+          <div class="p-5 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <h4 class="font-bold text-white text-base mb-2 flex items-center gap-2">
+              <span class="text-amber-400 font-mono">3.</span> World &amp; Props Tab
+            </h4>
+            <p class="text-sm text-gray-300 leading-relaxed">
+              Mendefinisikan aturan arsitektur lokasi utama, pencahayaan lingkungan <em class="text-amber-300/90 not-italic font-mono text-xs px-1.5 py-0.5 rounded bg-black/40 border border-gray-800">environment lighting</em>, dan benda properti kunci dalam plot cerita.
+            </p>
+          </div>
+
+          <div class="p-5 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <h4 class="font-bold text-white text-base mb-2 flex items-center gap-2">
+              <span class="text-amber-400 font-mono">4.</span> Rules &amp; Invariants Tab
+            </h4>
+            <p class="text-sm text-gray-300 leading-relaxed">
+              Aturan mutlak yang tidak boleh dilanggar model AI, misalnya: <em class="text-amber-300">"Karakter utama dilarang tersenyum lebar"</em> atau <em class="text-amber-300">"Tidak ada kendaraan modern tahun 2000-an"</em>.
+            </p>
+          </div>
+
+          <div class="p-5 rounded-2xl bg-gradient-to-br from-amber-950/20 to-black border border-amber-500/40 md:col-span-2">
+            <div class="flex items-center justify-between mb-2">
+              <h4 class="font-bold text-amber-400 text-base flex items-center gap-2">
+                <span class="font-mono">5.</span> Revision Lock Tab (Fitur Sangat Kritis)
+              </h4>
+              <span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-xs font-mono font-bold">DNA FREEZE</span>
+            </div>
+            <p class="text-sm sm:text-base text-gray-200 leading-relaxed mb-3">
+              Setelah seluruh karakter dan gaya visual tervalidasi, klik tombol <strong class="text-amber-400 font-mono">Freeze &amp; Lock Visual DNA</strong>.
+            </p>
+            <p class="text-xs sm:text-sm text-gray-400">
+              Begitu berstatus <strong class="text-white font-mono">LOCKED</strong>, parameter Bible berstatus read-only dan diproteksi dari pengubahan liar, menjamin kontinuitas visual 100% konsisten sepanjang fase render video berikutnya.
+            </p>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ========================================== -->
+      <!-- LANGKAH 6 -->
+      <!-- ========================================== -->
+      <section id="langkah-6" class="scroll-mt-6 bg-[#0B0F15] border border-gray-800/90 rounded-3xl p-6 sm:p-10 shadow-xl transition-all">
+        <div class="flex items-center gap-3 mb-4">
+          <span class="px-3 py-1 rounded-full text-xs font-mono font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30">
+            LANGKAH 06
+          </span>
+          <span class="text-xs font-mono text-gray-400">Struktur Naratif</span>
+        </div>
+
+        <h2 class="text-2xl sm:text-3xl font-extrabold text-white font-cinzel mb-2">
+          Storyboard 50 Adegan, Durasi Dinamis (5s/10s/15s) &amp; Kalibrasi Dialog
+        </h2>
+
+        <div class="inline-flex items-center gap-2 px-3 py-1 rounded-lg bg-black/60 border border-gray-800 text-xs font-mono text-gray-400 mb-6">
+          <span>Akses:</span> Menu <strong class="text-amber-400">50-Scene Storyboard</strong> atau URL <span class="text-amber-400">/projects/{id}/scenes</span>
+        </div>
+
+        <p class="text-base sm:text-lg text-slate-300 leading-relaxed mb-6">
+          MovieAI Producer menerapkan arsitektur naratif sinematik 4-Babak standar Hollywood yang dipecah secara presisi ke dalam <strong class="text-amber-400 font-mono">50 Adegan Terstruktur</strong>, dilengkapi kendali durasi per adegan (5s, 10s, 15s), perakitan otomatis multi-shot (*Auto-Split*), serta kalibrasi audio bridge:
+        </p>
+
+        <!-- 4-Act Narrative Architecture Cards -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5 mb-8">
+          <div class="p-4 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <span class="text-xs font-mono font-bold text-amber-400">BABAK I (Adegan 01 - 12)</span>
+            <h4 class="text-sm font-bold text-white mt-1">Ordinary World &amp; Inciting Incident</h4>
+            <p class="text-xs text-gray-400 mt-1">Pengenalan dunia normal, peristiwa pemicu konflik, penolakan panggilan, dan penyeberangan ambang batas pertama.</p>
+          </div>
+
+          <div class="p-4 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <span class="text-xs font-mono font-bold text-amber-400">BABAK II-A (Adegan 13 - 25)</span>
+            <h4 class="text-sm font-bold text-white mt-1">Trials, Allies &amp; Midpoint Reversal</h4>
+            <p class="text-xs text-gray-400 mt-1">Ujian awal, pertemuan sekutu dan musuh, eskalasi konflik menuju titik balik tengah <em class="text-amber-300/90 not-italic font-mono text-xs px-1.5 py-0.5 rounded bg-black/40 border border-gray-800">Midpoint Reversal</em>.</p>
+          </div>
+
+          <div class="p-4 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <span class="text-xs font-mono font-bold text-amber-400">BABAK II-B (Adegan 26 - 38)</span>
+            <h4 class="text-sm font-bold text-white mt-1">Dark Night of the Soul &amp; All Is Lost</h4>
+            <p class="text-xs text-gray-400 mt-1">Tekanan maksimum lawan, kehancuran rencana utama, fase keputusasaan terendah <em class="text-amber-300/90 not-italic font-mono text-xs px-1.5 py-0.5 rounded bg-black/40 border border-gray-800">All Is Lost moment</em>.</p>
+          </div>
+
+          <div class="p-4 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <span class="text-xs font-mono font-bold text-amber-400">BABAK III (Adegan 39 - 50)</span>
+            <h4 class="text-sm font-bold text-white mt-1">Climax, Confrontation &amp; Resolution</h4>
+            <p class="text-xs text-gray-400 mt-1">Kebangkitan pahlawan, konfrontasi pamungkas <em class="text-amber-300/90 not-italic font-mono text-xs px-1.5 py-0.5 rounded bg-black/40 border border-gray-800">Climax</em>, dan resolusi harmoni penutup film.</p>
+          </div>
+        </div>
+
+        <!-- Comprehensive Implementation Steps -->
+        <div class="space-y-5 mb-8">
+          
+          <!-- Step 1: Blueprint -->
+          <div class="p-5 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <h4 class="text-base font-bold text-white flex items-center gap-2 mb-2 font-cinzel">
+              <span class="text-amber-400 font-mono">1.</span> Generate / Muat 50-Scene Blueprint
+            </h4>
+            <p class="text-sm sm:text-base text-gray-300 leading-relaxed">
+              Jika proyek baru dibuat dan adegan masih kosong, klik tombol <code class="px-2 py-0.5 rounded bg-black/60 text-amber-400 font-mono text-xs font-bold">Generate 50-Scene Blueprint</code>. Sistem akan otomatis menyusun narasi beat, target durasi standar, dan slugline untuk seluruh 50 adegan film.
+            </p>
+          </div>
+
+          <!-- Step 2: Scene Duration Selector (5s, 10s, 15s) -->
+          <div class="p-5 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <div class="flex items-center justify-between mb-2">
+              <h4 class="text-base font-bold text-white flex items-center gap-2 font-cinzel">
+                <span class="text-amber-400 font-mono">2.</span> Scene Detail Drawer &amp; Pemilihan Durasi Fleksibel (5s / 10s / 15s)
+              </h4>
+              <span class="px-2.5 py-0.5 rounded-full text-xs font-mono font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30">
+                Pembaruan Fitur
+              </span>
+            </div>
+            <p class="text-sm sm:text-base text-gray-300 leading-relaxed mb-3">
+              Klik salah satu kartu adegan untuk membuka panel samping (<strong class="text-white">Scene Detail Drawer</strong>). Pada bagian atas, tersedia tombol pemilih durasi adegan:
+            </p>
+            
+            <!-- Duration Badges Grid -->
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+              <div class="p-3.5 rounded-xl bg-black/40 border border-gray-800">
+                <div class="flex items-center justify-between">
+                  <span class="px-2 py-0.5 rounded font-mono font-bold text-xs bg-amber-500 text-black">5s</span>
+                  <span class="text-[10px] font-mono text-gray-400">Standard Pacing</span>
+                </div>
+                <h5 class="text-xs font-bold text-white mt-2">Shot Cepat &amp; Dinamis</h5>
+                <p class="text-[11px] text-gray-300 mt-1">Cocok untuk shot reaksi kilat, transisi cepat, atau adegan aksi intens tanpa jeda dialog panjang.</p>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-black/40 border border-gray-800">
+                <div class="flex items-center justify-between">
+                  <span class="px-2 py-0.5 rounded font-mono font-bold text-xs bg-amber-500 text-black">10s</span>
+                  <span class="text-[10px] font-mono text-gray-400">Extended Pacing</span>
+                </div>
+                <h5 class="text-xs font-bold text-white mt-2">Dialog Eksposisi &amp; Coverage</h5>
+                <p class="text-[11px] text-gray-300 mt-1">Ideal untuk percakapan dua arah, pengungkapan fakta cerita, atau pergerakan aktor melintasi set ruangan.</p>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-black/40 border border-gray-800">
+                <div class="flex items-center justify-between">
+                  <span class="px-2 py-0.5 rounded font-mono font-bold text-xs bg-amber-500 text-black">15s</span>
+                  <span class="text-[10px] font-mono text-gray-400">Long Take Pacing</span>
+                </div>
+                <h5 class="text-xs font-bold text-white mt-2">Monolog Dramatik &amp; Klimaks</h5>
+                <p class="text-[11px] text-gray-300 mt-1">Dikhususkan untuk adegan emosional mendalam, pidato dramatis, atau sekuens klimaks dengan multi-shot.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Step 3: Auto-Split Multi-Shot Assembly -->
+          <div class="p-5 rounded-2xl bg-gradient-to-br from-gray-900/90 to-[#0A0E15] border border-amber-500/30">
+            <div class="flex items-center justify-between mb-2">
+              <h4 class="text-base font-bold text-white flex items-center gap-2 font-cinzel">
+                <span class="text-amber-400 font-mono">3.</span> Auto-Split Multi-Shot Assembly (Pencegah Batasan Durasi AI)
+              </h4>
+              <span class="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                Hollywood Coverage
+              </span>
+            </div>
+            
+            <p class="text-sm sm:text-base text-gray-300 leading-relaxed mb-3">
+              <strong class="text-amber-300">Tantangan Teknis:</strong> Model generator video AI (seperti Google Veo, Kling, Runway Gen-3, dan OpenAI Sora) memiliki batas inferensi video terbaik pada rentang <strong class="text-white font-mono">~5.0 detik</strong> per render untuk menjaga kemiripan wajah biometrik, stabilitas fisika, dan ketajaman optik tanpa distorsi <em class="text-amber-300/90 not-italic font-mono text-xs">morphing</em>.
+            </p>
+
+            <p class="text-sm sm:text-base text-gray-300 leading-relaxed mb-4">
+              <strong class="text-emerald-400">Solusi MovieAI Auto-Split:</strong> Saat Anda memilih target durasi <strong class="text-white">10s</strong> atau <strong class="text-white">15s</strong>, tombol amber <code class="px-2 py-0.5 rounded bg-black/60 text-amber-400 font-mono text-xs font-semibold">Auto-Split (2x5s)</code> atau <code class="px-2 py-0.5 rounded bg-black/60 text-amber-400 font-mono text-xs font-semibold">Auto-Split (3x5s)</code> akan muncul secara otomatis. Sekali klik, sistem menyusun shot-shot individual berdurasi 5 detik dengan variasi sudut kamera sinematik:
+            </p>
+
+            <div class="space-y-2 text-xs sm:text-sm font-mono mb-4">
+              <div class="p-3 rounded-xl bg-black/50 border border-gray-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div class="flex items-center gap-2">
+                  <span class="px-2 py-0.5 rounded bg-gray-800 text-amber-400 font-bold">10s (2x5s)</span>
+                  <span class="text-slate-200">Shot #1 Master + Shot #2 Coverage</span>
+                </div>
+                <span class="text-xs text-gray-400">#Cam 01 Push-In Master &rarr; #Cam 06 Over-The-Shoulder</span>
+              </div>
+              <div class="p-3 rounded-xl bg-black/50 border border-gray-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div class="flex items-center gap-2">
+                  <span class="px-2 py-0.5 rounded bg-gray-800 text-amber-400 font-bold">15s (3x5s)</span>
+                  <span class="text-slate-200">Shot #1 Master + Shot #2 OTS + Shot #3 Hero Close-Up</span>
+                </div>
+                <span class="text-xs text-gray-400">#Cam 01 Master &rarr; #Cam 06 OTS &rarr; #Cam 13 Hero Close-Up</span>
+              </div>
+            </div>
+
+            <p class="text-xs text-gray-400">
+              * Operasi Auto-Split bersifat <strong class="text-white">idempoten</strong>: menekan tombol berulang kali tidak akan menduplikasi shot yang telah dibuat sebelumnya.
+            </p>
+          </div>
+
+          <!-- Step 4: Dynamic Dialogue Limiter -->
+          <div class="p-5 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <h4 class="text-base font-bold text-white flex items-center gap-2 mb-2 font-cinzel">
+              <span class="text-amber-400 font-mono">4.</span> Kalibrasi Dialog Dinamis &amp; Pacing Suku Kata
+            </h4>
+            <p class="text-sm sm:text-base text-gray-300 leading-relaxed mb-3">
+              Modul <strong class="text-white">Dialogue Calibrator</strong> kini beroperasi adaptif mengikuti durasi adegan yang dipilih (5s, 10s, atau 15s) dengan rasio standar ~0.34 detik per kata (~140 WPM):
+            </p>
+
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+              <div class="p-3 rounded-xl bg-black/40 border border-gray-800 text-center">
+                <span class="text-xs font-mono text-amber-400 font-bold block">Durasi 5s</span>
+                <span class="text-base font-bold text-white mt-1 block">&le; 14 Kata</span>
+                <span class="text-[11px] text-gray-400">~21 Suku Kata (Syllables)</span>
+              </div>
+              <div class="p-3 rounded-xl bg-black/40 border border-gray-800 text-center">
+                <span class="text-xs font-mono text-amber-400 font-bold block">Durasi 10s</span>
+                <span class="text-base font-bold text-white mt-1 block">&le; 28 Kata</span>
+                <span class="text-[11px] text-gray-400">~42 Suku Kata (Syllables)</span>
+              </div>
+              <div class="p-3 rounded-xl bg-black/40 border border-gray-800 text-center">
+                <span class="text-xs font-mono text-amber-400 font-bold block">Durasi 15s</span>
+                <span class="text-base font-bold text-white mt-1 block">&le; 42 Kata</span>
+                <span class="text-[11px] text-gray-400">~63 Suku Kata (Syllables)</span>
+              </div>
+            </div>
+
+            <!-- Pass / Overflow Comparison -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+              <div class="p-3.5 rounded-xl bg-emerald-950/20 border border-emerald-500/30">
+                <div class="flex items-center gap-1.5 text-emerald-400 font-mono font-bold text-xs">
+                  <span>✓</span> STATUS: PASSED (&le; Target Detik)
+                </div>
+                <p class="text-xs text-gray-300 mt-1">Pacing dialog aman dan tuntas diucapkan tanpa risiko audio terputus sebelum visual adegan berakhir.</p>
+              </div>
+              <div class="p-3.5 rounded-xl bg-amber-950/20 border border-amber-500/30">
+                <div class="flex items-center gap-1.5 text-amber-400 font-mono font-bold text-xs">
+                  <span>⚠️</span> STATUS: OVERFLOW (&gt; Target Detik)
+                </div>
+                <p class="text-xs text-gray-300 mt-1">Pacing dialog melebihi batas durasi. Sistem memberi peringatan untuk memangkas teks atau beralih ke durasi yang lebih panjang.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Step 5: Proportional Audio Bridge Transitions -->
+          <div class="p-5 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <h4 class="text-base font-bold text-white flex items-center gap-2 mb-2 font-cinzel">
+              <span class="text-amber-400 font-mono">5.</span> Rekomendasi Transisi Audio Proporsional (J-Cut / L-Cut / Hard Cut)
+            </h4>
+            <p class="text-sm sm:text-base text-gray-300 leading-relaxed mb-3">
+              Sistem secara otomatis mengevaluasi rasio durasi dialog terhadap target adegan untuk menyarankan teknik transisi suara bioskop:
+            </p>
+
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div class="p-3.5 rounded-xl bg-black/40 border border-gray-800">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="font-mono font-bold text-xs text-purple-400">J-CUT (1.0s Lead)</span>
+                  <span class="text-[10px] font-mono text-gray-400">Rasio &gt; 75%</span>
+                </div>
+                <p class="text-xs text-gray-300">
+                  Dialog berdensitas tinggi: Audio dialog karakter masuk lebih dulu mendahului cut video shot berikutnya, menciptakan transisi halus.
+                </p>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-black/40 border border-gray-800">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="font-mono font-bold text-xs text-sky-400">L-CUT (0.5s Trail)</span>
+                  <span class="text-[10px] font-mono text-gray-400">Rasio 40% - 75%</span>
+                </div>
+                <p class="text-xs text-gray-300">
+                  Dialog seimbang: Suara dialog melintasi batas cut visual dan tetap terdengar saat gambar beralih ke reaksi lawan bicara (*reaction shot*).
+                </p>
+              </div>
+
+              <div class="p-3.5 rounded-xl bg-black/40 border border-gray-800">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="font-mono font-bold text-xs text-emerald-400">HARD_CUT</span>
+                  <span class="text-[10px] font-mono text-gray-400">Rasio &lt; 40%</span>
+                </div>
+                <p class="text-xs text-gray-300">
+                  Dialog ringkas/punchy: Potongan visual dan pergantian audio dilakukan tegas secara bersamaan tanpa overlapping suara.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Step 6: Shot List Manager Presets -->
+          <div class="p-5 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <h4 class="text-base font-bold text-white flex items-center gap-2 mb-2 font-cinzel">
+              <span class="text-amber-400 font-mono">6.</span> Manajemen Shot Individual &amp; Pilihan Durasi
+            </h4>
+            <p class="text-sm sm:text-base text-gray-300 leading-relaxed mb-3">
+              Di panel bawah drawer (<strong class="text-white">Shot List Manager</strong>), sutradara dapat menambah shot manual dengan preset durasi:
+            </p>
+            <div class="flex flex-wrap items-center gap-2 text-xs font-mono">
+              <span class="px-3 py-1.5 rounded-lg bg-black/50 border border-gray-800 text-slate-200">
+                ⏱️ <strong class="text-amber-400">5.0s</strong> (Standard Take)
+              </span>
+              <span class="px-3 py-1.5 rounded-lg bg-black/50 border border-gray-800 text-slate-200">
+                ⏱️ <strong class="text-amber-400">10.0s</strong> (Extended Take)
+              </span>
+              <span class="px-3 py-1.5 rounded-lg bg-black/50 border border-gray-800 text-slate-200">
+                ⏱️ <strong class="text-amber-400">15.0s</strong> (Long Take)
+              </span>
+            </div>
+          </div>
+
+        </div>
+
+      </section>
+
+      <!-- ========================================== -->
+      <!-- LANGKAH 7 -->
+      <!-- ========================================== -->
+      <section id="langkah-7" class="scroll-mt-6 bg-[#0B0F15] border border-gray-800/90 rounded-3xl p-6 sm:p-10 shadow-xl transition-all">
+        <div class="flex items-center gap-3 mb-4">
+          <span class="px-3 py-1 rounded-full text-xs font-mono font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30">
+            LANGKAH 07
+          </span>
+          <span class="text-xs font-mono text-gray-400">Verifikasi &amp; Rilis</span>
+        </div>
+
+        <h2 class="text-2xl sm:text-3xl font-extrabold text-white font-cinzel mb-4">
+          Menjalankan Quality Control (QC Scorecard) &amp; Ekspor
+        </h2>
+
+        <p class="text-base sm:text-lg text-slate-300 leading-relaxed mb-6">
+          Sebelum film diserahkan ke tahap pasca-produksi final, sistem MovieAI Producer menjalankan audit multi-metrik otomatis untuk menjamin standar tayang kelas bioskop.
+        </p>
+
+        <!-- QC Multi-metric Grid -->
+        <h3 class="text-lg font-bold text-white font-cinzel mb-4">4 Pilar Audit QC Scorecard:</h3>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5 mb-8">
+          <div class="p-4 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <div class="flex items-center justify-between mb-1">
+              <h4 class="text-sm font-bold text-white font-mono">1. Face Similarity Score</h4>
+              <span class="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 text-xs font-mono font-bold">&gt; 85% Target</span>
+            </div>
+            <p class="text-xs text-gray-300">
+              Evaluasi kemiripan biometrik wajah karakter acuan (InsightFace) agar aktor tidak mengalami pergeseran struktur anatomi.
+            </p>
+          </div>
+
+          <div class="p-4 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <div class="flex items-center justify-between mb-1">
+              <h4 class="text-sm font-bold text-white font-mono">2. Aesthetic / CLIP Score</h4>
+              <span class="px-2 py-0.5 rounded bg-sky-500/10 text-sky-400 text-xs font-mono font-bold">Hollywood Grade</span>
+            </div>
+            <p class="text-xs text-gray-300">
+              Pengukuran komposisi pencahayaan sinematik dan tingkat kecocokan semantik visual terhadap teks prompt sutradara.
+            </p>
+          </div>
+
+          <div class="p-4 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <div class="flex items-center justify-between mb-1">
+              <h4 class="text-sm font-bold text-white font-mono">3. Temporal Jitter Variance</h4>
+              <span class="px-2 py-0.5 rounded bg-purple-500/10 text-purple-400 text-xs font-mono font-bold">Anti-Morphing</span>
+            </div>
+            <p class="text-xs text-gray-300">
+              Pengujian stabilitas frame antar-waktu untuk memastikan gerakan objek mulus tanpa glitch atau perubahan bentuk mendadak.
+            </p>
+          </div>
+
+          <div class="p-4 rounded-2xl bg-gray-900/60 border border-gray-800">
+            <div class="flex items-center justify-between mb-1">
+              <h4 class="text-sm font-bold text-white font-mono">4. Acoustic SNR (dB)</h4>
+              <span class="px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 text-xs font-mono font-bold">Clean Audio</span>
+            </div>
+            <p class="text-xs text-gray-300">
+              Pemeriksaan rasio sinyal terhadap desis kebisingan latar <em class="text-amber-300/90 not-italic font-mono text-xs px-1.5 py-0.5 rounded bg-black/40 border border-gray-800">Signal-to-Noise Ratio</em> untuk isolasi vokal dialog karakter yang jernih.
+            </p>
+          </div>
+        </div>
+
+        <!-- Export Master Package -->
+        <div class="p-6 rounded-2xl bg-gradient-to-br from-gray-900 via-gray-900 to-black border border-gray-800">
+          <div class="flex items-center gap-3 mb-2">
+            <span class="text-2xl">📦</span>
+            <h4 class="text-base sm:text-lg font-bold text-white font-cinzel">Export Production Package</h4>
+          </div>
+          <p class="text-sm sm:text-base text-gray-300 leading-relaxed mb-4">
+            Buka menu dropdown di kartu proyek, lalu pilih opsi <strong class="text-amber-400 font-mono">Export Production Package</strong>. Anda akan mengunduh paket arsip lengkap (<code class="text-amber-300 font-mono">.zip / .json</code>) yang berisi:
+          </p>
+          <ul class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs sm:text-sm font-mono text-gray-300">
+            <li class="p-2.5 rounded-lg bg-black/40 border border-gray-800/80 flex items-center gap-2">
+              <span class="text-amber-400">✓</span> Master Production Bible (DNA &amp; Rules)
+            </li>
+            <li class="p-2.5 rounded-lg bg-black/40 border border-gray-800/80 flex items-center gap-2">
+              <span class="text-amber-400">✓</span> 50-Scene Storyboard &amp; Metadata Shot
+            </li>
+            <li class="p-2.5 rounded-lg bg-black/40 border border-gray-800/80 flex items-center gap-2">
+              <span class="text-amber-400">✓</span> Prompt Multi-Engine (Veo, Kling, Sora)
+            </li>
+            <li class="p-2.5 rounded-lg bg-black/40 border border-gray-800/80 flex items-center gap-2">
+              <span class="text-amber-400">✓</span> Log QC Scorecard &amp; Pacing Calibration
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- ========================================== -->
+      <!-- LANGKAH 8: TIPS & TROUBLESHOOTING -->
+      <!-- ========================================== -->
+      <section id="langkah-8" class="scroll-mt-6 bg-[#0B0F15] border border-gray-800/90 rounded-3xl p-6 sm:p-10 shadow-xl transition-all">
+        <div class="flex items-center gap-3 mb-4">
+          <span class="px-3 py-1 rounded-full text-xs font-mono font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30">
+            PANDUAN TAMBAHAN
+          </span>
+          <span class="text-xs font-mono text-gray-400">Best Practices</span>
+        </div>
+
+        <h2 class="text-2xl sm:text-3xl font-extrabold text-white font-cinzel mb-6">
+          Tips &amp; Troubleshooting Umum
+        </h2>
+
+        <!-- Alert Cards -->
+        <div class="space-y-4">
+          
+          <!-- Tip Card -->
+          <div class="p-5 sm:p-6 rounded-2xl bg-emerald-950/20 border border-emerald-500/40 text-emerald-200">
+            <div class="flex items-center gap-2.5 mb-2">
+              <span class="text-xl">💡</span>
+              <h3 class="text-base sm:text-lg font-bold text-emerald-100 font-cinzel">Koneksi Cepat &amp; Hemat Kuota di Mobile</h3>
+            </div>
+            <p class="text-sm sm:text-base leading-relaxed text-emerald-200/90">
+              Antarmuka web MovieAIProducer telah dioptimasi secara adaptif penuh untuk layar smartphone (iPhone / Android) maupun desktop beresolusi tinggi (1440p / 4K). Saat mengakses lewat ponsel, tombol navigasi utama dapat dibuka melalui menu drawer di pojok kanan atas.
+            </p>
+          </div>
+
+          <!-- Important Card -->
+          <div class="p-5 sm:p-6 rounded-2xl bg-amber-950/20 border border-amber-500/40 text-amber-200">
+            <div class="flex items-center gap-2.5 mb-2">
+              <span class="text-xl">⚡</span>
+              <h3 class="text-base sm:text-lg font-bold text-amber-100 font-cinzel">Mengatasi Sesi Kedaluwarsa</h3>
+            </div>
+            <p class="text-sm sm:text-base leading-relaxed text-amber-200/90">
+              Sesi login dilindungi token terenkripsi berumur <strong>7 hari</strong>. Apabila sesi berakhir atau Anda berpindah gawai, cukup kunjungi kembali <a href="https://producer.apologets.com" class="underline text-amber-300 font-mono font-semibold">producer.apologets.com</a> dan tekan tombol <code class="px-2 py-0.5 rounded bg-black/40 text-white font-mono text-xs">Sign in with Google</code>. Seluruh data naskah dan aset film Anda tersimpan aman di database server.
+            </p>
+          </div>
+
+          <!-- Warning Card -->
+          <div class="p-5 sm:p-6 rounded-2xl bg-rose-950/20 border border-rose-500/40 text-rose-200">
+            <div class="flex items-center gap-2.5 mb-2">
+              <span class="text-xl">⚠️</span>
+              <h3 class="text-base sm:text-lg font-bold text-rose-100 font-cinzel">Jangan Mengubah DNA Saat Produksi Berjalan</h3>
+            </div>
+            <p class="text-sm sm:text-base leading-relaxed text-rose-200/90">
+              Hindari membuka kunci (<em class="text-white">Unlock</em>) Master Production Bible di tengah siklus proses batch render berlangsung. Perubahan parameter lensa atau film stock di pertengahan babak dapat memicu lompatan saturasi dan distorsi kontinuitas antar-adegan.
+            </p>
+          </div>
+
+        </div>
+      </section>
+
+    </div>
+
+    <!-- Bottom Call-to-Action -->
+    <div class="mt-14 p-8 rounded-3xl bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-transparent border border-amber-500/30 text-center relative overflow-hidden">
+      <div class="max-w-2xl mx-auto">
+        <h3 class="text-xl sm:text-2xl font-extrabold text-white font-cinzel mb-2">
+          Siap Memulai Produksi Film Layar Lebar Anda?
+        </h3>
+        <p class="text-sm sm:text-base text-gray-300 mb-6">
+          Buka portal NLE AI Studio sekarang dan manfaatkan seluruh kapabilitas DaVinci Obsidian Engine.
+        </p>
+        <div class="flex flex-wrap items-center justify-center gap-4">
+          <a href="/" class="px-6 py-3 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 text-black font-bold text-sm hover:from-amber-400 hover:to-amber-500 transition-all shadow-lg shadow-amber-500/20">
+            Buka Studio MovieAI &rarr;
+          </a>
+          <a href="#daftar-isi" class="px-6 py-3 rounded-xl bg-gray-900 border border-gray-700 text-gray-300 font-semibold text-sm hover:text-white hover:border-gray-500 transition-all">
+            Kembali ke Atas ↑
+          </a>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="border-t border-gray-800/80 mt-14 pt-8 pb-12 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs font-mono text-gray-500">
+      <div class="flex items-center gap-2">
+        <span class="text-amber-500">🎬</span>
+        <span>MovieAI Producer Suite &bull; DaVinci Obsidian Engine</span>
+      </div>
+      <div>
+        Hollywood Autonomous Film Production &bull; <a href="https://producer.apologets.com" class="text-amber-500 hover:underline">producer.apologets.com</a>
+      </div>
+    </footer>
+
+  </div>
+
+  <!-- Floating Back to Top Button -->
+  <a href="#" id="backToTop" class="fixed bottom-6 right-6 p-3 rounded-full bg-amber-500 text-black shadow-xl hover:bg-amber-400 transition-all opacity-0 pointer-events-none z-50 flex items-center justify-center font-bold text-sm" title="Kembali ke Atas">
+    ↑
+  </a>
+
+  <!-- Script for Mermaid & Floating Button -->
+  <script>
+    // Initialize Mermaid
+    document.addEventListener('DOMContentLoaded', function () {
+      if (window.mermaid) {
+        mermaid.initialize({
+          startOnLoad: true,
+          theme: 'dark',
+          themeVariables: {
+            darkMode: true,
+            background: '#07090C',
+            primaryColor: '#1F2937',
+            primaryTextColor: '#F8FAFC',
+            primaryBorderColor: '#374151',
+            lineColor: '#F59E0B',
+            secondaryColor: '#0E1520',
+            tertiaryColor: '#090B0E'
+          }
+        });
+      }
+
+      // Back to top toggle
+      var btn = document.getElementById('backToTop');
+      window.addEventListener('scroll', function () {
+        if (window.scrollY > 400) {
+          btn.classList.remove('opacity-0', 'pointer-events-none');
+          btn.classList.add('opacity-100', 'pointer-events-auto');
+        } else {
+          btn.classList.add('opacity-0', 'pointer-events-none');
+          btn.classList.remove('opacity-100', 'pointer-events-auto');
+        }
+      });
+    });
+  </script>
+</body>
+</html>

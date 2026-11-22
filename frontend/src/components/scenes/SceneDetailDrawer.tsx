@@ -9,18 +9,28 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  Clock,
+  Layers,
+  Sparkles,
+  Image as ImageIcon,
+  Loader2,
+  AlertTriangle,
+  ExternalLink,
+  RefreshCw,
 } from "lucide-react";
-import { Scene, api } from "@/lib/api";
+import { Scene, api, FlowProxyStatus } from "@/lib/api";
 import DialogueCalibrator from "./DialogueCalibrator";
 import ShotListManager from "./ShotListManager";
 import QcScorecard from "./QcScorecard";
 import { cn } from "@/lib/utils";
+import ObsidianDropdown from "@/components/ui/ObsidianDropdown";
 
 interface SceneDetailDrawerProps {
   scene: Scene | null;
   onClose: () => void;
   onSceneUpdated: () => void;
   styleCode?: string;
+  isNonVerbal?: boolean;
 }
 
 export default function SceneDetailDrawer({
@@ -28,6 +38,7 @@ export default function SceneDetailDrawer({
   onClose,
   onSceneUpdated,
   styleCode = "#Style 01",
+  isNonVerbal = false,
 }: SceneDetailDrawerProps) {
   const [slugline, setSlugline] = useState(scene?.slugline || "");
   const [narrativeGoal, setNarrativeGoal] = useState(scene?.narrative_goal || "");
@@ -35,6 +46,53 @@ export default function SceneDetailDrawer({
   const [sceneStatus, setSceneStatus] = useState(scene?.status || "PLANNED");
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [isSplitting, setIsSplitting] = useState(false);
+
+  // Visual preview state (Dynamic Provider Switching: Google Flow Free / 9Router / SD 3.5 Large)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(scene?.preview_url || null);
+  const [previewProvider, setPreviewProvider] = useState<string>("google_flow");
+  const [selectedProvider, setSelectedProvider] = useState<"google_flow" | "9router" | "sd35_large_hf" | "mock">("google_flow");
+  const [selectedModel, setSelectedModel] = useState<string>("gemini-3.1-flash-image");
+  const [isGeneratingPreview, setIsGeneratingPreview] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewPromptOverride, setPreviewPromptOverride] = useState("");
+  const [showPromptOverride, setShowPromptOverride] = useState(false);
+
+  // SOCKS5 Android Proxy Live Status
+  const [proxyStatus, setProxyStatus] = useState<FlowProxyStatus | null>(null);
+  const [isCheckingProxy, setIsCheckingProxy] = useState(false);
+  const [proxyOfflineAlert, setProxyOfflineAlert] = useState(false);
+
+  const handleCheckProxy = async () => {
+    try {
+      setIsCheckingProxy(true);
+      const res = await api.flow.getProxyStatus();
+      setProxyStatus(res);
+      if (res.healthy) {
+        setProxyOfflineAlert(false);
+      }
+      return res;
+    } catch (err: any) {
+      const fallback: FlowProxyStatus = {
+        healthy: false,
+        status: "offline",
+        host: "127.0.0.1",
+        port: 10808,
+        proxy_url: "socks5://127.0.0.1:10808",
+        detail: err?.message || "Gagal menghubungkan ke service proxy",
+      };
+      setProxyStatus(fallback);
+      return fallback;
+    } finally {
+      setIsCheckingProxy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (selectedProvider === "google_flow") {
+      handleCheckProxy();
+    }
+  }, [selectedProvider]);
 
   // Multi-engine live prompt compiler inside drawer
   const [compilerEngine, setCompilerEngine] = useState<
@@ -49,6 +107,8 @@ export default function SceneDetailDrawer({
       setNarrativeGoal(scene.narrative_goal || "");
       setDurationTarget(scene.duration_target || 5.0);
       setSceneStatus(scene.status || "PLANNED");
+      setPreviewUrl(scene.preview_url || null);
+      setPreviewError(null);
     }
   }, [scene]);
 
@@ -73,12 +133,133 @@ export default function SceneDetailDrawer({
     }
   };
 
+  const handleAutoSplit = async (targetSec: number) => {
+    try {
+      setIsSplitting(true);
+      await api.scenes.autoSplit(scene.id, targetSec);
+      setDurationTarget(targetSec);
+      onSceneUpdated();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsSplitting(false);
+    }
+  };
+
+  const handleGeneratePreview = async () => {
+    try {
+      setIsGeneratingPreview(true);
+      setPreviewError(null);
+
+      if (selectedProvider === "google_flow") {
+        const prompt =
+          previewPromptOverride.trim() ||
+          `${slugline}. ${narrativeGoal}. ${styleCode}. 8k cinematic photorealistic keyframe.`;
+
+        try {
+          const res = await api.flow.generateImage({
+            prompt,
+            aspect_ratio: "16:9",
+            scene_id: scene.id,
+            project_id: scene.project_id,
+          });
+
+          const jobId = res.job_id;
+          let pollCount = 0;
+          const interval = setInterval(async () => {
+            pollCount++;
+            try {
+              const job = await api.flow.getJob(jobId);
+              if (job.status === "completed" && job.image_url) {
+                clearInterval(interval);
+                setPreviewUrl(job.image_url);
+                setPreviewProvider("google_flow");
+                setIsGeneratingPreview(false);
+                onSceneUpdated();
+              } else if (job.status === "failed") {
+                clearInterval(interval);
+                setIsGeneratingPreview(false);
+                const errMsg = job.error_message || "Generasi Google Flow gagal.";
+                if (errMsg.includes("SOCKS5_PROXY_OFFLINE") || errMsg.includes("ERR_PROXY_")) {
+                  setProxyOfflineAlert(true);
+                  setPreviewError("Proxy SOCKS5 Android Offline. Pastikan reverse tunnel di HP Android sudah aktif.");
+                } else {
+                  setPreviewError(errMsg);
+                }
+              } else if (pollCount > 60) {
+                clearInterval(interval);
+                setIsGeneratingPreview(false);
+                setPreviewError("Timeout menunggu antrean Google Flow (180 detik).");
+              }
+            } catch (err: any) {
+              clearInterval(interval);
+              setIsGeneratingPreview(false);
+              setPreviewError(err?.message || "Gagal memeriksa status job Flow.");
+            }
+          }, 3000);
+          return;
+        } catch (postErr: any) {
+          setIsGeneratingPreview(false);
+          const msgStr = typeof postErr?.message === "string" ? postErr.message : JSON.stringify(postErr?.message || "");
+          const errStr = `${postErr?.code || ""} ${postErr?.error_code || ""} ${msgStr} ${JSON.stringify(postErr || {})}`;
+          if (
+            errStr.includes("SOCKS5_PROXY_OFFLINE") ||
+            errStr.includes("ERR_PROXY_") ||
+            errStr.includes("Proxy SOCKS5 Android")
+          ) {
+            setProxyOfflineAlert(true);
+            setPreviewError("Proxy SOCKS5 Android Offline. Pastikan reverse tunnel di HP Android sudah aktif.");
+          } else {
+            const rawErr =
+              postErr?.response?.data?.detail ||
+              postErr?.response?.data?.error?.message ||
+              postErr?.message ||
+              postErr;
+            const fallbackMsg =
+              typeof rawErr === "string" && rawErr !== "[object Object]"
+                ? rawErr
+                : (typeof rawErr?.message === "string" && rawErr.message !== "[object Object]"
+                    ? rawErr.message
+                    : (typeof rawErr?.detail === "string"
+                        ? rawErr.detail
+                        : "Gagal membuat job Google Flow."));
+            setPreviewError(fallbackMsg);
+          }
+          return;
+        }
+      }
+
+      const res = await api.scenes.generatePreview(scene.id, {
+        prompt: previewPromptOverride.trim() || undefined,
+        aspect_ratio: "16:9",
+        provider: selectedProvider,
+        model: selectedProvider === "9router" ? selectedModel : undefined,
+        enable_fallback: true,
+      });
+      if (res?.data?.preview_url) {
+        setPreviewUrl(res.data.preview_url);
+        if (res.data.provider) setPreviewProvider(res.data.provider);
+        onSceneUpdated();
+      }
+      setIsGeneratingPreview(false);
+    } catch (err: any) {
+      console.error("Preview generation error:", err);
+      const msg =
+        (typeof err?.message === "string" && err.message !== "[object Object]" ? err.message : null) ||
+        (typeof err?.detail === "string" ? err.detail : null) ||
+        "Failed to generate visual preview";
+      setPreviewError(msg);
+      setIsGeneratingPreview(false);
+    }
+  };
+
   const getEngineCompiledPrompt = () => {
+    const durSec = durationTarget || 5.0;
     switch (compilerEngine) {
       case "veo":
-        return `[Google Veo Flow]: Cinematic 4K video, 2.39:1 anamorphic. Scene ${scene.scene_number}: ${slugline}. Beat: ${narrativeGoal}. ${styleCode}. Dynamic 5-second camera motion, photorealistic film grain, 24fps motion coherence.`;
+        return `[Google Veo Flow]: Cinematic 4K video, 2.39:1 anamorphic. Scene ${scene.scene_number}: ${slugline}. Beat: ${narrativeGoal}. ${styleCode}. Dynamic ${durSec}-second camera motion, photorealistic film grain, 24fps motion coherence.`;
       case "kling":
-        return `[Kling 1.5 Pro]: High-fidelity cinematic master shot in ${slugline}. ${narrativeGoal}. Stylized on ${styleCode}. Precise physical interaction, seamless 5-second cadence.`;
+        return `[Kling 1.5 Pro]: High-fidelity cinematic master shot in ${slugline}. ${narrativeGoal}. Stylized on ${styleCode}. Precise physical interaction, seamless ${durSec}-second cadence.`;
       case "runway":
         return `[Runway Gen-3 Alpha]: Seamless continuous cinematic motion, ${slugline}. Dramatic lighting, ${narrativeGoal}. Award-winning cinematography, ${styleCode}.`;
       case "sora":
@@ -159,17 +340,18 @@ export default function SceneDetailDrawer({
             </div>
 
             <div className="space-y-1">
-              <label className="text-[10px] text-obsidian-muted uppercase">Scene Status</label>
-              <select
+              <ObsidianDropdown
+                label="Scene Status"
+                size="sm"
+                options={[
+                  { value: "PLANNED", title: "Planned", description: "Scene structured and queued", badge: "Stage 01" },
+                  { value: "GENERATING", title: "Generating", description: "Inference actively rendering", badge: "Stage 02" },
+                  { value: "QC_PASSED", title: "QC Passed", description: "Biometric and continuity passed", badge: "Stage 03" },
+                  { value: "COMPLETED", title: "Completed", description: "Approved and ready for timeline", badge: "Stage 04" },
+                ]}
                 value={sceneStatus}
-                onChange={(e) => setSceneStatus(e.target.value)}
-                className="w-full px-3 py-1.5 rounded-lg bg-panel border border-border text-obsidian-primary focus:border-amber-500 focus:outline-none text-xs"
-              >
-                <option value="PLANNED">Planned</option>
-                <option value="GENERATING">Generating</option>
-                <option value="QC_PASSED">QC Passed</option>
-                <option value="COMPLETED">Completed</option>
-              </select>
+                onChange={(val) => setSceneStatus(val)}
+              />
             </div>
           </div>
 
@@ -182,10 +364,340 @@ export default function SceneDetailDrawer({
               className="w-full px-3 py-2 rounded-lg bg-panel border border-border text-obsidian-primary focus:border-amber-500 focus:outline-none text-xs resize-none"
             />
           </div>
+
+          {/* Duration Selector (5s | 10s | 15s) & Multi-Shot Assembly Trigger */}
+          <div className="pt-2 border-t border-border flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5">
+              <Clock className="w-3.5 h-3.5 text-amber-500" />
+              <label className="text-[10px] text-obsidian-muted uppercase font-bold">
+                Scene Duration:
+              </label>
+              <div className="flex items-center p-0.5 bg-panel rounded-lg border border-border">
+                {[5.0, 10.0, 15.0].map((sec) => (
+                  <button
+                    key={sec}
+                    type="button"
+                    onClick={() => setDurationTarget(sec)}
+                    className={cn(
+                      "px-2.5 py-1 rounded-md text-[11px] font-semibold transition-all",
+                      durationTarget === sec
+                        ? "bg-amber-500 text-canvas font-bold shadow-sm"
+                        : "text-obsidian-muted hover:text-obsidian-primary"
+                    )}
+                  >
+                    {sec}s
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {durationTarget > 5.0 && (
+              <button
+                type="button"
+                onClick={() => handleAutoSplit(durationTarget)}
+                disabled={isSplitting}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-elevated hover:bg-elevated/80 border border-amber-500/40 text-amber-400 text-[10px] font-semibold transition-all disabled:opacity-50"
+                title={`Auto-split into ${durationTarget === 10.0 ? "2" : "3"} shots @ 5.0s`}
+              >
+                <Layers className="w-3 h-3" />
+                <span>
+                  {isSplitting
+                    ? "Splitting..."
+                    : `Auto-Split (${durationTarget === 10.0 ? "2x5s" : "3x5s"})`}
+                </span>
+              </button>
+            )}
+          </div>
         </div>
 
-        {/* 5-Second Dialogue Limiter & J/L-Cut Calibration Waveform */}
-        <DialogueCalibrator sceneId={scene.id} />
+        {/* Visual Preview (Stable Diffusion 3.5 Large) */}
+        <div className="p-4 rounded-xl bg-panel border border-border space-y-3 font-mono text-xs">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-amber-500" />
+              <h4 className="font-cinzel text-xs font-bold uppercase tracking-wider text-obsidian-primary">
+                Visual Concept Preview (SD 3.5 Large)
+              </h4>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="px-2 py-0.5 rounded text-[9px] font-bold uppercase bg-amber-500/10 text-amber-400 border border-amber-500/30">
+                HF Space
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowPromptOverride(!showPromptOverride)}
+                className="text-[10px] text-obsidian-muted hover:text-amber-400 transition-colors underline"
+              >
+                {showPromptOverride ? "Hide Prompt" : "Edit Prompt"}
+              </button>
+            </div>
+          </div>
+
+          {showPromptOverride && (
+            <div className="space-y-1 animate-in fade-in duration-150">
+              <label className="text-[10px] text-obsidian-muted uppercase">Prompt Override (Optional)</label>
+              <textarea
+                value={previewPromptOverride}
+                onChange={(e) => setPreviewPromptOverride(e.target.value)}
+                placeholder="Leave blank to use auto-compiled Hollywood cinematic prompt..."
+                rows={2}
+                className="w-full px-3 py-1.5 rounded-lg bg-canvas border border-border text-obsidian-primary focus:border-amber-500 focus:outline-none text-xs resize-none"
+              />
+            </div>
+          )}
+
+          {/* Provider Selection Matrix for Dynamic Switching */}
+          <div className="flex flex-wrap items-center justify-between gap-2 p-2 rounded-lg bg-canvas border border-border">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] uppercase font-bold text-obsidian-muted">Provider:</span>
+              <div className="flex items-center gap-1">
+                {(["google_flow", "9router", "sd35_large_hf", "mock"] as const).map((prov) => (
+                  <button
+                    key={prov}
+                    type="button"
+                    onClick={() => setSelectedProvider(prov)}
+                    className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all ${
+                      selectedProvider === prov
+                        ? "bg-amber-500 text-canvas shadow-sm"
+                        : "bg-panel text-obsidian-muted hover:text-obsidian-primary"
+                    }`}
+                  >
+                    {prov === "google_flow"
+                      ? "Google Flow (Free)"
+                      : prov === "9router"
+                      ? "9Router (Combos)"
+                      : prov === "sd35_large_hf"
+                      ? "SD 3.5 HF"
+                      : "Local Mock"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {selectedProvider === "9router" && (
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] text-obsidian-muted">Model:</span>
+                <select
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.target.value)}
+                  className="px-2 py-0.5 rounded bg-panel border border-border text-obsidian-primary text-[10px] font-mono focus:outline-none focus:border-amber-500"
+                >
+                  <option value="gemini-3.1-flash-image">gemini-3.1-flash-image (Tier 1)</option>
+                  <option value="geminis">geminis (Multi-Model Combo)</option>
+                  <option value="Agy">Agy (Antigravity Pool)</option>
+                  <option value="ag/gemini-3.8-flash">ag/gemini-3.8-flash</option>
+                </select>
+              </div>
+            )}
+          </div>
+
+          {/* Live SOCKS5 Android Status Bar inside Drawer */}
+          {selectedProvider === "google_flow" && (
+            <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-panel border border-border text-[11px] font-mono">
+              <div className="flex items-center gap-1.5">
+                <span
+                  className={cn(
+                    "w-2 h-2 rounded-full",
+                    proxyStatus?.healthy
+                      ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.7)]"
+                      : "bg-rose-500 animate-pulse"
+                  )}
+                />
+                <span className="text-obsidian-secondary">SOCKS5 Android:</span>
+                <strong className={proxyStatus?.healthy ? "text-emerald-400" : "text-rose-400"}>
+                  {proxyStatus?.healthy ? "ONLINE" : "OFFLINE"}
+                </strong>
+                {proxyStatus?.healthy && proxyStatus.latency_ms && (
+                  <span className="text-[10px] text-obsidian-muted font-mono">
+                    ({proxyStatus.latency_ms}ms)
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={handleCheckProxy}
+                disabled={isCheckingProxy}
+                className="px-2 py-0.5 rounded text-[10px] font-semibold bg-canvas hover:bg-panel text-obsidian-primary border border-border transition disabled:opacity-50"
+                title={proxyStatus?.detail || "Cek koneksi SOCKS5 Android"}
+              >
+                {isCheckingProxy ? "Checking..." : "[Check Connection]"}
+              </button>
+            </div>
+          )}
+
+          {/* SOCKS5 Proxy Offline Alert Banner */}
+          {proxyOfflineAlert && (
+            <div className="p-3 rounded-lg bg-rose-500/15 border border-rose-500/40 text-xs font-mono text-rose-300 space-y-2 animate-in fade-in">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <div className="flex-1 space-y-1">
+                  <p className="font-bold">⚠️ SOCKS5 Proxy Android Offline</p>
+                  <p className="text-[11px] text-obsidian-secondary leading-relaxed">
+                    Koneksi tunnel HP Android (127.0.0.1:10808) tidak aktif. Pastikan aplikasi SOCKS5 / reverse tunnel di HP Android sudah dinyalakan.
+                  </p>
+                  <div className="pt-1 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const s = await handleCheckProxy();
+                        if (s.healthy) setProxyOfflineAlert(false);
+                      }}
+                      disabled={isCheckingProxy}
+                      className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-canvas font-bold text-[10px] flex items-center gap-1 transition"
+                    >
+                      {isCheckingProxy ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                      <span>Check Connection</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setProxyOfflineAlert(false)}
+                      className="px-2.5 py-1 rounded bg-panel hover:bg-canvas text-obsidian-muted hover:text-obsidian-primary text-[10px] border border-border transition"
+                    >
+                      Tutup
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Preview Image or Placeholder */}
+          {previewUrl ? (
+            <div className="space-y-2">
+              <div className="relative rounded-lg overflow-hidden border border-border bg-canvas aspect-video group">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={previewUrl}
+                  alt={`Preview Scene ${scene.scene_number}`}
+                  className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-between p-3">
+                  <div className="flex items-center gap-1.5 truncate max-w-[70%]">
+                    <span className="text-[10px] text-white/90 font-mono">
+                      Scene #{scene.scene_number.toString().padStart(2, "0")} Keyframe
+                    </span>
+                    <span className="px-1.5 py-0.2 rounded bg-amber-500/80 text-black font-mono font-bold text-[9px] uppercase">
+                      {previewProvider}
+                    </span>
+                  </div>
+                  <a
+                    href={previewUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center gap-1 text-[10px] text-amber-400 hover:text-amber-300 bg-black/60 px-2 py-1 rounded backdrop-blur-sm"
+                  >
+                    <ExternalLink className="w-3 h-3" />
+                    <span>Full Resolution</span>
+                  </a>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between pt-1">
+                <span className="text-[10px] text-obsidian-muted">
+                  Engine: {selectedProvider === "google_flow" ? "GOOGLE FLOW (FREE)" : selectedProvider.toUpperCase()} &bull; 16:9 Cinema &bull; Dynamic Switching Active
+                </span>
+                <button
+                  type="button"
+                  onClick={handleGeneratePreview}
+                  disabled={isGeneratingPreview}
+                  className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-canvas hover:bg-elevated border border-border text-amber-400 font-bold text-[11px] transition-all disabled:opacity-50"
+                >
+                  {isGeneratingPreview ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Generating...</span>
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>
+                        Regenerate (
+                        {selectedProvider === "google_flow"
+                          ? "Flow (Free)"
+                          : selectedProvider === "9router"
+                          ? "9Router"
+                          : selectedProvider === "sd35_large_hf"
+                          ? "SD 3.5"
+                          : "Mock"}
+                        )
+                      </span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="p-5 rounded-lg border border-dashed border-border bg-canvas/40 flex flex-col items-center justify-center text-center space-y-2.5">
+              <div className="w-9 h-9 rounded-full bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
+                <ImageIcon className="w-4 h-4" />
+              </div>
+              <div className="space-y-0.5">
+                <p className="text-obsidian-primary font-semibold text-xs">Belum ada preview visual scene</p>
+                <p className="text-obsidian-muted text-[10px] max-w-sm">
+                  Generate concept visual keyframe berbasis Hollywood camera, lighting, dan beat cerita scene ini menggunakan{" "}
+                  {selectedProvider === "google_flow"
+                    ? "Google Flow (Free 6-Account Round-Robin Pool)"
+                    : selectedProvider === "9router"
+                    ? "9Router Multi-Model Combo"
+                    : selectedProvider === "sd35_large_hf"
+                    ? "Stable Diffusion 3.5 Large"
+                    : "Local Mock Engine"}
+                  .
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleGeneratePreview}
+                disabled={isGeneratingPreview}
+                className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-canvas font-bold text-xs shadow-glow transition-all disabled:opacity-50"
+              >
+                {isGeneratingPreview ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>
+                      Generating via{" "}
+                      {selectedProvider === "google_flow"
+                        ? "Google Flow"
+                        : selectedProvider === "9router"
+                        ? "9Router"
+                        : "SD 3.5"}
+                      ...
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>
+                      Generate Preview (
+                      {selectedProvider === "google_flow"
+                        ? "Google Flow Free"
+                        : selectedProvider === "9router"
+                        ? "9Router"
+                        : selectedProvider === "sd35_large_hf"
+                        ? "SD 3.5"
+                        : "Mock"}
+                      )
+                    </span>
+                  </>
+                )}
+              </button>
+            </div>
+          )}
+
+          {/* Error Banner */}
+          {previewError && (
+            <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 flex items-start gap-2.5 text-rose-400 animate-in fade-in duration-150">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <div className="text-[11px] leading-relaxed">
+                <div className="font-bold">Gagal Generate Visual Preview</div>
+                <div className="text-rose-300/90">{previewError}</div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Dynamic Dialogue Limiter & J/L-Cut Calibration Waveform */}
+        <DialogueCalibrator sceneId={scene.id} durationTarget={durationTarget} isNonVerbal={isNonVerbal} />
 
         {/* Shot List Manager */}
         <ShotListManager sceneId={scene.id} onShotsUpdated={onSceneUpdated} />

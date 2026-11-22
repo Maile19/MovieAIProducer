@@ -3,6 +3,7 @@
 import React from "react";
 import { Sparkles, Download } from "lucide-react";
 import { cn } from "@/lib/utils";
+import ObsidianDropdown from "@/components/ui/ObsidianDropdown";
 
 export type ActFilterType = "ALL" | "ACT_I" | "ACT_II_A" | "ACT_II_B" | "ACT_III";
 
@@ -30,6 +31,24 @@ export default function ActFilterBar({
   isGeneratingBlueprint,
   onExportPackage,
 }: ActFilterBarProps) {
+  const count = totalScenes || 50;
+  const pad = count >= 100 ? 3 : 2;
+  const formatNum = (n: number) => n.toString().padStart(pad, "0");
+
+  let act1End = 12;
+  let act2End = 25;
+  let act3End = 38;
+
+  if (count === 50) {
+    act1End = 12;
+    act2End = 25;
+    act3End = 38;
+  } else {
+    act1End = Math.max(1, Math.round(count * 0.25));
+    act2End = Math.max(act1End + 1, Math.round(count * 0.50));
+    act3End = Math.max(act2End + 1, Math.round(count * 0.75));
+  }
+
   const filters: Array<{
     id: ActFilterType;
     label: string;
@@ -39,36 +58,36 @@ export default function ActFilterBar({
   }> = [
     {
       id: "ALL",
-      label: "All 50 Scenes",
-      sublabel: "Scenes 01–50",
+      label: `All ${count} Scenes`,
+      sublabel: `Scenes 01–${formatNum(count)}`,
       count: totalScenes,
       color: "amber",
     },
     {
       id: "ACT_I",
       label: "Act I: Setup & Catalyst",
-      sublabel: "Scenes 01–12",
+      sublabel: `Scenes 01–${formatNum(act1End)}`,
       count: actCounts.act1,
       color: "emerald",
     },
     {
       id: "ACT_II_A",
       label: "Act II-A: Rising Stakes",
-      sublabel: "Scenes 13–25",
+      sublabel: `Scenes ${formatNum(act1End + 1)}–${formatNum(act2End)}`,
       count: actCounts.act2a,
       color: "blue",
     },
     {
       id: "ACT_II_B",
       label: "Act II-B: Dark Night",
-      sublabel: "Scenes 26–38",
+      sublabel: `Scenes ${formatNum(act2End + 1)}–${formatNum(act3End)}`,
       count: actCounts.act2b,
       color: "violet",
     },
     {
       id: "ACT_III",
       label: "Act III: Climax & Resolution",
-      sublabel: "Scenes 39–50",
+      sublabel: `Scenes ${formatNum(act3End + 1)}–${formatNum(count)}`,
       count: actCounts.act3,
       color: "rose",
     },
@@ -76,8 +95,25 @@ export default function ActFilterBar({
 
   return (
     <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 p-3.5 rounded-xl bg-panel border border-border shadow-studio">
-      {/* Act Filter Tabs */}
-      <div className="flex items-center gap-1.5 overflow-x-auto pb-1 lg:pb-0 scrollbar-none">
+      {/* Mobile/Tablet Act Filter Dropdown */}
+      <div className="block lg:hidden w-full">
+        <ObsidianDropdown
+          size="sm"
+          label="Filter by Dramatic Act"
+          icon={<Sparkles className="w-4 h-4 text-amber-500" />}
+          options={filters.map((f) => ({
+            value: f.id,
+            title: f.label,
+            description: `${f.sublabel} • ${f.count} Scenes`,
+            badge: `${f.count} SCENES`,
+          }))}
+          value={currentFilter}
+          onChange={(val) => onChangeFilter(val as ActFilterType)}
+        />
+      </div>
+
+      {/* Desktop Act Filter Tabs */}
+      <div className="hidden lg:flex items-center gap-1.5 overflow-x-auto pb-1 lg:pb-0 scrollbar-none">
         {filters.map((f) => {
           const isActive = currentFilter === f.id;
 
@@ -115,37 +151,34 @@ export default function ActFilterBar({
 
       {/* Action Buttons: Generate Blueprint & Export Package */}
       <div className="flex items-center gap-2 shrink-0">
-        {totalScenes === 0 && (
-          <button
-            type="button"
-            onClick={onGenerateBlueprint}
-            disabled={isGeneratingBlueprint}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-canvas font-bold text-xs transition-all shadow-glow disabled:opacity-50"
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>Generate 50-Scene Blueprint</span>
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={onGenerateBlueprint}
+          disabled={isGeneratingBlueprint}
+          className={cn(
+            "flex items-center gap-1.5 px-3 py-2 rounded-lg font-bold text-xs font-mono transition-all disabled:opacity-50",
+            totalScenes === 0
+              ? "bg-amber-500 hover:bg-amber-600 text-canvas shadow-glow"
+              : "bg-canvas hover:bg-elevated border border-amber-500/40 text-amber-400 hover:border-amber-500"
+          )}
+          title="Configure & Generate Hollywood 4-Act Blueprint"
+        >
+          <Sparkles className="w-3.5 h-3.5" />
+          <span>{totalScenes === 0 ? "Generate Blueprint" : "Blueprint Config"}</span>
+        </button>
 
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => onExportPackage("json")}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-canvas hover:bg-elevated border border-border text-obsidian-secondary hover:text-amber-400 text-xs font-mono transition-colors"
-            title="Download Hollywood JSON Package"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>Export JSON</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => onExportPackage("markdown")}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-canvas hover:bg-elevated border border-border text-obsidian-secondary hover:text-blue-400 text-xs font-mono transition-colors"
-            title="Download Hollywood Markdown Script"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>Script MD</span>
-          </button>
+        <div className="w-36">
+          <ObsidianDropdown
+            size="sm"
+            placeholder="Export..."
+            icon={<Download className="w-3.5 h-3.5 text-amber-500" />}
+            options={[
+              { value: "json", title: "Export JSON", description: "Hollywood JSON Bible & Scenes Package", badge: "JSON" },
+              { value: "markdown", title: "Export Script MD", description: "Industry-standard Screenplay Markdown", badge: "MD" },
+            ]}
+            value=""
+            onChange={(format) => onExportPackage(format as "json" | "markdown")}
+          />
         </div>
       </div>
     </div>

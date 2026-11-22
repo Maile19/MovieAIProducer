@@ -9,8 +9,9 @@ import ScrubberTimeline from "@/components/studio/ScrubberTimeline";
 import ApprovalGateModal from "@/components/studio/ApprovalGateModal";
 import MatrixSelector, { SelectedMatrixState } from "@/components/studio/MatrixSelector";
 import PromptTranspiler from "@/components/studio/PromptTranspiler";
+import SavePresetModal from "@/components/presets/SavePresetModal";
 import { api, Project } from "@/lib/api";
-import { Loader2, AlertCircle, ArrowLeft, RefreshCw } from "lucide-react";
+import { Loader2, AlertCircle, ArrowLeft, RefreshCw, BookmarkPlus, Sparkles } from "lucide-react";
 import Link from "next/link";
 
 export default function StudioPage() {
@@ -21,6 +22,7 @@ export default function StudioPage() {
   const [catalog, setCatalog] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [isSavePresetModalOpen, setIsSavePresetModalOpen] = useState(false);
 
   // Studio viewport & matrix state
   const [aspectRatio, setAspectRatio] = useState<AspectRatioType>("2.39:1");
@@ -202,6 +204,20 @@ export default function StudioPage() {
           </div>
 
           <div className="flex items-center gap-2">
+            {(project?.settings as any)?.preset_name && (
+              <span className="hidden sm:flex px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-mono items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Preset: {(project?.settings as any).preset_name}</span>
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => setIsSavePresetModalOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-400 text-xs font-medium transition-colors"
+            >
+              <BookmarkPlus className="w-3.5 h-3.5" />
+              <span>Save as Preset</span>
+            </button>
             <Link
               href={`/projects/${projectId}/bible`}
               className="px-3 py-1.5 rounded-lg bg-canvas hover:bg-elevated border border-border text-obsidian-secondary hover:text-amber-400 text-xs font-medium transition-colors"
@@ -286,9 +302,22 @@ export default function StudioPage() {
               compCode={selectedMatrix.compCode}
               speedCode={selectedMatrix.speedCode}
               aspectRatio={aspectRatio}
+              presetRules={(project?.settings as any)?.preset_data?.transpiler_rules}
+              isNonVerbal={
+                !!(project?.settings as any)?.preset_data?.bible_blueprint?.world_rules?.visual_non_verbal_mode?.enabled ||
+                (project?.settings as any)?.preset_slug === "youtube-global-kids-comedy-non-verbal"
+              }
             />
           </div>
         </div>
+
+        {/* Save as Preset Modal */}
+        <SavePresetModal
+          isOpen={isSavePresetModalOpen}
+          onClose={() => setIsSavePresetModalOpen(false)}
+          projectId={projectId}
+          defaultTitle={project?.title || "Production"}
+        />
       </div>
     </AppShell>
   );

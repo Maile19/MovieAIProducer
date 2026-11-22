@@ -16,7 +16,7 @@ router = APIRouter(tags=["Cinematography Shots"])
 
 class ShotCreateRequest(BaseModel):
     shot_number: int = Field(default=1, description="Sequential shot order in scene")
-    duration_seconds: float = Field(default=5.0, description="Duration (4.0 to 5.0 seconds standard)")
+    duration_seconds: float = Field(default=5.0, ge=1.0, le=60.0, description="Duration in seconds (e.g. 5.0, 10.0, 15.0)")
     camera_code: str = Field(default="#Cam 01", description="#Cam 01 to #Cam 34")
     lens_code: str = Field(default="#Lens 01", description="#Lens 01 to #Lens 06")
     comp_code: str = Field(default="#Comp 01", description="#Comp 01 to #Comp 08")
@@ -31,7 +31,7 @@ class ShotCreateRequest(BaseModel):
 
 class ShotUpdateRequest(BaseModel):
     shot_number: int | None = None
-    duration_seconds: float | None = None
+    duration_seconds: float | None = Field(default=None, ge=1.0, le=60.0)
     camera_code: str | None = None
     lens_code: str | None = None
     comp_code: str | None = None
@@ -70,6 +70,7 @@ async def list_scene_shots(
             "act_code": s.act_code,
             "speed_code": s.speed_code,
             "fg_bg_layers": s.fg_bg_layers,
+            "preview_url": s.fg_bg_layers.get("preview_url") if isinstance(s.fg_bg_layers, dict) else None,
             "dialogue": s.dialogue,
             "transition_type": s.transition_type,
             "status": s.status,
@@ -163,6 +164,7 @@ async def get_shot(
             "act_code": shot.act_code,
             "speed_code": shot.speed_code,
             "fg_bg_layers": shot.fg_bg_layers,
+            "preview_url": shot.fg_bg_layers.get("preview_url") if isinstance(shot.fg_bg_layers, dict) else None,
             "dialogue": shot.dialogue,
             "transition_type": shot.transition_type,
             "status": shot.status,

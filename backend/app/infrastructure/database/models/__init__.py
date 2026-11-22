@@ -6,6 +6,11 @@ from backend.app.infrastructure.database.models.character import (
     CharacterModel,
     CharacterStateModel,
 )
+from backend.app.infrastructure.database.models.flow import (
+    FlowAccountModel,
+    FlowImageJobModel,
+    FlowSettingModel,
+)
 from backend.app.infrastructure.database.models.foundation import (
     FoundationMetadataModel,
 )
@@ -14,6 +19,9 @@ from backend.app.infrastructure.database.models.pipeline import (
     ProductionJobModel,
     PromptSpecificationModel,
     QCReportModel,
+)
+from backend.app.infrastructure.database.models.preset import (
+    ProductionPresetModel,
 )
 from backend.app.infrastructure.database.models.project import (
     MasterProductionBibleModel,
@@ -30,6 +38,7 @@ __all__ = [
     "ProjectMemberModel",
     "ProjectModel",
     "MasterProductionBibleModel",
+    "ProductionPresetModel",
     "SceneModel",
     "ShotModel",
     "CharacterModel",
@@ -38,4 +47,7 @@ __all__ = [
     "PromptSpecificationModel",
     "ProductionJobModel",
     "QCReportModel",
+    "FlowAccountModel",
+    "FlowImageJobModel",
+    "FlowSettingModel",
 ]

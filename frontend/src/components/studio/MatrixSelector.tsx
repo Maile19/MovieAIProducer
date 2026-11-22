@@ -23,6 +23,7 @@ import {
   DEFAULT_SPEEDS,
 } from "@/lib/studio-constants";
 import { cn } from "@/lib/utils";
+import ObsidianDropdown from "@/components/ui/ObsidianDropdown";
 
 export interface SelectedMatrixState {
   styleCode: string;
@@ -165,33 +166,36 @@ export default function MatrixSelector({
         </span>
       </div>
 
-      {/* Horizontal Category Switcher Chips */}
-      <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
-        {categories.map((cat) => {
-          const Icon = cat.icon;
-          const isActive = activeCategory === cat.id;
+      {/* Matrix Dimension & Active Value Obsidian Dropdowns */}
+      <div className="space-y-2.5">
+        <ObsidianDropdown
+          size="sm"
+          label="Active Matrix Dimension"
+          options={categories.map((cat) => ({
+            value: cat.id,
+            title: `${cat.label} Matrix (${cat.count} Hollywood Standards)`,
+            description: `Active Selection: ${cat.current}`,
+            badge: cat.current,
+          }))}
+          value={activeCategory}
+          onChange={(val) => {
+            setActiveCategory(val as any);
+            setSearchQuery("");
+          }}
+        />
 
-          return (
-            <button
-              key={cat.id}
-              type="button"
-              onClick={() => {
-                setActiveCategory(cat.id);
-                setSearchQuery("");
-              }}
-              className={cn(
-                "flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-mono shrink-0 transition-all border",
-                isActive
-                  ? "bg-amber-500/20 text-amber-400 border-amber-500/40 shadow-sm font-bold"
-                  : "bg-canvas text-obsidian-muted hover:text-obsidian-secondary border-border"
-              )}
-            >
-              <Icon className="w-3 h-3" />
-              <span>{cat.label}</span>
-              <span className="text-[9px] opacity-70">({cat.count})</span>
-            </button>
-          );
-        })}
+        <ObsidianDropdown
+          label={`Hollywood ${categories.find(c => c.id === activeCategory)?.label} Catalog`}
+          placeholder={`Choose ${activeCategory} specification...`}
+          options={getFilteredItems().map((item: any) => ({
+            value: item.code,
+            title: `${item.code}: ${item.name || item.cue || "Specification"}`,
+            description: item.desc || item.aesthetic_directives || item.mood || item.movement || item.framing || item.visual_field || item.description,
+            badge: activeCategory.toUpperCase(),
+          }))}
+          value={currentSelectedCode() || ""}
+          onChange={(code) => handleSelectItem(code)}
+        />
       </div>
 
       {/* Active Matrix Summary Badges */}

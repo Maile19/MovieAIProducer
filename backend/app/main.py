@@ -7,6 +7,7 @@ from sqlalchemy import text
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from backend.app.api.deps import delete_session_cookie
+from backend.app.api.flow import router as flow_router
 from backend.app.api.health import router as health_router
 from backend.app.api.v1 import v1_router
 from backend.app.core.config import get_settings
@@ -32,6 +33,10 @@ def create_app() -> FastAPI:
                 exist_ok=True,
             )
         settings.asset_storage_path.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        settings.preview_storage_path.mkdir(
             parents=True,
             exist_ok=True,
         )
@@ -81,15 +86,40 @@ def create_app() -> FastAPI:
         if request_id:
             headers["X-Request-ID"] = request_id
 
+        if isinstance(exc.detail, dict):
+            error_code = (
+                exc.detail.get("error_code")
+                or exc.detail.get("code")
+                or ("unauthorized" if exc.status_code == 401 else "http_error")
+            )
+            raw_msg = exc.detail.get("message") or exc.detail.get("detail")
+            if isinstance(raw_msg, str):
+                message = raw_msg
+            elif isinstance(raw_msg, dict):
+                message = raw_msg.get("message") or raw_msg.get("detail") or str(raw_msg)
+            elif raw_msg is not None:
+                message = str(raw_msg)
+            else:
+                message = str(exc.detail)
+
+            error_payload = {
+                "code": error_code,
+                "message": message,
+                "request_id": request_id,
+            }
+            for k, v in exc.detail.items():
+                if k not in ("message", "code"):
+                    error_payload[k] = v
+        else:
+            error_payload = {
+                "code": "unauthorized" if exc.status_code == 401 else "http_error",
+                "message": str(exc.detail) if exc.detail is not None else "An error occurred",
+                "request_id": request_id,
+            }
+
         response = JSONResponse(
             status_code=exc.status_code,
-            content={
-                "error": {
-                    "code": "unauthorized" if exc.status_code == 401 else "http_error",
-                    "message": exc.detail,
-                    "request_id": request_id,
-                }
-            },
+            content={"error": error_payload},
             headers=headers,
         )
 
@@ -130,6 +160,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health_router)
     app.include_router(v1_router)
+    app.include_router(flow_router)
 
     return app
 

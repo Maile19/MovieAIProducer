@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import uuid
 
-from sqlalchemy import ForeignKey, String, Text
+from sqlalchemy import ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.infrastructure.database.base import Base
@@ -44,6 +44,47 @@ class CharacterModel(Base):
         GUID,
         ForeignKey("assets.id", ondelete="SET NULL"),
         nullable=True,
+    )
+    closeup_image_url: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+    )
+    front_image_url: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+    )
+    side_image_url: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+    )
+    three_quarter_image_url: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+    )
+    back_image_url: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+    )
+    tpose_image_url: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+    )
+    action_image_url: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+    )
+    expression_image_url: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+    )
+    dna_seed: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    sheet_metadata: Mapped[dict] = mapped_column(
+        JSON,
+        default=dict,
+        nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime,
@@ -89,6 +130,10 @@ class CharacterStateModel(Base):
         Text,
         default="",
         nullable=False,
+    )
+    image_url: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime,
