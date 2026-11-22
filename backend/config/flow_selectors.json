@@ -1,0 +1,269 @@
+{
+  "entry_url": "https://flow.google.com/",
+  "login_detectors": {
+    "url_keywords": [
+      "accounts.google.com/v3/signin",
+      "accounts.google.com/signin",
+      "accounts.google.com/ServiceLogin",
+      "accounts.youtube.com/signin"
+    ],
+    "logged_in_indicators": [
+      "a[href*='SignOutOptions']",
+      ".new-project-button",
+      "button.new-project-button",
+      "button:has-text('Project baru')",
+      "button:has-text('Proyek baru')",
+      "button:has-text('New project')",
+      "button:has-text('New Project')"
+    ],
+    "selectors": [
+      "a[href*='accounts.google.com/ServiceLogin']",
+      "a[href*='accounts.google.com/signin']",
+      "button:has-text('Sign in')",
+      "button:has-text('Sign In')",
+      "button:has-text('Login')",
+      "button:has-text('Masuk')",
+      "a:has-text('Sign in')",
+      "a:has-text('Sign In')",
+      "a:has-text('Masuk')"
+    ]
+  },
+  "login_redirect_indicators": {
+    "url_keywords": [
+      "accounts.google.com/v3/signin",
+      "accounts.google.com/signin",
+      "accounts.google.com/ServiceLogin",
+      "accounts.youtube.com/signin"
+    ],
+    "logged_in_indicators": [
+      "a[href*='SignOutOptions']",
+      ".new-project-button",
+      "button.new-project-button",
+      "button:has-text('Project baru')",
+      "button:has-text('Proyek baru')",
+      "button:has-text('New project')",
+      "button:has-text('New Project')"
+    ],
+    "selectors": [
+      "a[href*='accounts.google.com/ServiceLogin']",
+      "a[href*='accounts.google.com/signin']",
+      "button:has-text('Sign in')",
+      "button:has-text('Sign In')",
+      "button:has-text('Login')",
+      "button:has-text('Masuk')",
+      "a:has-text('Sign in')",
+      "a:has-text('Sign In')",
+      "a:has-text('Masuk')"
+    ]
+  },
+  "rate_limit_indicators": [
+    "You've reached the limit",
+    "Rate limit exceeded",
+    "Too many requests",
+    "Try again later",
+    "Please wait before generating more",
+    "limit reached",
+    "Quota exceeded",
+    "daily limit reached",
+    "capacity reached"
+  ],
+  "new_project_button": [
+    ".new-project-button",
+    "button.new-project-button",
+    "button:has-text('Project baru')",
+    "button:has-text('Proyek baru')",
+    "button:has-text('New Project')",
+    "button:has-text('New project')",
+    "button:has-text('Create Project')",
+    "button:has-text('Start creating')",
+    "button[aria-label*='New project']",
+    "button[aria-label*='Create project']",
+    "div[role='button']:has-text('New Project')",
+    "div[role='button']:has-text('New project')",
+    "button:has-text('+ New')",
+    "button:has-text('New')"
+  ],
+  "settings_trigger_button": [
+    "button[aria-label*='Pemicu setelan']",
+    ".settings-trigger-button",
+    "button.settings-trigger-button",
+    "button[aria-label*='Settings']"
+  ],
+  "agent_panel_close": [
+    ".agent-panel-header button:has-text('right_panel_close')",
+    "button:has-text('right_panel_close')",
+    ".agent-panel-header button[aria-label*='Tutup' i]",
+    "button[aria-label*='Tutup' i]",
+    "button[aria-label*='Close' i]"
+  ],
+  "flow_agent_switch": [
+    "button.switch[aria-label*='Agen Flow']",
+    "button[aria-label*='Agen Flow']",
+    "button.switch:has(mat-icon:has-text('spark'))",
+    "button.switch"
+  ],
+  "image_mode_switcher": [
+    ".cdk-overlay-pane mat-button-toggle:has-text('Gambar')",
+    ".cdk-overlay-pane mat-button-toggle:has-text('Image')",
+    ".cdk-overlay-pane button:has-text('Gambar')",
+    ".cdk-overlay-pane [role='tab']:has-text('Gambar')",
+    ".cdk-overlay-pane [role='radio']:has-text('Gambar')",
+    ".cdk-overlay-pane button:has-text('Image')",
+    ".cdk-overlay-pane [role='tab']:has-text('Image')",
+    ".cdk-overlay-pane [role='radio']:has-text('Image')",
+    "button:has-text('Gambar')",
+    "button:has-text('Image')",
+    "div[role='tab']:has-text('Image')",
+    "button[aria-label*='Image mode']",
+    "button[aria-label*='Switch to Image']",
+    "[data-mode='image']",
+    "button:has-text('Text to Image')",
+    "div[role='radio']:has-text('Image')"
+  ],
+  "add_media_button": [
+    ".add-menu-trigger",
+    "button[aria-label*='Tambahkan bahan' i]",
+    "button[aria-label*='Add' i]",
+    "button:has-text('add')"
+  ],
+  "upload_media_menu_item": [
+    "button:has-text('Upload media')",
+    "[role='menuitem']:has-text('Upload media')",
+    "button:has-text('Upload')"
+  ],
+  "add_to_prompt_button": [
+    "button:has-text('Tambahkan ke perintah')",
+    "button:has-text('Add to prompt')"
+  ],
+  "right_panel_close": [
+    "button:has-text('right_panel_close')",
+    "button[aria-label*='Tutup' i]",
+    "button[aria-label*='Close' i]"
+  ],
+  "prompt_input": [
+    "flow-prompt-box .ProseMirror",
+    "div.ProseMirror[contenteditable='true']",
+    "div.ProseMirror",
+    "div[contenteditable='true'][aria-label*='buat' i]",
+    "div[contenteditable='true'][aria-label*='create' i]",
+    "div[contenteditable='true'][aria-label*='prompt' i]",
+    "div[contenteditable='true'][role='textbox']",
+    "div[contenteditable='true']",
+    "textarea[placeholder*='buat' i]",
+    "textarea[placeholder*='Describe']",
+    "textarea[placeholder*='prompt' i]",
+    "textarea[placeholder*='image' i]",
+    "textarea[aria-label*='prompt' i]",
+    "textarea[aria-label*='Prompt' i]",
+    "textarea"
+  ],
+  "aspect_ratio": {
+    "16:9": [
+      ".cdk-overlay-pane mat-button-toggle:has-text('16:9')",
+      ".cdk-overlay-pane mat-button-toggle:has-text('crop_16_9')",
+      ".cdk-overlay-pane button:has-text('16:9')",
+      ".cdk-overlay-pane button[role='radio']:has-text('16:9')",
+      ".cdk-overlay-pane [role='radio']:has-text('16:9')",
+      "mat-button-toggle:has-text('16:9')",
+      "button:has-text('16:9')",
+      "button[aria-label*='16:9']",
+      "div[role='radio'][data-value='16:9']",
+      "div[role='radio']:has-text('16:9')",
+      "div[role='button']:has-text('16:9')",
+      "[data-aspect-ratio='16:9']"
+    ],
+    "3:4": [
+      ".cdk-overlay-pane mat-button-toggle:has-text('3:4')",
+      ".cdk-overlay-pane mat-button-toggle:has-text('crop_portrait')",
+      ".cdk-overlay-pane button:has-text('3:4')",
+      ".cdk-overlay-pane button[role='radio']:has-text('3:4')",
+      ".cdk-overlay-pane [role='radio']:has-text('3:4')",
+      "mat-button-toggle:has-text('3:4')",
+      "button:has-text('3:4')",
+      "button[aria-label*='3:4']",
+      "div[role='radio'][data-value='3:4']",
+      "div[role='radio']:has-text('3:4')",
+      "div[role='button']:has-text('3:4')",
+      "[data-aspect-ratio='3:4']"
+    ],
+    "1:1": [
+      ".cdk-overlay-pane mat-button-toggle:has-text('1:1')",
+      ".cdk-overlay-pane mat-button-toggle:has-text('crop_square')",
+      ".cdk-overlay-pane button:has-text('1:1')",
+      ".cdk-overlay-pane button[role='radio']:has-text('1:1')",
+      ".cdk-overlay-pane [role='radio']:has-text('1:1')",
+      "mat-button-toggle:has-text('1:1')",
+      "button:has-text('1:1')",
+      "button[aria-label*='1:1']",
+      "div[role='radio'][data-value='1:1']",
+      "div[role='radio']:has-text('1:1')",
+      "div[role='button']:has-text('1:1')",
+      "[data-aspect-ratio='1:1']"
+    ],
+    "9:16": [
+      ".cdk-overlay-pane mat-button-toggle:has-text('9:16')",
+      ".cdk-overlay-pane mat-button-toggle:has-text('crop_9_16')",
+      ".cdk-overlay-pane button:has-text('9:16')",
+      ".cdk-overlay-pane button[role='radio']:has-text('9:16')",
+      ".cdk-overlay-pane [role='radio']:has-text('9:16')",
+      "mat-button-toggle:has-text('9:16')",
+      "button:has-text('9:16')",
+      "button[aria-label*='9:16']",
+      "div[role='radio'][data-value='9:16']",
+      "div[role='radio']:has-text('9:16')",
+      "div[role='button']:has-text('9:16')",
+      "[data-aspect-ratio='9:16']"
+    ],
+    "4:3": [
+      ".cdk-overlay-pane mat-button-toggle:has-text('4:3')",
+      ".cdk-overlay-pane mat-button-toggle:has-text('crop_landscape')",
+      ".cdk-overlay-pane button:has-text('4:3')",
+      ".cdk-overlay-pane button[role='radio']:has-text('4:3')",
+      ".cdk-overlay-pane [role='radio']:has-text('4:3')",
+      "mat-button-toggle:has-text('4:3')",
+      "button:has-text('4:3')",
+      "button[aria-label*='4:3']",
+      "div[role='radio'][data-value='4:3']",
+      "div[role='radio']:has-text('4:3')",
+      "div[role='button']:has-text('4:3')",
+      "[data-aspect-ratio='4:3']"
+    ]
+  },
+  "reference_image_input": [
+    "input[type='file'][accept*='image']",
+    "input[type='file']",
+    "button[aria-label*='Upload reference']",
+    "button:has-text('Upload')",
+    "button:has-text('Add image')",
+    "div[role='button']:has-text('Upload')"
+  ],
+  "generate_button": [
+    ".generate-icon-button",
+    "button[aria-label*='pembuatan' i]",
+    "button[aria-label*='Mulai pembuatan' i]",
+    "button[aria-label*='Start generating' i]",
+    "button:has-text('arrow_forward')",
+    "button:has-text('Generate')",
+    "button[aria-label*='Generate']",
+    "button:has-text('Create')",
+    "button[type='submit']",
+    "div[role='button']:has-text('Generate')"
+  ],
+  "result_image": [
+    "img[src*='flow.google.com/asb/']",
+    "img[src*='googleusercontent.com']",
+    "img[src*='blob:']",
+    "img[src*='data:image']",
+    "div[data-testid*='generated-image'] img",
+    "div.output-container img",
+    "div[role='img'] img",
+    "main img"
+  ],
+  "download_button": [
+    "button[aria-label*='Download' i]",
+    "button:has-text('Download')",
+    "a[download]",
+    "button[aria-label*='Export' i]",
+    "button:has-text('Export')"
+  ]
+}

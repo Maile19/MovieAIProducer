@@ -50,11 +50,14 @@ MovieAIProducer treats external AI models and local GPU inference servers as hot
 
 ### 2.3 Concept Art & Keyframe Generation Engines
 
-| Provider / Model          | Integration Level            | Primary Strengths                                                          | Native Resolutions     | Prompt Adherence | Latency (P50 / P95) | Cost (USD)     | Integration Status                 |
-| :------------------------ | :--------------------------- | :------------------------------------------------------------------------- | :--------------------- | :--------------- | :------------------ | :------------- | :--------------------------------- |
-| **FLUX.1 [dev]**          | Local / Replicate / Together | 12B parameter flow transformer, pristine photorealism, typography in-scene | Up to 2048x2048        | Exceptional      | 8s / 16s            | $0.025 / image | **`[PLANNED]`** (Primary Concept)  |
-| **Midjourney v6.1**       | Assisted / Webhook           | World-class visual aesthetics, cinematic color grading, concept moodboards | 1024x1024 to 2048x2048 | High             | 30s / 60s           | Subscription   | **`[PLANNED]`** (Moodboard Previs) |
-| **SDXL + LoRA (ComfyUI)** | Local Node Graph             | Character FaceID locking, custom costume LoRAs, instant generation         | 1024x1024              | High (with LoRA) | 2.5s / 5.0s (GPU)   | $0.00          | **`[PLANNED]`** (Local Anchor)     |
+| Provider / Model                                | Integration Level            | Primary Strengths                                                                                     | Native Resolutions                      | Prompt Adherence | Latency (P50 / P95) | Cost (USD)             | Integration Status                    |
+| :---------------------------------------------- | :--------------------------- | :---------------------------------------------------------------------------------------------------- | :-------------------------------------- | :--------------- | :------------------ | :--------------------- | :------------------------------------ |
+| **9Router API Gateway (`gemini-3.1-flash-image`, `geminis`, `Agy`)** | Local Gateway (`:8080/v1`)   | Multi-Model Combo routing, connection pooling across 20+ accounts, zero marginal cost, 429 auto-failover | 1024x576, 576x1024, 1024x1024, 1024x512 | Exceptional      | 1.2s / 3.5s         | $0.00 (Pooled Quota)   | **`[IMPLEMENTED]`** (Primary Tier 1)  |
+| **Stability AI SD 3.5 Large (HF Spaces)**       | Gradio REST / SSE Stream     | 8B parameter diffusion model, pristine 35mm film grain, Hollywood cinematic textures                  | 1024x576, 1024x1024, 576x1024           | High             | 22s / 45s           | $0.00 (ZeroGPU) / Pro  | **`[IMPLEMENTED]`** (Fallback Tier 2) |
+| **Local Previs Mock Engine**                    | Deterministic Engine         | Guaranteed zero-downtime offline fallback, high-contrast cinematic layout SVG/WebP                    | Flexible (16:9, 1:1, 9:16)              | Instant          | <10ms / <20ms       | $0.00                  | **`[IMPLEMENTED]`** (Tier 3 Offline)  |
+| **FLUX.1 [dev]**                                | Local / Replicate / Together | 12B parameter flow transformer, pristine photorealism, typography in-scene                             | Up to 2048x2048                         | Exceptional      | 8s / 16s            | $0.025 / image         | **`[PLANNED]`** (Concept High-End)    |
+| **Midjourney v6.1**                             | Assisted / Webhook           | World-class visual aesthetics, cinematic color grading, concept moodboards                            | 1024x1024 to 2048x2048                  | High             | 30s / 60s           | Subscription           | **`[PLANNED]`** (Moodboard Previs)    |
+| **SDXL + LoRA (ComfyUI)**                       | Local Node Graph             | Character FaceID locking, custom costume LoRAs, instant generation                                    | 1024x1024                               | High (with LoRA) | 2.5s / 5.0s (GPU)   | $0.00                  | **`[PLANNED]`** (Local Anchor)        |
 
 ---
 
@@ -113,6 +116,46 @@ flowchart TD
 2. **Cool-Down Period:** Provider remains `OPEN` (bypassed) for 60 seconds, during which all traffic routes to the secondary tier.
 3. **Half-Open Probe:** After 60 seconds, exactly 1 canary request is sent. If successful, state resets to `CLOSED`; if failed, cool-down doubles to 120 seconds.
 4. **Idempotency Safeguard:** When retrying across providers, a new external job ID is generated, but the internal `shot_id` and production version tracking remain correlated.
+
+---
+
+## 3.1 Visual Previews & Keyframe Dynamic Switching (9Router & SD 3.5)
+
+To guarantee 100% storyboard preview availability without single-token bottlenecks or ZeroGPU downtime:
+
+```mermaid
+flowchart TD
+    Req["Generate Preview (Scene or Shot)"] --> Router["DynamicImageProviderRouter"]
+    Router --> Primary{"Tier 1: 9Router Gateway (:8080)\n(gemini-3.1-flash-image)"}
+
+    Primary -- "Success" --> SaveCAS["CAS Ingestion & Local Storage\n(./data/assets/previews)"]
+    Primary -- "429 / Quota Exceeded" --> ComboFailover{"Try Combo Models\n(geminis -> Agy -> ag/gemini-3.8-flash)"}
+
+    ComboFailover -- "Success" --> SaveCAS
+    ComboFailover -- "Combos Exhausted / 429" --> FallbackHF{"Tier 2: SD 3.5 Large\n(Hugging Face Space)"}
+
+    FallbackHF -- "Success" --> SaveCAS
+    FallbackHF -- "ZeroGPU Quota Exceeded" --> FallbackMock["Tier 3: Local Mock Previs Engine\n(Deterministic Offline Still)"]
+
+    FallbackMock --> SaveCAS
+    SaveCAS --> DB["Link to Scene/Shot fg_bg_layers & CAS AssetModel"]
+```
+
+### Rate Limits & Multi-Model Combo Policy
+
+| Provider Tier | Engine / Combo | Rate Limit & Quota Envelope | Handling Strategy |
+| :--- | :--- | :--- | :--- |
+| **Tier 1 (Primary)** | `gemini-3.1-flash-image` | 15 RPM / 1,500 RPD per key | Immediate failover to `geminis` on HTTP 429 |
+| **Tier 1 (Combo Fallback A)** | `geminis` | 60 RPM across pooled accounts | Rotates `flash-lite` -> `sonnet` -> `flash-low` |
+| **Tier 1 (Combo Fallback B)** | `Agy` | 60 RPM across Antigravity pool | Burst mitigation buffer |
+| **Tier 2 (Fallback)** | `sd35_large_hf` | ~80s ZeroGPU quota per rolling window | Triggers Tier 3 on `ZeroGPUQuotaExceededError` |
+| **Tier 3 (Contingency)** | `mock` | Unlimited (offline, 0ms latency) | Deterministic SVG/WebP with visual metadata |
+
+### Non-Disruption Guarantee for Live Streaming Feeds
+
+`MovieAIProducer` operates strictly on ports `8090` (FastAPI) and `3090` (Next.js) behind `producer.apologets.com`. It connects to `9router` on port `8080`.
+The live-streaming automation subsystem on `apologets.com` and `studio.apologets.com` utilizes ports `8085` (Dashboard/HTTP), `8086` (WebSocket streaming pipe), `3000` (Polya AI), and `7681` (Terminal).
+The image generation dynamic provider router does not modify, bind, or intercept any streaming sockets or live pipeline processes.
 
 ---
 

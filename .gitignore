@@ -52,9 +52,11 @@ logs/
 
 # Databases and local data
 /data/
+data/movieai.db*
 *.sqlite
 *.sqlite3
 *.db
+*.db*
 instance/
 
 # Media and generated production artifacts
@@ -77,3 +79,4 @@ tmp/
 *.bak
 *.backup
 backups/
+*.tar.gz

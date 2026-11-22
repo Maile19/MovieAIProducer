@@ -259,3 +259,32 @@ def test_sensitive_log_redaction():
     assert "supersecretpassword123" not in str(redacted)
     assert "secret-api-key-value" not in str(redacted)
     assert "top_secret_credential" not in str(redacted)
+
+
+def test_http_exception_with_dict_detail():
+    from fastapi import HTTPException
+
+    app = create_app()
+
+    @app.get("/trigger-socks5-offline")
+    async def trigger_socks5():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error_code": "SOCKS5_PROXY_OFFLINE",
+                "message": "Proxy SOCKS5 Android (socks5://127.0.0.1:10808) sedang offline.",
+                "proxy_detail": "Connection refused",
+            },
+        )
+
+    with TestClient(app) as client:
+        response = client.get("/trigger-socks5-offline")
+        assert response.status_code == 503
+        data = response.json()
+        assert "error" in data
+        assert data["error"]["code"] == "SOCKS5_PROXY_OFFLINE"
+        assert isinstance(data["error"]["message"], str)
+        assert data["error"]["message"] == "Proxy SOCKS5 Android (socks5://127.0.0.1:10808) sedang offline."
+        assert data["error"]["proxy_detail"] == "Connection refused"
+        assert data["error"]["error_code"] == "SOCKS5_PROXY_OFFLINE"
+
