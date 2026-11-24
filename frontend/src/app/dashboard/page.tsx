@@ -478,73 +478,82 @@ export default function DashboardPage() {
                   </div>
 
                   {/* Quick Action Navigation Buttons */}
-                  <div className="p-4 bg-panel flex items-center justify-between gap-2">
-                    {/* Direct Links to Zone 2 Modules */}
-                    <div className="flex items-center gap-1.5">
+                  <div className="p-4 bg-panel">
+                    {/* Baris 1: 3 Tombol Navigasi (Studio, Bible, Scenes) */}
+                    <div className="grid grid-cols-3 gap-2 w-full">
                       <Link
                         href={`/projects/${project.id}/studio`}
                         title="Open NLE Production Studio"
-                        className="px-2.5 py-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[11px] font-mono text-obsidian-primary hover:text-amber-400 flex items-center gap-1.5 transition-colors"
+                        className="w-full justify-center px-2 py-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[11px] font-mono text-obsidian-primary hover:text-amber-400 flex items-center gap-1.5 transition-colors whitespace-nowrap"
                       >
-                        <Film className="w-3.5 h-3.5 text-amber-500" />
+                        <Film className="w-3.5 h-3.5 text-amber-500 shrink-0" />
                         <span>Studio</span>
                       </Link>
 
                       <Link
                         href={`/projects/${project.id}/bible`}
                         title="Master Production Bible"
-                        className="px-2.5 py-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[11px] font-mono text-obsidian-primary hover:text-blue-400 flex items-center gap-1.5 transition-colors"
+                        className="w-full justify-center px-2 py-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[11px] font-mono text-obsidian-primary hover:text-blue-400 flex items-center gap-1.5 transition-colors whitespace-nowrap"
                       >
-                        <BookOpen className="w-3.5 h-3.5 text-blue-400" />
+                        <BookOpen className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                         <span>Bible</span>
                       </Link>
 
                       <Link
                         href={`/projects/${project.id}/scenes`}
                         title="50-Scene 4-Act Storyboard"
-                        className="px-2.5 py-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[11px] font-mono text-obsidian-primary hover:text-emerald-400 flex items-center gap-1.5 transition-colors"
+                        className="w-full justify-center px-2 py-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[11px] font-mono text-obsidian-primary hover:text-emerald-400 flex items-center gap-1.5 transition-colors whitespace-nowrap"
                       >
-                        <Grid className="w-3.5 h-3.5 text-emerald-400" />
+                        <Grid className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                         <span>Scenes</span>
                       </Link>
-
-                      {project.operational_stage < 16 && (
-                        <button
-                          type="button"
-                          onClick={() => advanceMutation.mutate({ id: project.id })}
-                          disabled={advanceMutation.isPending}
-                          title="Advance to next operational stage"
-                          className="px-2.5 py-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[11px] font-mono text-amber-400 hover:border-amber-500/50 flex items-center gap-1.5 transition-colors disabled:opacity-50"
-                        >
-                          <FastForward className="w-3.5 h-3.5" />
-                          <span>Advance</span>
-                        </button>
-                      )}
                     </div>
 
-                    {/* Quick Action Buttons (Delete & Enter Studio) */}
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          setDeleteError(null);
-                          setProjectToDelete(project);
-                        }}
-                        title={`Delete ${project.title}`}
-                        className="p-1.5 rounded-md bg-canvas hover:bg-rose-500/10 border border-border hover:border-rose-500/40 text-obsidian-muted hover:text-rose-400 transition-colors flex items-center justify-center shrink-0 cursor-pointer"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                    {/* Baris 2: Tombol Advance tepat di tengah sejajar di bawah Bible, beserta Quick Actions */}
+                    <div className="grid grid-cols-3 gap-2 w-full mt-2 items-center">
+                      <div />
+                      <div className="flex justify-center">
+                        {project.operational_stage < 16 && (
+                          <button
+                            type="button"
+                            onClick={() => advanceMutation.mutate({ id: project.id })}
+                            disabled={advanceMutation.isPending}
+                            title="Advance to next operational stage"
+                            className="w-full justify-center px-2 py-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[11px] font-mono text-amber-400 hover:border-amber-500/50 flex items-center gap-1.5 transition-colors disabled:opacity-50 whitespace-nowrap cursor-pointer"
+                          >
+                            {advanceMutation.isPending && advanceMutation.variables?.id === project.id ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                            ) : (
+                              <FastForward className="w-3.5 h-3.5 shrink-0" />
+                            )}
+                            <span>Advance</span>
+                          </button>
+                        )}
+                      </div>
 
-                      <Link
-                        href={`/projects/${project.id}/studio`}
-                        className="p-1.5 rounded-md bg-amber-500 hover:bg-amber-600 text-canvas transition-colors flex items-center justify-center shrink-0"
-                        title="Enter Production"
-                      >
-                        <ArrowRight className="w-4 h-4" />
-                      </Link>
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setDeleteError(null);
+                            setProjectToDelete(project);
+                          }}
+                          title={`Delete ${project.title}`}
+                          className="p-1.5 rounded-md bg-canvas hover:bg-rose-500/10 border border-border hover:border-rose-500/40 text-obsidian-muted hover:text-rose-400 transition-colors flex items-center justify-center shrink-0 cursor-pointer"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+
+                        <Link
+                          href={`/projects/${project.id}/studio`}
+                          className="p-1.5 rounded-md bg-amber-500 hover:bg-amber-600 text-canvas transition-colors flex items-center justify-center shrink-0"
+                          title="Enter Production"
+                        >
+                          <ArrowRight className="w-4 h-4" />
+                        </Link>
+                      </div>
                     </div>
                   </div>
                 </div>
