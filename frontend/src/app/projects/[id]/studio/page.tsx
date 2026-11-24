@@ -12,7 +12,7 @@ import MatrixSelector, { SelectedMatrixState } from "@/components/studio/MatrixS
 import PromptTranspiler from "@/components/studio/PromptTranspiler";
 import SavePresetModal from "@/components/presets/SavePresetModal";
 import { api, Project, Character, PipelineStatusResponse } from "@/lib/api";
-import { Loader2, AlertCircle, ArrowLeft, RefreshCw, BookmarkPlus, Sparkles } from "lucide-react";
+import { Loader2, AlertCircle, ArrowLeft, RefreshCw, BookmarkPlus, Sparkles, Film } from "lucide-react";
 import Link from "next/link";
 
 export default function StudioPage() {
@@ -239,24 +239,29 @@ export default function StudioPage() {
     >
       <div className="space-y-4">
         {/* =========================================================================
-         * Studio Sub-Header & Quick Navigation
+         * Studio Sub-Header & Quick Navigation (Vertical Hierarchy for Mobile & Desktop)
          * ========================================================================= */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border/70 pb-3">
-          <div>
-            <div className="flex items-center gap-2">
+        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 border-b border-border/70 pb-4">
+          <div className="space-y-1.5">
+            {/* Baris 1: Standalone Slate Navigation */}
+            <div>
               <Link
                 href="/dashboard"
-                className="text-obsidian-muted hover:text-obsidian-primary transition-colors text-xs flex items-center gap-1 font-mono"
+                className="text-obsidian-muted hover:text-obsidian-primary transition-colors text-xs inline-flex items-center gap-1.5 font-mono"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />
                 <span>Slate</span>
               </Link>
-              <span className="text-obsidian-muted text-xs font-mono">/</span>
-              <h1 className="font-cinzel text-base sm:text-lg font-bold text-obsidian-primary uppercase tracking-wider">
-                {project?.title} &bull; NLE Dual-Viewport
-              </h1>
             </div>
-            <p className="text-xs font-mono text-obsidian-muted mt-0.5">
+
+            {/* Baris 2: Judul Studio Penuh, Rata Kiri, break-words */}
+            <h1 className="font-cinzel text-base sm:text-xl font-bold text-obsidian-primary uppercase tracking-wider break-words leading-snug flex items-center gap-2.5">
+              <Film className="w-5 h-5 text-amber-500 shrink-0" />
+              <span>{project?.title} &bull; NLE Dual-Viewport</span>
+            </h1>
+
+            {/* Baris 3: Pipeline & Engine Subtitle */}
+            <p className="text-xs font-mono text-obsidian-muted pt-0.5">
               16-Stage Hollywood Pipeline &bull; 12-Step Framework &bull; DaVinci Obsidian Color Engine
             </p>
           </div>

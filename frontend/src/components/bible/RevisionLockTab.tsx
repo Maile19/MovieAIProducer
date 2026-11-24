@@ -14,6 +14,7 @@ import {
   BookmarkPlus,
 } from "lucide-react";
 import { api, MasterProductionBible } from "@/lib/api";
+import { formatMpbVersion } from "@/lib/versioning";
 import { cn } from "@/lib/utils";
 import SavePresetModal from "@/components/presets/SavePresetModal";
 
@@ -123,7 +124,7 @@ export default function RevisionLockTab({
                   {isLocked ? "IMMUTABLE DNA FREEZE" : "MUTABLE PRE-PRODUCTION"}
                 </span>
                 <span className="text-xs font-mono text-obsidian-muted">
-                  Version {bible?.version || 1}.0.0
+                  {formatMpbVersion(bible?.version, isLocked).label}
                 </span>
               </div>
               <h3 className="font-cinzel text-base font-bold text-obsidian-primary">

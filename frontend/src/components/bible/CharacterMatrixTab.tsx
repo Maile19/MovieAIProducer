@@ -2322,17 +2322,20 @@ export default function CharacterMatrixTab({
     <div className="space-y-6">
       {/* Top Section: Character Roster Bar & Action Controls */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-2">
-            <h3 className="font-cinzel text-sm font-bold uppercase tracking-wider text-obsidian-primary flex items-center gap-2">
-              <Users className="w-4 h-4 text-amber-500" />
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+            <h3 className="font-cinzel text-sm sm:text-base font-bold uppercase tracking-wider text-obsidian-primary flex items-center gap-2">
+              <Users className="w-4 h-4 text-amber-500 shrink-0" />
               <span>Character Cast &amp; Dynamic State Matrix</span>
             </h3>
-            <span className="px-2 py-0.5 rounded-full text-[9px] font-mono bg-amber-500/10 text-amber-400 border border-amber-500/30 font-bold">
-              {characters.length} Characters • Polya AI Screenwriter
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-mono bg-panel border border-amber-500/30 text-amber-400 font-medium whitespace-nowrap shadow-sm">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+              <span className="font-semibold">{characters.length} Characters</span>
+              <span className="text-obsidian-muted">&bull;</span>
+              <span className="text-obsidian-secondary">Polya AI Screenwriter</span>
             </span>
           </div>
-          <p className="text-xs font-mono text-obsidian-muted mt-0.5">
+          <p className="text-xs font-mono text-obsidian-muted">
             Maintains visual identity anchors, facial geometries, and wear states across all 50 scenes.
           </p>
         </div>

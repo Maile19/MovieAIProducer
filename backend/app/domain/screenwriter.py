@@ -916,6 +916,445 @@ OUTPUT SCHEMA (Return strictly this JSON object):
         )
 
     # ==========================================================================
+    # Dynamic World & Signature Props Generator
+    # ==========================================================================
+
+    async def generate_world_and_props(
+        self,
+        context: ProjectNarrativeContext,
+        additional_notes: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate 5 Key Environments (#Env 01 - 05) and 5 Signature Hero Props (#Prop 01 - 05)
+        strictly tailored to the project narrative context and visual world rules.
+        """
+        user_prompt = f"""PROJECT PRODUCTION BIBLE & NARRATIVE CONTEXT:
+- Film Title: {context.title}
+- Core Synopsis & Premise:
+{context.synopsis}
+- Master Genre & Tone: {context.genre_tone}
+- Master Visual Style Code: {context.master_style_code} ({context.style_name})
+- Visual Style Directives: {context.aesthetic_directives}
+- Color Palette & Lighting Emulation: {context.color_grade_emulation}
+- World Setting: {context.world_setting}
+- Production Continuity Rules: {', '.join(context.continuity_rules) if context.continuity_rules else 'Standard Cinematic Rules'}
+- Additional Showrunner Notes: {additional_notes or 'None'}
+
+WORLD & PROPS DESIGN MANDATE:
+1. Generate exactly 5 Key Environments (#Env 01 through #Env 05) that represent the core narrative locations of this story:
+   - code: "#Env 01" to "#Env 05"
+   - name: Distinct, culturally authentic, and evocative location name matching '{context.title}'.
+   - architecture: Spatial architecture, construction materials, structural scale, and dominant shapes.
+   - atmosphere: Micro-climate, weather conditions, airborne particles (steam/fog/smoke/dust), and spatial texture.
+   - lighting: Detailed lighting directive (e.g., '#Light 01 Volumetric Amber Rim...', key/fill/practical sources, color temperature).
+   - audio: Ambient soundscape, acoustic reverb, environmental Foley cues.
+
+2. Generate exactly 5 Signature Hero Props (#Prop 01 through #Prop 05) that carry narrative weight and tactile continuity:
+   - code: "#Prop 01" to "#Prop 05"
+   - name: Unique, story-critical hero prop name matching the film's world.
+   - material: Specific physical materiality, texture, engineering/craftsmanship, and wear/patina.
+   - weight: Narrative function, thematic significance, or story arc importance.
+   - action: Exact physical tactile interaction (how characters grip, manipulate, ignite, wear, or activate it).
+
+OUTPUT SCHEMA (Return STRICT valid JSON only):
+{{
+  "environments": [
+    {{
+      "code": "#Env 01",
+      "name": "Location Name",
+      "architecture": "Architectural styling and spatial dimensions",
+      "atmosphere": "Atmospheric conditions, weather, environmental texture",
+      "lighting": "Specific lighting setup, color temps, volumetric rays",
+      "audio": "Detailed ambient soundscape, acoustics, spatial Foley"
+    }},
+    {{
+      "code": "#Env 02",
+      "name": "Location Name",
+      "architecture": "...",
+      "atmosphere": "...",
+      "lighting": "...",
+      "audio": "..."
+    }},
+    {{
+      "code": "#Env 03",
+      "name": "Location Name",
+      "architecture": "...",
+      "atmosphere": "...",
+      "lighting": "...",
+      "audio": "..."
+    }},
+    {{
+      "code": "#Env 04",
+      "name": "Location Name",
+      "architecture": "...",
+      "atmosphere": "...",
+      "lighting": "...",
+      "audio": "..."
+    }},
+    {{
+      "code": "#Env 05",
+      "name": "Location Name",
+      "architecture": "...",
+      "atmosphere": "...",
+      "lighting": "...",
+      "audio": "..."
+    }}
+  ],
+  "props": [
+    {{
+      "code": "#Prop 01",
+      "name": "Hero Prop Name",
+      "material": "Material composition, craftsmanship, wear and patina",
+      "weight": "Core emotional or narrative function",
+      "action": "Tactile manipulation and interaction during pivotal scenes"
+    }},
+    {{
+      "code": "#Prop 02",
+      "name": "Hero Prop Name",
+      "material": "...",
+      "weight": "...",
+      "action": "..."
+    }},
+    {{
+      "code": "#Prop 03",
+      "name": "Hero Prop Name",
+      "material": "...",
+      "weight": "...",
+      "action": "..."
+    }},
+    {{
+      "code": "#Prop 04",
+      "name": "Hero Prop Name",
+      "material": "...",
+      "weight": "...",
+      "action": "..."
+    }},
+    {{
+      "code": "#Prop 05",
+      "name": "Hero Prop Name",
+      "material": "...",
+      "weight": "...",
+      "action": "..."
+    }}
+  ]
+}}"""
+
+        messages = [
+            {"role": "system", "content": POLYA_SCREENWRITER_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        try:
+            raw_json = await self._call_llm(messages)
+            return self._normalize_world_and_props(raw_json, context)
+        except Exception as exc:
+            logger.warning(
+                "Polya AI LLM call for world & props failed (%s). Generating contextual procedural world & props.",
+                exc,
+            )
+            return self._generate_procedural_world_and_props(context)
+
+    def _normalize_world_and_props(
+        self,
+        raw_json: dict[str, Any],
+        context: ProjectNarrativeContext,
+    ) -> dict[str, Any]:
+        """Normalize and enforce 5 environments and 5 props schema."""
+        procedural_fallback = self._generate_procedural_world_and_props(context)
+
+        raw_envs = raw_json.get("environments", []) if isinstance(raw_json, dict) else []
+        raw_props = raw_json.get("props", []) if isinstance(raw_json, dict) else []
+
+        normalized_envs = []
+        for i in range(5):
+            code = f"#Env {i + 1:02d}"
+            item = raw_envs[i] if i < len(raw_envs) and isinstance(raw_envs[i], dict) else {}
+            fallback_item = procedural_fallback["environments"][i]
+
+            normalized_envs.append({
+                "code": code,
+                "name": str(item.get("name") or fallback_item["name"]).strip(),
+                "architecture": str(item.get("architecture") or fallback_item["architecture"]).strip(),
+                "atmosphere": str(item.get("atmosphere") or fallback_item["atmosphere"]).strip(),
+                "lighting": str(item.get("lighting") or fallback_item["lighting"]).strip(),
+                "audio": str(item.get("audio") or fallback_item["audio"]).strip(),
+            })
+
+        normalized_props = []
+        for i in range(5):
+            code = f"#Prop {i + 1:02d}"
+            item = raw_props[i] if i < len(raw_props) and isinstance(raw_props[i], dict) else {}
+            fallback_item = procedural_fallback["props"][i]
+
+            normalized_props.append({
+                "code": code,
+                "name": str(item.get("name") or fallback_item["name"]).strip(),
+                "material": str(item.get("material") or fallback_item["material"]).strip(),
+                "weight": str(item.get("weight") or fallback_item["weight"]).strip(),
+                "action": str(item.get("action") or fallback_item["action"]).strip(),
+            })
+
+        return {
+            "environments": normalized_envs,
+            "props": normalized_props,
+        }
+
+    def _generate_procedural_world_and_props(
+        self,
+        context: ProjectNarrativeContext,
+    ) -> dict[str, Any]:
+        """Generate high-fidelity contextual environments and props based on project narrative context."""
+        title = context.title or "Cinematic Production"
+        genre = (context.genre_tone or "Cinematic Drama").split("/")[0].strip()
+        setting = context.world_setting or "Epic Universe"
+
+        # Contextual templates based on genre keywords
+        is_fantasy = any(w in (genre + " " + title).lower() for w in ["fantasy", "nordic", "myth", "awakening", "ancient", "magic", "realm", "legend", "disgraced"])
+        is_sci_fi = any(w in (genre + " " + title).lower() for w in ["cyber", "sci-fi", "space", "quantum", "machine", "orbit", "future", "stellar"])
+
+        if is_fantasy:
+            envs = [
+                {
+                    "code": "#Env 01",
+                    "name": f"Ancient Stone Sanctuary of {title}",
+                    "architecture": "Massive monolithic basalt arches, ancient Norse-inspired runic pillars, weathered flagstone floors.",
+                    "atmosphere": "Sub-zero mountain mist, drifting woodsmoke, falling snowflakes catching torchlight.",
+                    "lighting": "#Light 02 High-Contrast Chiaroscuro & flickering hearth embers.",
+                    "audio": "Howling glacial winds, crackling pine embers, distant thunder echoing through fjords.",
+                },
+                {
+                    "code": "#Env 02",
+                    "name": f"Whispering Pines of {setting}",
+                    "architecture": "Dense ancient boreal forest canopy, moss-draped boulders, winding frozen riverbanks.",
+                    "atmosphere": "Deep frost, breath condensation vapor, shafts of pale morning sun piercing mist.",
+                    "lighting": "#Light 04 Dawn Softbox with diffuse pale cyan rim illumination.",
+                    "audio": "Branches groaning under heavy snowpack, crunching frozen pine needles, distant wolf call.",
+                },
+                {
+                    "code": "#Env 03",
+                    "name": "High Keep Obsidian Throne Room",
+                    "architecture": "Vast vaulted timber hall lined with blackened iron shields, towering hearth brazier, frost-rimed glass.",
+                    "atmosphere": "Oppressive heavy air, bitter chill battling radiating furnace heat, suspended dust motes.",
+                    "lighting": "#Light 01 Volumetric Amber Rim & deep iron shadows.",
+                    "audio": "Heavy footsteps on flagstone, low murmur of war council, clatter of forged steel.",
+                },
+                {
+                    "code": "#Env 04",
+                    "name": "Subterranean Runic Crypts",
+                    "architecture": "Deep cavernous underground tomb, carved ancestor sarcophagi, subterranean glacial seep.",
+                    "atmosphere": "Permafrost condensation, eerie stillness, faint blue luminescence from vein crystals.",
+                    "lighting": "#Light 06 Bioluminescent Cyan Glow reflecting off wet ice walls.",
+                    "audio": "Rhythmic glacial water dripping, hollow acoustic resonance, low cavern wind hiss.",
+                },
+                {
+                    "code": "#Env 05",
+                    "name": "The Shattered Ridge / Climax Arena",
+                    "architecture": "Exposed mountain pinnacle, jagged slate crags overlooking stormy fjord expanse.",
+                    "atmosphere": "Violent blizzard gales, swirling ice crystals, dramatic tempest storm clouds.",
+                    "lighting": "#Light 05 Dramatic Backlit Silhouette & stark lightning flashes.",
+                    "audio": "Deafening storm roar, gale-force wind whistling against stone cliffs, thunder crashes.",
+                },
+            ]
+            props = [
+                {
+                    "code": "#Prop 01",
+                    "name": f"Rune-Etched War Seal of {title}",
+                    "material": "Hand-forged bog iron inlaid with beaten silver runes and braided leather lanyard.",
+                    "weight": "Hero ancestral heirloom carried by protagonist; anchors vow of redemption.",
+                    "action": "Held firmly in clenched fist, traced with thumb before entering battle.",
+                },
+                {
+                    "code": "#Prop 02",
+                    "name": "Meteoric Steel Broadsword",
+                    "material": "Pattern-welded Damascus steel blade with deep fuller, bronze crossguard, and deer-antler hilt.",
+                    "weight": "Signature weapon carrying battle notches from a dozen campaigns.",
+                    "action": "Drawn smoothly from worn leather scabbard with metallic resonance.",
+                },
+                {
+                    "code": "#Prop 03",
+                    "name": "Chiseled Obsidian Oath-Stone",
+                    "material": "Fractured volcanic glass inscribed with ancient bloodline vows and gold leaf filler.",
+                    "weight": "Antagonist's binding covenant token and symbol of tyrannical authority.",
+                    "action": "Slammed onto treaty table; pulses with faint thermal shimmer.",
+                },
+                {
+                    "code": "#Prop 04",
+                    "name": "Carved Bone Navigation Astrolabe",
+                    "material": "Mammoth ivory rings with brass astronomical dials and cracked quartz lens.",
+                    "weight": "Guide instrument used to navigate the forbidden northern ice shelves.",
+                    "action": "Held up against night sky to align constellations through quartz sight.",
+                },
+                {
+                    "code": "#Prop 05",
+                    "name": "Ancestral Horn of Awakening",
+                    "material": "Polished Aurochs horn banded in embossed silver and wrapped in dyed crimson sinew.",
+                    "weight": "Climactic rallying instrument capable of echoing across mountain passes.",
+                    "action": "Raised to lips with deep breath, sounded with low vibrating war blast.",
+                },
+            ]
+        elif is_sci_fi:
+            envs = [
+                {
+                    "code": "#Env 01",
+                    "name": f"Metropolitan Core & Command Deck of {title}",
+                    "architecture": "Brutalist composite steel-and-aerogel architecture, towering data displays, modular consoles.",
+                    "atmosphere": "Air-scrubbed climate-controlled atmosphere, soft ventilation hum, zero ambient humidity.",
+                    "lighting": "#Light 01 Volumetric Amber Rim & cool console glow.",
+                    "audio": "Continuous electronics hum, soft synthesized alerts, muffled magnetic lifts.",
+                },
+                {
+                    "code": "#Env 02",
+                    "name": f"Perimeter Docking Sector ({setting})",
+                    "architecture": "Exposed titanium truss gantries, pressurized magnetic airlocks, reinforced blast doors.",
+                    "atmosphere": "Vented nitrogen steam, ozone scent, oil-streaked industrial floor plates.",
+                    "lighting": "#Light 03 Neon Sodium Vapor & warning strobe pulses.",
+                    "audio": "Pneumatic hiss of depressurization, heavy servo whining, distant industrial klaxon.",
+                },
+                {
+                    "code": "#Env 03",
+                    "name": "Subterranean Reactor Catacombs",
+                    "architecture": "Cavernous magnetic containment vaults, supercooled piping arrays, steel catwalks.",
+                    "atmosphere": "Cryogenic frost lining conduit joints, thermal haze above vent grates.",
+                    "lighting": "#Light 06 Bioluminescent Cyan Glow & pulsing warning halos.",
+                    "audio": "Low-frequency sub-bass generator vibration, periodic liquid-gas discharge.",
+                },
+                {
+                    "code": "#Env 04",
+                    "name": "Abandoned Sensor Observatory",
+                    "architecture": "Retro-fitted geodesic dome with peeling electromagnetic shielding, shattered viewport panels.",
+                    "atmosphere": "Static charge in the air, swirling airborne dust motes catching celestial light.",
+                    "lighting": "#Light 02 High-Contrast Chiaroscuro & starfield wash.",
+                    "audio": "Wind buffeting exterior antenna array, erratic spark discharges, hollow echoes.",
+                },
+                {
+                    "code": "#Env 05",
+                    "name": "Orbital Spire Climax Platform",
+                    "architecture": "Narrow cantilevered titanium observation spur suspended above planetary cloud deck.",
+                    "atmosphere": "Thin stratospheric crosswinds, high-altitude vacuum chill, lightning dancing below.",
+                    "lighting": "#Light 05 Dramatic Backlit Silhouette against planetary curvature.",
+                    "audio": "Screaming wind shear, resonant structural strain, howling slipstream.",
+                },
+            ]
+            props = [
+                {
+                    "code": "#Prop 01",
+                    "name": f"Neural Link Interface Key of {title}",
+                    "material": "Matte carbon-fiber casing with gold-plated micro-pins and status LED diode.",
+                    "weight": "Protagonist's identity authenticator; stores encrypted memories and clearance codes.",
+                    "action": "Inserted into neuro-port with distinct tactile dual-click.",
+                },
+                {
+                    "code": "#Prop 02",
+                    "name": "Overcharged Pulse Disruptor",
+                    "material": "Machined tungsten alloy with ceramic heat shield and exposed energy coil.",
+                    "weight": "Compact lethal sidearm calibrated for close-quarters breach encounters.",
+                    "action": "Racked back to arm coil with rising acoustic pitch.",
+                },
+                {
+                    "code": "#Prop 03",
+                    "name": "Encrypted Syndicate Core Token",
+                    "material": "Monolithic synthetic black diamond etched with optical quantum lattices.",
+                    "weight": "Crucial narrative MacGuffin containing decrypted master system override.",
+                    "action": "Handled with protective thermal gloves; pulses with erratic amber glow.",
+                },
+                {
+                    "code": "#Prop 04",
+                    "name": "Atmospheric Scanner Unit",
+                    "material": "Impact-resistant polycarbonate shell with analog dial gauges and sensor probe.",
+                    "weight": "Field survival tool used to test toxicity and electromagnetic interference.",
+                    "action": "Toggled on with switch click, sweeping across environment to read spikes.",
+                },
+                {
+                    "code": "#Prop 05",
+                    "name": "Zero-Point Catalyst Module",
+                    "material": "Stabilized magnetic torus housing a glowing plasma singularity.",
+                    "weight": "Climax operational key required to overload or restore main station power.",
+                    "action": "Twisted and locked into primary coupling with hydraulic clamp sound.",
+                },
+            ]
+        else:
+            envs = [
+                {
+                    "code": "#Env 01",
+                    "name": f"Primary Domain & Quarters of {title}",
+                    "architecture": "Grounded architectural styling reflecting the protagonist's origins and world.",
+                    "atmosphere": "Naturalistic atmospheric texture, balanced humidity, organic airborne particles.",
+                    "lighting": "#Light 01 Warm Volumetric Key & natural practical lights.",
+                    "audio": "Grounded environmental room tone, subtle Foley texture, distant external ambience.",
+                },
+                {
+                    "code": "#Env 02",
+                    "name": f"Threshold Crossing ({setting})",
+                    "architecture": "Expansive transitional terrain marking the shift from safety to conflict.",
+                    "atmosphere": "Gathering weather front, shifting crosswinds, changing environmental texture.",
+                    "lighting": "#Light 04 Natural Golden Hour & long dramatic cast shadows.",
+                    "audio": "Ambient wind movement, shifting ground debris, atmospheric tension.",
+                },
+                {
+                    "code": "#Env 03",
+                    "name": "The Opposing Citadel / Sector",
+                    "architecture": "Imposing hostile architecture designed to overwhelm scale and establish stakes.",
+                    "atmosphere": "Stale oppressive air, dim ambient illumination, cold thermal balance.",
+                    "lighting": "#Light 02 High-Contrast Chiaroscuro & harsh downward spot illumination.",
+                    "audio": "Echoing footsteps, mechanical or industrial resonance, heavy silence.",
+                },
+                {
+                    "code": "#Env 04",
+                    "name": "The Hidden Sanctuary / Lore Vault",
+                    "architecture": "Secluded sanctuary preserving history, memories, and forgotten truths.",
+                    "atmosphere": "Still, tranquil air with suspended dust particles drifting in light rays.",
+                    "lighting": "#Light 06 Gentle Bioluminescent or Diffuse Shafts of natural light.",
+                    "audio": "Soft acoustic hush, faint natural breeze, peaceful resonance.",
+                },
+                {
+                    "code": "#Env 05",
+                    "name": "The Climax Crucible / Final Arena",
+                    "architecture": "High-stakes confrontation arena where all conflicts culminate.",
+                    "atmosphere": "Volatile weather, dramatic environmental shifts, high emotional energy.",
+                    "lighting": "#Light 05 Dramatic Backlit Silhouette & tempest lightning.",
+                    "audio": "Deafening sonic clash, resonant environmental Foley, peak climactic roar.",
+                },
+            ]
+            props = [
+                {
+                    "code": "#Prop 01",
+                    "name": f"Signature Keepsake of {title}",
+                    "material": "Handcrafted personal artifact bearing tactile scratches and aged patina.",
+                    "weight": "Emotional anchor connecting the protagonist to their core objective.",
+                    "action": "Turned over in fingers during moments of doubt or contemplation.",
+                },
+                {
+                    "code": "#Prop 02",
+                    "name": "Tactical Master Instrument",
+                    "material": "Hardened alloy craftsmanship with ergonomic grip and functional wear.",
+                    "weight": "Primary operational tool or weapon relied upon throughout the story.",
+                    "action": "Gripped firmly and wielded with trained precision.",
+                },
+                {
+                    "code": "#Prop 03",
+                    "name": "Antagonist's Emissary Token",
+                    "material": "Distinctive insignia made of cold metal or polished stone.",
+                    "weight": "Physical reminder of the antagonistic force and looming deadline.",
+                    "action": "Discovered at a critical crime or breach scene.",
+                },
+                {
+                    "code": "#Prop 04",
+                    "name": "Decrypted Story Codex",
+                    "material": "Weathered bound material or encrypted storage drive with faded markings.",
+                    "weight": "Reveals the crucial hidden revelation at the narrative midpoint.",
+                    "action": "Unfolded or accessed with trembling hands to reveal truth.",
+                },
+                {
+                    "code": "#Prop 05",
+                    "name": "The Climactic Keystone",
+                    "material": "Pristine or volatile core artifact embodying the story's resolution.",
+                    "weight": "Decisive object whose destruction or activation resolves the central conflict.",
+                    "action": "Activated or shattered during the final climax confrontation.",
+                },
+            ]
+
+        return {"environments": envs, "props": props}
+
+    # ==========================================================================
     # Strategic Structure Advisory
     # ==========================================================================
 

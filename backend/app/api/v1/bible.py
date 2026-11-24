@@ -87,6 +87,10 @@ class BibleLockRequest(BaseModel):
     confirm_dna_freeze: bool = Field(default=True, description="Explicit confirmation of DNA immutability")
 
 
+class WorldPropsGenerateRequest(BaseModel):
+    additional_notes: str | None = Field(default=None, description="Optional extra directives for Polya AI Screenwriter")
+
+
 class CharacterGenerateCastRequest(BaseModel):
     replace_existing: bool = Field(default=True, description="Whether to replace existing characters")
     preferred_count: int | None = Field(default=None, ge=5, le=8, description="Preferred cast count between 5 and 8")
@@ -525,6 +529,106 @@ async def lock_project_bible(
             "approval_notes": payload.approval_notes,
             "message": "Master Production Bible DNA locked successfully.",
         }
+    }
+
+
+@router.post("/projects/{project_id}/bible/generate-world-props", status_code=status.HTTP_200_OK)
+async def generate_world_props_endpoint(
+    project_id: str,
+    payload: WorldPropsGenerateRequest | None = None,
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Generate 5 Key Environments (#Env 01 - 05) and 5 Signature Hero Props (#Prop 01 - 05) using Polya AI Screenwriter."""
+    project = await _resolve_project(project_id, session)
+
+    stmt = (
+        select(MasterProductionBibleModel)
+        .where(MasterProductionBibleModel.project_id == project.id)
+        .order_by(MasterProductionBibleModel.version.desc())
+        .limit(1)
+    )
+    bible = (await session.execute(stmt)).scalar_one_or_none()
+    if not bible:
+        now = datetime.now(timezone.utc)
+        bible = MasterProductionBibleModel(
+            project_id=project.id,
+            version=1,
+            is_locked=False,
+            style_parameters={"master_style_code": project.target_style_code},
+            world_rules={},
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(bible)
+        await session.commit()
+        await session.refresh(bible)
+
+    if bible.is_locked:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Master Production Bible is locked (DNA Frozen). Create a new revision to modify world and props.",
+        )
+
+    try:
+        context = extract_project_narrative_context(project, bible)
+    except ValueError as exc:
+        title = (project.title or "").strip()
+        if not title:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        settings = project.settings if isinstance(project.settings, dict) else {}
+        genre_tone = settings.get("genre") or settings.get("tone") or "Cinematic Film"
+        context = ProjectNarrativeContext(
+            project_id=str(project.id),
+            title=title,
+            synopsis=f"A cinematic {genre_tone} production titled '{title}' exploring immersive environments and signature hero props.",
+            genre_tone=str(genre_tone),
+            master_style_code=project.target_style_code or "#Style 01",
+            style_name="Hollywood Cinematic",
+            aesthetic_directives="",
+            color_grade_emulation="",
+            world_setting="Cinematic Universe",
+            continuity_rules=[],
+            visual_dna_parameters={},
+            environments_summary="",
+            props_summary="",
+        )
+
+    notes = payload.additional_notes if payload else None
+    engine = PolyaScreenwriterEngine()
+    try:
+        gen_data = await engine.generate_world_and_props(context=context, additional_notes=notes)
+    except Exception as exc:
+        logger.error("Polya AI generate_world_and_props failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Polya AI Screenwriter failed to generate world and props: {exc}",
+        )
+
+    updated_rules = dict(bible.world_rules or {})
+    updated_rules["environments"] = gen_data.get("environments", [])
+    updated_rules["props"] = gen_data.get("props", [])
+
+    bible.world_rules = updated_rules
+    flag_modified(bible, "world_rules")
+    bible.updated_at = datetime.now(timezone.utc)
+
+    await session.commit()
+    await session.refresh(bible)
+
+    return {
+        "status": "success",
+        "project_id": str(project.id),
+        "environments": bible.world_rules.get("environments", []),
+        "props": bible.world_rules.get("props", []),
+        "data": {
+            "id": str(bible.id),
+            "project_id": str(project.id),
+            "version": bible.version,
+            "is_locked": bible.is_locked,
+            "world_rules": bible.world_rules,
+            "updated_at": bible.updated_at.isoformat(),
+        },
     }
 
 

@@ -10,6 +10,7 @@ import WorldPropsTab from "@/components/bible/WorldPropsTab";
 import RulesInvariantsTab from "@/components/bible/RulesInvariantsTab";
 import RevisionLockTab from "@/components/bible/RevisionLockTab";
 import { api, Project, MasterProductionBible, Character } from "@/lib/api";
+import { formatMpbVersion } from "@/lib/versioning";
 import {
   BookOpen,
   Palette,
@@ -252,7 +253,7 @@ export default function ProductionBiblePage() {
             <div className="text-xs font-mono text-obsidian-muted flex flex-wrap items-center gap-x-2 gap-y-1 pt-0.5">
               <span className="text-obsidian-secondary font-medium">{project?.title}</span>
               <span>&bull;</span>
-              <span className="text-amber-400 font-semibold">Version {bible?.version || 1}.0.0</span>
+              <span className="text-amber-400 font-semibold">{formatMpbVersion(bible?.version, isLocked).label}</span>
               <span>&bull;</span>
               <span
                 className={cn(
@@ -346,9 +347,12 @@ export default function ProductionBiblePage() {
 
           {activeTab === "world_props" && (
             <WorldPropsTab
+              projectId={projectId}
+              project={project}
               worldRules={bible?.world_rules || {}}
               isLocked={isLocked}
               onSave={handleSaveWorldRules}
+              onRefresh={loadBibleData}
             />
           )}
 

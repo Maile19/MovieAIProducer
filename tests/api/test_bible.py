@@ -184,3 +184,74 @@ def test_character_invalid_uuid_handling(client: TestClient, auth_headers: dict[
     )
     assert res_prompts.status_code == 400
     assert "Invalid character_id format" in res_prompts.text
+
+
+def test_generate_world_props_endpoint(client: TestClient, auth_headers: dict[str, str]):
+    # 1. Create a project
+    create_p = client.post(
+        "/api/v1/projects",
+        json={
+            "title": "Disgraced: The Last Awakening",
+            "settings": {
+                "genre": "Epic High Fantasy",
+                "synopsis": "An exiled warrior seeks redemption in the frozen northern fjords.",
+            },
+        },
+        headers=auth_headers,
+    )
+    assert create_p.status_code == 201
+    project_id = create_p.json()["data"]["id"]
+
+    # 2. Call generate-world-props endpoint
+    gen_resp = client.post(
+        f"/api/v1/projects/{project_id}/bible/generate-world-props",
+        json={"additional_notes": "Include Norse ruins and ancient runic weapons"},
+        headers=auth_headers,
+    )
+    assert gen_resp.status_code == 200
+    res_data = gen_resp.json()
+    assert res_data["status"] == "success"
+    assert "environments" in res_data
+    assert "props" in res_data
+    assert len(res_data["environments"]) == 5
+    assert len(res_data["props"]) == 5
+
+    # Verify #Env 01 through #Env 05
+    for i, env in enumerate(res_data["environments"]):
+        assert env["code"] == f"#Env {i + 1:02d}"
+        assert env["name"]
+        assert env["architecture"]
+        assert env["atmosphere"]
+        assert env["lighting"]
+        assert env["audio"]
+
+    # Verify #Prop 01 through #Prop 05
+    for i, prop in enumerate(res_data["props"]):
+        assert prop["code"] == f"#Prop {i + 1:02d}"
+        assert prop["name"]
+        assert prop["material"]
+        assert prop["weight"]
+        assert prop["action"]
+
+    # 3. Verify MPB GET reflects the generated environments and props
+    get_b = client.get(f"/api/v1/projects/{project_id}/bible", headers=auth_headers)
+    assert get_b.status_code == 200
+    b_rules = get_b.json()["data"]["world_rules"]
+    assert len(b_rules["environments"]) == 5
+    assert len(b_rules["props"]) == 5
+
+    # 4. Lock Bible and verify generate-world-props is rejected with 400
+    lock_resp = client.post(
+        f"/api/v1/projects/{project_id}/bible/lock",
+        json={"approval_notes": "Locking DNA", "confirm_dna_freeze": True},
+        headers=auth_headers,
+    )
+    assert lock_resp.status_code == 200
+
+    blocked_gen = client.post(
+        f"/api/v1/projects/{project_id}/bible/generate-world-props",
+        json={},
+        headers=auth_headers,
+    )
+    assert blocked_gen.status_code == 400
+    assert "locked" in blocked_gen.json()["error"]["message"].lower()

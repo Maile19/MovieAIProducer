@@ -752,6 +752,28 @@ export const api = {
         body: JSON.stringify(payload || { approval_notes: "Master DNA Freeze", confirm_dna_freeze: true }),
       });
     },
+    generateWorldProps: async (
+      projectId: string,
+      payload?: { additional_notes?: string | null }
+    ): Promise<{
+      status: string;
+      project_id: string;
+      environments: any[];
+      props: any[];
+      data: {
+        id: string;
+        project_id: string;
+        version: number;
+        is_locked: boolean;
+        world_rules: Record<string, any>;
+        updated_at: string;
+      };
+    }> => {
+      return apiRequest(`/projects/${projectId}/bible/generate-world-props`, {
+        method: "POST",
+        body: JSON.stringify(payload || {}),
+      });
+    },
     listCharacters: async (projectId: string): Promise<{ data: Character[] }> => {
       return apiRequest<{ data: Character[] }>(`/projects/${projectId}/characters`);
     },

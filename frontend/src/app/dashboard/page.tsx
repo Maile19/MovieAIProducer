@@ -570,27 +570,20 @@ export default function DashboardPage() {
             <div className="w-full max-w-lg rounded-xl bg-panel border border-border shadow-studio overflow-hidden flex flex-col max-h-[90dvh] relative">
               {/* Modal Header */}
               <div className="px-5 sm:px-6 py-4 border-b border-border flex items-center justify-between shrink-0 bg-panel">
-                <div className="flex items-center gap-2 min-w-0">
+                <div className="flex items-center gap-2.5 min-w-0 pr-2">
                   <div className="w-7 h-7 rounded bg-canvas border border-border flex items-center justify-center text-amber-500 shrink-0">
                     <Clapperboard className="w-4 h-4" />
                   </div>
-                  <h3 className="font-cinzel font-bold text-sm sm:text-base text-obsidian-primary truncate">
+                  <h3 className="font-cinzel font-bold text-sm sm:text-base text-obsidian-primary tracking-wide break-words leading-tight">
                     Commission New Production
                   </h3>
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  {/* Polya AI Live Status Indicator in Modal Header */}
-                  <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-[10px] font-mono text-emerald-400 font-semibold shrink-0 shadow-sm">
-                    <span className="relative flex h-1.5 w-1.5 shrink-0">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                      <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500" />
-                    </span>
-                    <span className="tracking-wide">Polya AI</span>
-                  </div>
+                <div className="flex items-center shrink-0">
                   <button
                     type="button"
                     onClick={() => setIsCreateModalOpen(false)}
-                    className="p-1 rounded text-obsidian-muted hover:text-obsidian-primary hover:bg-canvas transition-colors"
+                    className="p-1.5 rounded-lg text-obsidian-muted hover:text-obsidian-primary hover:bg-canvas transition-colors"
+                    title="Close"
                   >
                     <X className="w-5 h-5" />
                   </button>
@@ -789,12 +782,12 @@ export default function DashboardPage() {
                   title="Open Polya AI Growth Agent"
                 >
                   <span className="relative flex h-2 w-2">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-slate-950 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-2 w-2 bg-slate-950"></span>
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-80"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
                   </span>
                   <Bot className="w-3.5 h-3.5 text-slate-950" />
                   <span>Polya AI</span>
-                  <span className="px-1.5 py-0.2 rounded bg-slate-950/20 text-[9px] uppercase font-mono tracking-wider">
+                  <span className="px-1.5 py-0.2 rounded bg-slate-950/20 text-[9px] uppercase font-mono tracking-wider font-semibold">
                     Agent
                   </span>
                 </button>
