@@ -237,6 +237,21 @@ class LivePromptTranspiler:
         if neg_add and neg_add not in negative:
             negative = f"{negative}, {neg_add}"
 
+        # Cleanly read project negative_prompts / prompt_negatives if passed
+        proj_negs = (
+            preset_cfg.get("negative_prompts")
+            or preset_cfg.get("prompt_negatives")
+            or (preset_cfg.get("world_rules", {}) if isinstance(preset_cfg.get("world_rules"), dict) else {}).get("negative_prompts")
+            or (preset_cfg.get("world_rules", {}) if isinstance(preset_cfg.get("world_rules"), dict) else {}).get("prompt_negatives")
+        )
+        if proj_negs:
+            if isinstance(proj_negs, list):
+                proj_neg_str = ", ".join(str(p).strip() for p in proj_negs if str(p).strip())
+            else:
+                proj_neg_str = str(proj_negs).strip()
+            if proj_neg_str and proj_neg_str not in negative:
+                negative = f"{negative}, {proj_neg_str}" if negative else proj_neg_str
+
         metadata = {
             "target_engine": engine,
             "aspect_ratio": aspect_ratio,

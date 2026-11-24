@@ -36,6 +36,7 @@ from backend.app.infrastructure.database.models.character import (
 )
 from backend.app.domain.screenwriter import (
     PolyaScreenwriterEngine,
+    ProjectNarrativeContext,
     extract_project_narrative_context,
     generate_unique_deterministic_seed,
 )
@@ -89,6 +90,10 @@ class BibleLockRequest(BaseModel):
 
 class WorldPropsGenerateRequest(BaseModel):
     additional_notes: str | None = Field(default=None, description="Optional extra directives for Polya AI Screenwriter")
+
+
+class RulesInvariantsGenerateRequest(BaseModel):
+    additional_notes: str | None = Field(default=None, description="Optional extra directives for Polya AI Director")
 
 
 class CharacterGenerateCastRequest(BaseModel):
@@ -470,7 +475,19 @@ async def update_project_bible(
     if payload.style_parameters is not None:
         bible.style_parameters = payload.style_parameters
     if payload.world_rules is not None:
-        bible.world_rules = payload.world_rules
+        merged_rules = dict(payload.world_rules)
+        if "continuity_rules" in merged_rules and "continuity_laws" not in merged_rules:
+            merged_rules["continuity_laws"] = merged_rules["continuity_rules"]
+        elif "continuity_laws" in merged_rules and "continuity_rules" not in merged_rules:
+            merged_rules["continuity_rules"] = merged_rules["continuity_laws"]
+
+        if "negative_prompts" in merged_rules and "prompt_negatives" not in merged_rules:
+            merged_rules["prompt_negatives"] = merged_rules["negative_prompts"]
+        elif "prompt_negatives" in merged_rules and "negative_prompts" not in merged_rules:
+            merged_rules["negative_prompts"] = merged_rules["prompt_negatives"]
+
+        bible.world_rules = merged_rules
+        flag_modified(bible, "world_rules")
 
     bible.updated_at = datetime.now(timezone.utc)
     await session.commit()
@@ -671,6 +688,167 @@ async def generate_world_props_endpoint(
         "environments": bible.world_rules.get("environments", []),
         "props": bible.world_rules.get("props", []),
         "generation_meta": bible.world_rules.get("generation_meta"),
+        "data": {
+            "id": str(bible.id),
+            "project_id": str(project.id),
+            "version": bible.version,
+            "is_locked": bible.is_locked,
+            "world_rules": bible.world_rules,
+            "updated_at": bible.updated_at.isoformat(),
+        },
+    }
+
+
+@router.post("/projects/{project_id}/bible/generate-rules-invariants", status_code=status.HTTP_200_OK)
+async def generate_rules_invariants_endpoint(
+    project_id: str,
+    payload: RulesInvariantsGenerateRequest | None = None,
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Generate visual continuity laws and global negative prompts using Polya AI Director."""
+    project = await _resolve_project(project_id, session)
+
+    stmt = (
+        select(MasterProductionBibleModel)
+        .where(MasterProductionBibleModel.project_id == project.id)
+        .order_by(MasterProductionBibleModel.version.desc())
+        .limit(1)
+    )
+    bible = (await session.execute(stmt)).scalar_one_or_none()
+    if not bible:
+        now = datetime.now(timezone.utc)
+        bible = MasterProductionBibleModel(
+            project_id=project.id,
+            version=1,
+            is_locked=False,
+            style_parameters={"master_style_code": project.target_style_code},
+            world_rules={},
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(bible)
+        await session.commit()
+        await session.refresh(bible)
+
+    if bible.is_locked:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Master Production Bible is locked (DNA Frozen). Create a new revision to modify rules and invariants.",
+        )
+
+    # 1. Ingest Character Cast & Dynamic States from DB
+    char_stmt = select(CharacterModel).where(CharacterModel.project_id == project.id).order_by(CharacterModel.created_at.asc())
+    char_rows = (await session.execute(char_stmt)).scalars().all()
+    characters_list = []
+    for c in char_rows:
+        state_stmt = select(CharacterStateModel).where(CharacterStateModel.character_id == c.id).order_by(CharacterStateModel.state_code.asc())
+        st_rows = (await session.execute(state_stmt)).scalars().all()
+        meta = c.sheet_metadata or {}
+        characters_list.append({
+            "id": str(c.id),
+            "name": c.name,
+            "role": c.role,
+            "narrative_profile": getattr(c, "narrative_summary", None) or meta.get("narrative_summary") or "",
+            "base_visual_prompt": c.base_prompt,
+            "states": [
+                {
+                    "state_code": s.state_code,
+                    "state_label": s.state_label or s.state_code,
+                    "wardrobe": s.wardrobe,
+                    "injuries_and_wear": s.injuries_and_wear,
+                    "expression_anchor": s.expression_anchor,
+                }
+                for s in st_rows
+            ],
+        })
+
+    # 2. Ingest 50-Scene Storyboard & Sluglines from DB
+    scene_stmt = (
+        select(SceneModel)
+        .where(SceneModel.project_id == project.id)
+        .order_by(SceneModel.act_number.asc(), SceneModel.scene_number.asc())
+    )
+    scene_rows = (await session.execute(scene_stmt)).scalars().all()
+    scenes_list = [
+        {
+            "scene_number": sc.scene_number,
+            "act_number": sc.act_number,
+            "slugline": sc.slugline,
+            "narrative_goal": sc.narrative_goal,
+        }
+        for sc in scene_rows
+    ]
+
+    try:
+        context = extract_project_narrative_context(project, bible, characters=characters_list, scenes=scenes_list)
+    except ValueError as exc:
+        title = (project.title or "").strip()
+        if not title:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        settings = project.settings if isinstance(project.settings, dict) else {}
+        genre_tone = settings.get("genre") or settings.get("tone") or "Cinematic Film"
+        raw_envs = (bible.world_rules or {}).get("environments", [])
+        structured_envs = [e for e in raw_envs if isinstance(e, dict)] if isinstance(raw_envs, list) else []
+        raw_props = (bible.world_rules or {}).get("props", [])
+        structured_props = [p for p in raw_props if isinstance(p, dict)] if isinstance(raw_props, list) else []
+        context = ProjectNarrativeContext(
+            project_id=str(project.id),
+            title=title,
+            synopsis=f"A cinematic {genre_tone} production titled '{title}' exploring visual continuity and generative invariant rules.",
+            genre_tone=str(genre_tone),
+            master_style_code=project.target_style_code or "#Style 01",
+            style_name="Hollywood Cinematic",
+            aesthetic_directives="",
+            color_grade_emulation="",
+            world_setting="Cinematic Universe",
+            continuity_rules=[],
+            visual_dna_parameters={},
+            environments_summary="",
+            props_summary="",
+            aspect_ratio=project.aspect_ratio or "16:9",
+            operational_stage=project.operational_stage or 1,
+            cast_characters=characters_list,
+            storyboard_scenes=scenes_list,
+            environments=structured_envs,
+            props=structured_props,
+        )
+
+    notes = payload.additional_notes if payload else None
+    engine = PolyaScreenwriterEngine()
+    try:
+        gen_data = await engine.generate_rules_and_invariants(context=context, additional_notes=notes)
+    except Exception as exc:
+        logger.error("Polya AI Director generate_rules_and_invariants failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Polya AI Director failed to generate rules and invariants: {exc}",
+        )
+
+    # Non-destructive merge preserving environments, props, and generation_meta
+    updated_rules = dict(bible.world_rules or {})
+    updated_rules["continuity_rules"] = gen_data.get("continuity_rules", [])
+    updated_rules["continuity_laws"] = gen_data.get("continuity_laws", updated_rules["continuity_rules"])
+    updated_rules["negative_prompts"] = gen_data.get("negative_prompts", [])
+    updated_rules["prompt_negatives"] = gen_data.get("prompt_negatives", updated_rules["negative_prompts"])
+    if "rules_generation_meta" in gen_data:
+        updated_rules["rules_generation_meta"] = gen_data["rules_generation_meta"]
+
+    bible.world_rules = updated_rules
+    flag_modified(bible, "world_rules")
+    bible.updated_at = datetime.now(timezone.utc)
+
+    await session.commit()
+    await session.refresh(bible)
+
+    return {
+        "status": "success",
+        "project_id": str(project.id),
+        "continuity_rules": bible.world_rules.get("continuity_rules", []),
+        "continuity_laws": bible.world_rules.get("continuity_laws", []),
+        "negative_prompts": bible.world_rules.get("negative_prompts", []),
+        "prompt_negatives": bible.world_rules.get("prompt_negatives", []),
+        "rules_generation_meta": bible.world_rules.get("rules_generation_meta"),
         "data": {
             "id": str(bible.id),
             "project_id": str(project.id),

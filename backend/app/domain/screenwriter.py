@@ -27,6 +27,93 @@ logger = logging.getLogger("polya.screenwriter")
 
 
 # ==============================================================================
+# Style Taxonomy Families (4-Family Master Matrix for #Style 01 - #Style 18)
+# ==============================================================================
+
+STYLE_TAXONOMY_FAMILIES: dict[str, dict[str, Any]] = {
+    "photorealistic": {
+        "name": "Live Action / Cinematic Photoreal",
+        "style_codes": [
+            "#Style 01", "#Style 02", "#Style 03", "#Style 04",
+            "#Style 05", "#Style 07", "#Style 08", "#Style 12", "#Style 18",
+        ],
+        "forbidden_negative_tokens": [
+            "photorealistic", "photograph", "photography", "35mm film", "cinematic film",
+            "hyperrealistic", "lifelike skin", "film grain", "live action", "photo",
+            "realistic lighting", "8k uhd", "masterpiece", "award-winning cinematography",
+        ],
+    },
+    "stylized_3d": {
+        "name": "Stylized 3D & 2.5D Animation",
+        "style_codes": ["#Style 06", "#Style 09", "#Style 10", "#Style 11"],
+        "forbidden_negative_tokens": [
+            "cartoonish 3d", "cartoonish 3d render", "3d render", "cgi render", "stylized 3d",
+            "3d animation", "pixar", "dreamworks", "arcane", "hextech", "subsurface scattering",
+            "cgi", "computer graphics", "3d model", "animation",
+        ],
+    },
+    "stop_motion": {
+        "name": "Stop-Motion & Miniature Craft",
+        "style_codes": ["#Style 13"],
+        "forbidden_negative_tokens": [
+            "clay textures", "clay", "plasticine", "stop-motion", "stop motion", "miniature",
+            "armature", "fingerprint", "felt", "puppet", "hand-crafted miniature", "stepped motion",
+        ],
+    },
+    "anime_2d": {
+        "name": "2D Animation, Anime & Graphic Novel",
+        "style_codes": ["#Style 14", "#Style 15", "#Style 16", "#Style 17"],
+        "forbidden_negative_tokens": [
+            "anime cel shading", "anime", "cel shading", "cel-shading", "hand-drawn",
+            "2d animation", "line art", "manga", "watercolor", "ghibli", "graphic novel",
+            "sketch", "comic book art", "2d", "ink wash", "ink line art",
+        ],
+    },
+}
+
+
+def get_style_family(style_code: str) -> str:
+    """Resolve active style code into one of the 4 canonical Style Taxonomy Families."""
+    cleaned = (style_code or "").strip().upper()
+    for fam_key, fam_data in STYLE_TAXONOMY_FAMILIES.items():
+        if any(cleaned == sc.upper() for sc in fam_data["style_codes"]):
+            return fam_key
+    return "photorealistic"
+
+
+def sanitize_negative_prompts_for_style(
+    negative_prompts: list[str],
+    style_code: str,
+) -> list[str]:
+    """Deterministically strips style-contradicting tokens from negative prompt clusters
+    based on the 4-family Style Taxonomy so that desired style traits are never excluded."""
+    family = get_style_family(style_code)
+    forbidden = STYLE_TAXONOMY_FAMILIES.get(family, {}).get("forbidden_negative_tokens", [])
+
+    sanitized_clusters: list[str] = []
+    for cluster in negative_prompts:
+        if not cluster or not isinstance(cluster, str):
+            continue
+        tokens = [t.strip() for t in cluster.split(",") if t.strip()]
+        kept_tokens = []
+        for t in tokens:
+            t_lower = t.lower()
+            has_conflict = False
+            for fb in forbidden:
+                if fb in t_lower:
+                    has_conflict = True
+                    break
+            if not has_conflict:
+                kept_tokens.append(t)
+
+        if kept_tokens:
+            sanitized_clusters.append(", ".join(kept_tokens))
+
+    return sanitized_clusters
+
+
+
+# ==============================================================================
 # Domain Schemas & Contracts
 # ==============================================================================
 
@@ -195,6 +282,8 @@ class ProjectNarrativeContext(BaseModel):
     visual_dna_parameters: dict[str, Any] = Field(default_factory=dict)
     environments_summary: str = ""
     props_summary: str = ""
+    environments: list[dict[str, Any]] = Field(default_factory=list)
+    props: list[dict[str, Any]] = Field(default_factory=list)
     # Deep Ingestion Extensions
     aspect_ratio: str = "16:9"
     operational_stage: int = 1
@@ -316,23 +405,27 @@ def extract_project_narrative_context(
         or settings.get("setting")
         or "Cinematic Universe"
     )
-    continuity_rules = mpb_rules.get("continuity_laws", [])
+    continuity_rules = mpb_rules.get("continuity_rules")
+    if continuity_rules is None:
+        continuity_rules = mpb_rules.get("continuity_laws", [])
     if not isinstance(continuity_rules, list):
         continuity_rules = [str(continuity_rules)]
 
-    # Environments & props summary
+    # Environments & props structured and summary
     envs_list = mpb_rules.get("environments", [])
+    structured_envs = [e for e in envs_list if isinstance(e, dict)] if isinstance(envs_list, list) else []
     envs_summary = ""
-    if isinstance(envs_list, list) and envs_list:
+    if structured_envs:
         envs_summary = ", ".join(
-            f"{e.get('name', 'Env')}" for e in envs_list[:5] if isinstance(e, dict) and e.get("name")
+            f"{e.get('name', 'Env')}" for e in structured_envs[:5] if e.get("name")
         )
 
     props_list = mpb_rules.get("props", [])
+    structured_props = [p for p in props_list if isinstance(p, dict)] if isinstance(props_list, list) else []
     props_summary = ""
-    if isinstance(props_list, list) and props_list:
+    if structured_props:
         props_summary = ", ".join(
-            f"{p.get('name', 'Prop')}" for p in props_list[:5] if isinstance(p, dict) and p.get("name")
+            f"{p.get('name', 'Prop')}" for p in structured_props[:5] if p.get("name")
         )
 
     # Ingest Characters Cast
@@ -425,6 +518,8 @@ def extract_project_narrative_context(
         visual_dna_parameters=visual_dna_params,
         environments_summary=envs_summary,
         props_summary=props_summary,
+        environments=structured_envs,
+        props=structured_props,
         aspect_ratio=aspect_ratio,
         operational_stage=operational_stage,
         cast_characters=cast_characters,
@@ -1673,6 +1768,363 @@ OUTPUT SCHEMA (Return STRICT valid JSON only):
             ]
 
         return {"environments": envs, "props": props}
+
+    # ==========================================================================
+    # Dynamic Rules & Invariants Engine (Polya AI Director)
+    # ==========================================================================
+
+    async def generate_rules_and_invariants(
+        self,
+        context: ProjectNarrativeContext,
+        additional_notes: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate 5 to 7 Immutable Visual Continuity Laws and 5 to 7 Global Negative Prompts
+        strictly anchored to the project narrative context, cast biometric profiles, #Env lighting codes,
+        #Prop physical materiality, and active Style Taxonomy family.
+        """
+        dna_items = []
+        if context.visual_dna_parameters:
+            for k, v in context.visual_dna_parameters.items():
+                dna_items.append(f"{k.replace('_', ' ').title()}: {v}")
+        dna_str = f"- Master Visual DNA Settings: {', '.join(dna_items)}" if dna_items else ""
+
+        # Format cast characters
+        cast_lines = []
+        for idx, c in enumerate(context.cast_characters):
+            states_preview = ""
+            if c.get("states"):
+                s01 = c["states"][0]
+                states_preview = f" | Baseline Wardrobe: {s01.get('wardrobe', '')[:60]}"
+            cast_lines.append(
+                f"- Character #{idx + 1}: {c.get('name')} (Role: {c.get('role', 'SUPPORTING')}{states_preview}) — Arc: {c.get('narrative_profile', '')[:90]}"
+            )
+        cast_str = "\n".join(cast_lines) if cast_lines else "No registered cast yet. Anchor biometrics to dramatic roles (PROTAGONIST, ANTAGONIST)."
+
+        # Format storyboard scenes
+        scenes_lines = []
+        if context.storyboard_scenes:
+            scenes_lines.append(
+                "- Storyboard Narrative Progression: "
+                + "; ".join(f"Act {sc.get('act_number')} Sc {sc.get('scene_number')} [{sc.get('slugline')}]: {sc.get('narrative_goal', '')[:50]}" for sc in context.storyboard_scenes[:6])
+            )
+        scenes_str = "\n".join(scenes_lines) if scenes_lines else "No storyboard scenes created yet. Enforce continuous cinematic framing across a 4-act progression."
+
+        # Format environments
+        env_lines = []
+        for idx, e in enumerate(context.environments):
+            env_lines.append(
+                f"- Environment #{idx + 1} ({e.get('code', f'#Env {idx+1:02d}')} - {e.get('name')}): Architecture: {e.get('architecture', '')[:60]} | Lighting: {e.get('lighting_code', '')} {e.get('lighting', '')[:40]}"
+            )
+        envs_str = "\n".join(env_lines) if env_lines else (f"- Environments Summary: {context.environments_summary}" if context.environments_summary else "No registered environments yet.")
+
+        # Format props
+        prop_lines = []
+        for idx, p in enumerate(context.props):
+            prop_lines.append(
+                f"- Hero Prop #{idx + 1} ({p.get('code', f'#Prop {idx+1:02d}')} - {p.get('name')}): Owner: {p.get('owner_character', 'Ensemble')} | Material & Wear: {p.get('material_and_wear', '')[:70]}"
+            )
+        props_str = "\n".join(prop_lines) if prop_lines else (f"- Hero Props Summary: {context.props_summary}" if context.props_summary else "No registered hero props yet.")
+
+        user_prompt = f"""PROJECT PRODUCTION BIBLE & NARRATIVE CONTEXT:
+- Film Title: {context.title}
+- Core Synopsis & Premise:
+{context.synopsis}
+- Master Genre & Tone: {context.genre_tone}
+- Aspect Ratio: {context.aspect_ratio}
+- Active Operational Stage: Stage {context.operational_stage}
+- Master Visual Style Code: {context.master_style_code} ({context.style_name})
+- Visual Style Directives: {context.aesthetic_directives}
+- Color Palette & Lighting Emulation: {context.color_grade_emulation}
+{dna_str}
+- World Setting: {context.world_setting}
+- Additional Showrunner Notes: {additional_notes or 'None'}
+
+REGISTERED CHARACTER CAST ({len(context.cast_characters)} Characters):
+{cast_str}
+
+50-SCENE STORYBOARD & RECURRING SLUGLINES ({len(context.storyboard_scenes)} Scenes):
+{scenes_str}
+
+REGISTERED PRODUCTION ENVIRONMENTS ({len(context.environments)} Envs):
+{envs_str}
+
+REGISTERED HERO PROPS ({len(context.props)} Props):
+{props_str}
+
+POLYA AI DIRECTOR MANDATE:
+1. Synthesize 5 to 7 Immutable Visual Continuity Laws ('continuity_rules'):
+   - Character biometric & facial invariants (facial structure, eye color, scars, never mirrored).
+   - Lighting & atmospheric invariants anchored directly to registered #Env locations and official #Light codes.
+   - Physical prop materiality & wear invariants anchored directly to registered #Prop items and their character owners.
+   - Cinematic lens, color grade, and wardrobe degradation invariants across narrative acts.
+
+2. Synthesize 5 to 7 Global Negative Prompt Clusters ('negative_prompts'):
+   - Universal technical defects (bad anatomy, extra limbs, mutated hands, watermarks, text artifacts).
+   - Style-incompatible intrusions strictly respecting the 4-Family Style Taxonomy for {context.master_style_code} ({context.style_name}):
+     * CRITICAL RULE: NEVER exclude the core aesthetic or medium of {context.master_style_code}.
+       - For Anime / 2D (#Style 14-17): DO NOT exclude anime cel shading, hand-drawn lines, or 2D animation.
+       - For Stylized 3D (#Style 06/09/10/11): DO NOT exclude cartoonish 3D render, CGI, or stylized 3D.
+       - For Stop-Motion (#Style 13): DO NOT exclude clay textures, plasticine, or stop-motion craft.
+       - For Photorealistic (#Style 01-05/07/08/12/18): DO NOT exclude photorealism, photograph, or 35mm film.
+
+OUTPUT SCHEMA (Return STRICT valid JSON only):
+{{
+  "continuity_rules": [
+    "Law 1: Biometric invariant for protagonist...",
+    "Law 2: Atmospheric lighting invariant anchored to #Env and #Light code...",
+    "Law 3: Hero prop materiality and tactile wear invariant...",
+    "Law 4: Style rendering pipeline and optical lens invariant...",
+    "Law 5: Wardrobe and physical state sequential progression invariant (#State 01 to #State 05)...",
+    "Law 6: Master chromatic color grade and tonal invariant..."
+  ],
+  "negative_prompts": [
+    "lowres, blurry, bad anatomy, bad hands, missing fingers, extra digits, cropped, worst quality",
+    "cluster 2: style-contradicting intrusion exclusions...",
+    "cluster 3: unnatural physics, geometry morphing, flickering frames...",
+    "cluster 4: lighting and chromatic anti-patterns...",
+    "cluster 5: watermarks, stock signatures, text overlays, copyright marks"
+  ]
+}}"""
+
+        messages = [
+            {"role": "system", "content": POLYA_AI_DIRECTOR_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        try:
+            raw_json = await self._call_llm(messages)
+            normalized = self._normalize_rules_and_invariants(raw_json, context)
+            normalized["rules_generation_meta"] = {
+                "engine": "polya_ai_director_llm",
+                "model": self.model,
+                "director_persona": "Polya AI Director",
+                "context_ingested": {
+                    "style_code": context.master_style_code,
+                    "characters_count": len(context.cast_characters),
+                    "environments_count": len(context.environments),
+                    "props_count": len(context.props),
+                    "scenes_count": len(context.storyboard_scenes),
+                    "has_synopsis": bool(context.synopsis),
+                },
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "fallback_reason": None,
+            }
+            return normalized
+        except Exception as exc:
+            logger.warning(
+                "Polya AI Director LLM call failed (%s). Activating contextual procedural fallback for rules and invariants.",
+                exc,
+            )
+            fallback_data = self._generate_procedural_rules_and_invariants(context)
+            fallback_data["rules_generation_meta"] = {
+                "engine": "procedural_fallback",
+                "model": None,
+                "director_persona": "Polya AI Director (Procedural Fallback)",
+                "context_ingested": {
+                    "style_code": context.master_style_code,
+                    "characters_count": len(context.cast_characters),
+                    "environments_count": len(context.environments),
+                    "props_count": len(context.props),
+                    "scenes_count": len(context.storyboard_scenes),
+                    "has_synopsis": bool(context.synopsis),
+                },
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "fallback_reason": f"LLM execution failed ({type(exc).__name__}: {str(exc)[:150]})",
+            }
+            return fallback_data
+
+    def _normalize_rules_and_invariants(
+        self,
+        raw_json: dict[str, Any],
+        context: ProjectNarrativeContext,
+    ) -> dict[str, Any]:
+        """Normalize continuity rules and global prompt negatives with dual-key synchronization
+        and deterministic Style-Conflict Sanitization."""
+        procedural = self._generate_procedural_rules_and_invariants(context)
+
+        raw_laws = (
+            raw_json.get("continuity_rules")
+            or raw_json.get("continuity_laws")
+            or []
+        ) if isinstance(raw_json, dict) else []
+        if isinstance(raw_laws, str):
+            raw_laws = [raw_laws]
+        elif not isinstance(raw_laws, list):
+            raw_laws = []
+
+        cleaned_laws = [str(l).strip() for l in raw_laws if str(l).strip()]
+        if len(cleaned_laws) < 3:
+            for pl in procedural["continuity_rules"]:
+                if pl not in cleaned_laws:
+                    cleaned_laws.append(pl)
+                if len(cleaned_laws) >= 6:
+                    break
+
+        raw_negs = (
+            raw_json.get("negative_prompts")
+            or raw_json.get("prompt_negatives")
+            or []
+        ) if isinstance(raw_json, dict) else []
+        if isinstance(raw_negs, str):
+            raw_negs = [raw_negs]
+        elif not isinstance(raw_negs, list):
+            raw_negs = []
+
+        cleaned_negs = [str(n).strip() for n in raw_negs if str(n).strip()]
+        if len(cleaned_negs) < 3:
+            for pn in procedural["negative_prompts"]:
+                if pn not in cleaned_negs:
+                    cleaned_negs.append(pn)
+                if len(cleaned_negs) >= 5:
+                    break
+
+        # Deterministic style-conflict sanitization
+        sanitized_negs = sanitize_negative_prompts_for_style(
+            cleaned_negs,
+            context.master_style_code,
+        )
+        if len(sanitized_negs) < 3:
+            for pn in procedural["negative_prompts"]:
+                if pn not in sanitized_negs:
+                    sanitized_negs.append(pn)
+
+        return {
+            "continuity_rules": cleaned_laws,
+            "continuity_laws": cleaned_laws,
+            "negative_prompts": sanitized_negs,
+            "prompt_negatives": sanitized_negs,
+        }
+
+    def _generate_procedural_rules_and_invariants(
+        self,
+        context: ProjectNarrativeContext,
+    ) -> dict[str, Any]:
+        """Generate high-fidelity contextual rules and invariants dynamically synthesized from active project context."""
+        title = context.title or "Cinematic Production"
+        genre = (context.genre_tone or "Cinematic Drama").split("/")[0].strip()
+
+        # Biometric invariant: anchor to first cast member if available
+        cast = context.cast_characters
+        if cast and cast[0].get("name"):
+            char_name = cast[0]["name"]
+            char_law = (
+                f"{char_name} signature biometric features, facial bone structure, and eye color "
+                f"must remain strictly consistent across all scenes (never inverted or flipped)."
+            )
+        else:
+            char_law = (
+                "Protagonist signature biometric features, facial bone structure, and eye color "
+                "must remain strictly consistent across all scenes (never inverted or flipped)."
+            )
+
+        # Environment & lighting invariant: anchor to registered #Env and #Light code
+        envs = context.environments
+        if envs and envs[0].get("name"):
+            env0 = envs[0]
+            env_name = env0.get("name")
+            lcode = env0.get("lighting_code") or "#Light 01"
+            env_law = (
+                f"Atmospheric illumination in {env_name} is strictly anchored to {lcode} specification; "
+                f"lighting ratios must preserve spatial depth without flat overexposure."
+            )
+        else:
+            env_law = (
+                f"Atmospheric illumination across primary environments must preserve {context.style_name} "
+                f"volumetric spatial depth without flat overexposure."
+            )
+
+        # Prop invariant: anchor to registered hero prop
+        props = context.props
+        if props and props[0].get("name"):
+            p0 = props[0]
+            pname = p0.get("name")
+            powner = p0.get("owner_character", "Hero")
+            pmaterial = (p0.get("material_and_wear") or p0.get("material") or "tactile physical materials")[:60]
+            prop_law = (
+                f"{pname} ({powner}) physical materiality ({pmaterial}) must maintain continuous "
+                f"tactile patina, wear patterns, and interaction fidelity across all story acts."
+            )
+        else:
+            prop_law = (
+                "Signature hero props must maintain continuous tactile patina, wear patterns, "
+                "and interaction fidelity across all story acts."
+            )
+
+        # Visual style invariant
+        style_law = (
+            f"Visual rendering pipeline must strictly adhere to {context.master_style_code} ({context.style_name}): "
+            f"{context.aesthetic_directives[:90] or 'pristine cinematic framing'}."
+        )
+
+        # Character wardrobe / state progression invariant
+        state_law = (
+            "Character costume degradation, physical damage, and wardrobe wear must advance strictly "
+            "sequentially from #State 01 through #State 05 across narrative acts."
+        )
+
+        # Color grade invariant
+        color_law = (
+            f"Color palette timing must faithfully maintain {context.color_grade_emulation or 'master chromatic grade and tonal balance'} "
+            f"without color temperature drift."
+        )
+
+        # Storyboard sequence invariant
+        if context.storyboard_scenes:
+            pacing_law = (
+                f"Cinematic framing and optical axis must remain strictly continuous across Storyboard sequence "
+                f"({len(context.storyboard_scenes)} scenes) with zero phantom geometry morphing."
+            )
+        else:
+            pacing_law = (
+                "Cinematic framing and optical axis must remain strictly continuous across all scenes "
+                "with zero phantom geometry morphing."
+            )
+
+        laws = [char_law, env_law, prop_law, style_law, state_law, color_law, pacing_law]
+
+        # Style-aware negative clusters based on 4 canonical families
+        family = get_style_family(context.master_style_code)
+        if family == "anime_2d":
+            neg_clusters = [
+                "lowres, blurry, bad anatomy, bad hands, missing fingers, extra digits, cropped, worst quality",
+                "photorealistic live action, 3D CGI gloss, plastic skin texture, lifelike skin pores, real human photo",
+                "uncanny valley realistic rendering, 3D polygon mesh, raytraced reflections, digital 3D model",
+                "unnatural physics, morphing limbs, flickering line art, stuttering frames, broken inbetweens",
+                "watermarks, stock photo signatures, text overlays, copyright markings, logos",
+            ]
+        elif family == "stylized_3d":
+            neg_clusters = [
+                "lowres, blurry, bad anatomy, bad hands, missing fingers, extra digits, cropped, worst quality",
+                "live-action photograph, realistic film grain, archival film noise, real human pores, 35mm photograph",
+                "flat 2D anime cel, hand-drawn paper sketch, pencil drawing, monochrome line art",
+                "unnatural physics, broken mesh geometry, clipping textures, morphing limbs, inverted polygons",
+                "watermarks, stock photo signatures, text overlays, copyright markings, borders, logos",
+            ]
+        elif family == "stop_motion":
+            neg_clusters = [
+                "lowres, blurry, bad anatomy, bad hands, missing fingers, extra digits, cropped, worst quality",
+                "smooth digital CGI, hyper-glossy 3D render, vector illustration, flat 2D anime cel",
+                "hyper-smooth 60fps interpolation, motion blur, synthetic computer graphics, digital polish",
+                "unnatural physics, morphing limbs, disappearing geometry, digital video compression noise",
+                "watermarks, stock photo signatures, text overlays, copyright markings, logos",
+            ]
+        else:  # photorealistic
+            neg_clusters = [
+                "lowres, blurry, bad anatomy, bad hands, missing fingers, extra digits, cropped, worst quality",
+                "cartoonish 3D render, anime cel shading, watercolor artifacts, 2D illustration, sketch, drawing",
+                "oversaturated CGI gloss, plastic skin textures, uncanny valley synthetic sheen, video game graphics",
+                "unnatural physics, morphing limbs, flickering geometry, frame stutter, ghosting artifacts",
+                "watermarks, stock photo signatures, text overlays, copyright markings, borders, logos",
+            ]
+
+        sanitized_negs = sanitize_negative_prompts_for_style(neg_clusters, context.master_style_code)
+
+        return {
+            "continuity_rules": laws,
+            "continuity_laws": laws,
+            "negative_prompts": sanitized_negs,
+            "prompt_negatives": sanitized_negs,
+        }
 
     # ==========================================================================
     # Strategic Structure Advisory

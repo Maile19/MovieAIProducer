@@ -224,80 +224,130 @@ def test_seed_preset_cold_open_montage_structure(client: TestClient, auth_header
 
 def test_cold_open_treatment_and_act_scenes_generation(client: TestClient, auth_headers: dict[str, str]):
     """Verify StagedStoryWriter generates Cold Open for Scenes 01-03 and Ordinary World at Scene 04."""
-    # 1. Create project with Kids Comedy preset
-    proj_resp = client.post(
-        "/api/v1/projects",
-        json={
-            "title": "Bloop and Clack Comedy Episode 1",
-            "preset_id": "youtube-global-kids-comedy-non-verbal",
-        },
-        headers=auth_headers,
-    )
-    assert proj_resp.status_code == 201
-    project_id = proj_resp.json()["data"]["id"]
+    from unittest.mock import patch
+    from backend.app.domain.screenwriter import PolyaScreenwriterEngine
 
-    # 2. Generate Phase A treatment (50 scenes)
-    treatment_resp = client.post(
-        f"/api/v1/projects/{project_id}/blueprint/treatment",
-        json={"total_scenes": 50, "duration_mode": "dynamic"},
-        headers=auth_headers,
-    )
-    assert treatment_resp.status_code == 200
-    treatment_data = treatment_resp.json()["data"]
-    assert treatment_data.get("cold_open_30s", {}).get("enabled") is True
-    act1_info = next(a for a in treatment_data["acts"] if a["act_number"] == 1)
-    assert "Cold Open (Scenes 01-03)" in act1_info["dramatic_goal"]
-    assert "Scene 04" in act1_info["dramatic_goal"]
+    mock_treatment = {
+        "title": "Bloop and Clack Comedy Episode 1",
+        "logline": "Kids slapstick comedy.",
+        "theme": "Fun and chaos",
+        "dramatic_premise": "Slapstick chaos ensues.",
+        "total_scenes": 50,
+        "structure_type": "4_act",
+        "acts": [
+            {
+                "act_number": 1,
+                "act_title": "Setup",
+                "start_scene": 1,
+                "end_scene": 12,
+                "scenes_count": 12,
+                "dramatic_goal": "Cold Open (Scenes 01-03) hook followed by Ordinary World at Scene 04.",
+                "key_beat": "Inciting Incident at Scene 08",
+            },
+            {"act_number": 2, "act_title": "Trials", "start_scene": 13, "end_scene": 25, "dramatic_goal": "Rising Stakes", "key_beat": "Midpoint Chaos"},
+            {"act_number": 3, "act_title": "Crisis", "start_scene": 26, "end_scene": 38, "dramatic_goal": "Dark Moment", "key_beat": "All is Lost"},
+            {"act_number": 4, "act_title": "Resolution", "start_scene": 39, "end_scene": 50, "dramatic_goal": "Slapstick Climax", "key_beat": "Happy Ending"},
+        ],
+    }
 
-    # 3. Generate Phase B Act 1 scenes (Scenes 01-12)
-    act1_resp = client.post(
-        f"/api/v1/projects/{project_id}/blueprint/generate-act",
-        json={
-            "act_number": 1,
-            "total_scenes": 50,
-            "duration_mode": "dynamic",
-            "auto_split_shots": True,
-        },
-        headers=auth_headers,
-    )
-    assert act1_resp.status_code == 200
-    assert act1_resp.json()["data"]["scenes_generated"] == 12
+    mock_act_scenes = {
+        "act_number": 1,
+        "act_title": "Setup",
+        "act_summary": "Bloop and Clack create chaos.",
+        "scenes": [
+            {
+                "scene_number": i,
+                "slugline": f"INT. COMEDY LAB {i} - DAY",
+                "narrative_goal": f"Slapstick beat {i}",
+                "primary_character": "Bloop",
+                "dialogue": "",
+                "duration_seconds": 10.0 if i <= 3 else 15.0,
+            }
+            for i in range(1, 13)
+        ],
+    }
 
-    # 4. Fetch created scenes
-    scenes_resp = client.get(f"/api/v1/projects/{project_id}/scenes", headers=auth_headers)
-    assert scenes_resp.status_code == 200
-    scenes = scenes_resp.json()["data"]
-    assert len(scenes) == 12
+    async def fake_call_llm(messages: list[dict[str, str]], retry_on_parse_error: bool = True) -> dict:
+        user_content = messages[-1]["content"] if messages else ""
+        if "Treatment" in user_content or "Story Treatment" in user_content:
+            return dict(mock_treatment)
+        return dict(mock_act_scenes)
 
-    sc1 = next(s for s in scenes if s["scene_number"] == 1)
-    sc2 = next(s for s in scenes if s["scene_number"] == 2)
-    sc3 = next(s for s in scenes if s["scene_number"] == 3)
-    sc4 = next(s for s in scenes if s["scene_number"] == 4)
+    with patch.object(PolyaScreenwriterEngine, "_call_llm", side_effect=fake_call_llm):
+        # 1. Create project with Kids Comedy preset
+        proj_resp = client.post(
+            "/api/v1/projects",
+            json={
+                "title": "Bloop and Clack Comedy Episode 1",
+                "preset_id": "youtube-global-kids-comedy-non-verbal",
+            },
+            headers=auth_headers,
+        )
+        assert proj_resp.status_code == 201
+        project_id = proj_resp.json()["data"]["id"]
 
-    # Verify Cold Open durations: 10s each = 30s total
-    assert sc1["duration_target"] == 10.0
-    assert sc2["duration_target"] == 10.0
-    assert sc3["duration_target"] == 10.0
-    # 2 shots each = 6 shots total across scenes 1 to 3
-    assert sc1["shots_count"] == 2
-    assert sc2["shots_count"] == 2
-    assert sc3["shots_count"] == 2
+        # 2. Generate Phase A treatment (50 scenes)
+        treatment_resp = client.post(
+            f"/api/v1/projects/{project_id}/blueprint/treatment",
+            json={"total_scenes": 50, "duration_mode": "dynamic"},
+            headers=auth_headers,
+        )
+        assert treatment_resp.status_code == 200
+        treatment_data = treatment_resp.json()["data"]
+        assert treatment_data.get("cold_open_30s", {}).get("enabled") is True
+        act1_info = next(a for a in treatment_data["acts"] if a["act_number"] == 1)
+        assert "Cold Open (Scenes 01-03)" in act1_info["dramatic_goal"]
+        assert "Scene 04" in act1_info["dramatic_goal"]
 
-    # Verify cold open narrative goals and sluglines
-    assert "COLD OPEN" in sc1["slugline"]
-    assert "In-Media-Res Shock Hook" in sc1["narrative_goal"]
-    assert "COLD OPEN" in sc2["slugline"]
-    assert "Fast Slapstick Chaos Tease" in sc2["narrative_goal"]
-    assert "COLD OPEN" in sc3["slugline"]
-    assert "Peak Climax Preview" in sc3["narrative_goal"]
+        # 3. Generate Phase B Act 1 scenes (Scenes 01-12)
+        act1_resp = client.post(
+            f"/api/v1/projects/{project_id}/blueprint/generate-act",
+            json={
+                "act_number": 1,
+                "total_scenes": 50,
+                "duration_mode": "dynamic",
+                "auto_split_shots": True,
+            },
+            headers=auth_headers,
+        )
+        assert act1_resp.status_code == 200
+        assert act1_resp.json()["data"]["scenes_generated"] == 12
 
-    # Verify Scene 04 initiates the Linear Ordinary World
-    assert "ORDINARY WORLD BEGINS" in sc4["slugline"]
-    assert "Ordinary World" in sc4["narrative_goal"]
+        # 4. Fetch created scenes
+        scenes_resp = client.get(f"/api/v1/projects/{project_id}/scenes", headers=auth_headers)
+        assert scenes_resp.status_code == 200
+        scenes = scenes_resp.json()["data"]
+        assert len(scenes) == 12
 
-    # 5. Verify Cold Open shots have authentic camera codes and SFX
-    shots_s1_resp = client.get(f"/api/v1/scenes/{sc1['id']}/shots", headers=auth_headers)
-    assert shots_s1_resp.status_code == 200
+        sc1 = next(s for s in scenes if s["scene_number"] == 1)
+        sc2 = next(s for s in scenes if s["scene_number"] == 2)
+        sc3 = next(s for s in scenes if s["scene_number"] == 3)
+        sc4 = next(s for s in scenes if s["scene_number"] == 4)
+
+        # Verify Cold Open durations: 10s each = 30s total
+        assert sc1["duration_target"] == 10.0
+        assert sc2["duration_target"] == 10.0
+        assert sc3["duration_target"] == 10.0
+        # 2 shots each = 6 shots total across scenes 1 to 3
+        assert sc1["shots_count"] == 2
+        assert sc2["shots_count"] == 2
+        assert sc3["shots_count"] == 2
+
+        # Verify cold open narrative goals and sluglines
+        assert "COLD OPEN" in sc1["slugline"]
+        assert "In-Media-Res Shock Hook" in sc1["narrative_goal"]
+        assert "COLD OPEN" in sc2["slugline"]
+        assert "Fast Slapstick Chaos Tease" in sc2["narrative_goal"]
+        assert "COLD OPEN" in sc3["slugline"]
+        assert "Peak Climax Preview" in sc3["narrative_goal"]
+
+        # Verify Scene 04 initiates the Linear Ordinary World
+        assert "ORDINARY WORLD BEGINS" in sc4["slugline"]
+        assert "Ordinary World" in sc4["narrative_goal"]
+
+        # 5. Verify Cold Open shots have authentic camera codes and SFX
+        shots_s1_resp = client.get(f"/api/v1/scenes/{sc1['id']}/shots", headers=auth_headers)
+        assert shots_s1_resp.status_code == 200
     shots_s1 = shots_s1_resp.json()["data"]
     assert len(shots_s1) == 2
     assert shots_s1[0]["camera_code"] == "#Cam 19"  # Dolly-In hook

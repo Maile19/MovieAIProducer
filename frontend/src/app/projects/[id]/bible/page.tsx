@@ -362,6 +362,10 @@ export default function ProductionBiblePage() {
               worldRules={bible?.world_rules || {}}
               isLocked={isLocked}
               onSave={handleSaveWorldRules}
+              projectId={projectId}
+              project={project}
+              characters={characters}
+              onRefresh={loadBibleData}
             />
           )}
 

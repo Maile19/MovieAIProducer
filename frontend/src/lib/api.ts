@@ -119,6 +119,22 @@ export interface GenerationMeta {
   fallback_reason?: string | null;
 }
 
+export interface RulesGenerationMeta {
+  engine: "polya_ai_director_llm" | "procedural_fallback";
+  model?: string | null;
+  director_persona?: string;
+  context_ingested?: {
+    style_code?: string;
+    characters_count?: number;
+    environments_count?: number;
+    props_count?: number;
+    scenes_count?: number;
+    has_synopsis?: boolean;
+  };
+  generated_at?: string;
+  fallback_reason?: string | null;
+}
+
 export interface ProjectCreateInput {
   title: string;
   slug?: string;
@@ -809,6 +825,31 @@ export const api = {
       };
     }> => {
       return apiRequest(`/projects/${projectId}/bible/generate-world-props`, {
+        method: "POST",
+        body: JSON.stringify(payload || {}),
+      });
+    },
+    generateRulesInvariants: async (
+      projectId: string,
+      payload?: { additional_notes?: string | null }
+    ): Promise<{
+      status: string;
+      project_id: string;
+      continuity_rules: string[];
+      continuity_laws: string[];
+      negative_prompts: string[];
+      prompt_negatives: string[];
+      rules_generation_meta?: RulesGenerationMeta;
+      data: {
+        id: string;
+        project_id: string;
+        version: number;
+        is_locked: boolean;
+        world_rules: Record<string, any>;
+        updated_at: string;
+      };
+    }> => {
+      return apiRequest(`/projects/${projectId}/bible/generate-rules-invariants`, {
         method: "POST",
         body: JSON.stringify(payload || {}),
       });
