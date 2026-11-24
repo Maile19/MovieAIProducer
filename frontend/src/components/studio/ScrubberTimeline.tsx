@@ -47,27 +47,29 @@ export default function ScrubberTimeline({
 
   return (
     <div className="w-full bg-panel border border-border rounded-xl p-3 shadow-studio">
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2">
-          <Sparkles className="w-4 h-4 text-amber-500" />
-          <span className="font-cinzel text-xs font-bold uppercase tracking-wider text-obsidian-primary">
-            12-Step Cinematic Scrubber
-          </span>
-          <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-canvas border border-border text-amber-400">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 mb-2.5">
+        <div className="flex items-center justify-between sm:justify-start gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <Sparkles className="w-4 h-4 text-amber-500 shrink-0" />
+            <span className="font-cinzel text-xs font-bold uppercase tracking-wider text-obsidian-primary">
+              12-Step Cinematic Scrubber
+            </span>
+          </div>
+          <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-canvas border border-border text-amber-400 shrink-0">
             {completedCount}/12 Passed
           </span>
         </div>
-        <div className="flex items-center gap-3 text-[10px] font-mono">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] font-mono">
           <div className="flex items-center gap-1.5 text-emerald-400">
-            <span className="w-2 h-2 rounded-full bg-emerald-500" />
+            <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
             <span>Passed Gate</span>
           </div>
           <div className="flex items-center gap-1.5 text-yellow-400">
-            <span className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse" />
+            <span className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse shrink-0" />
             <span>Current Step</span>
           </div>
           <div className="flex items-center gap-1.5 text-obsidian-muted">
-            <span className="w-2 h-2 rounded-full bg-border" />
+            <span className="w-2 h-2 rounded-full bg-border shrink-0" />
             <span>Queued</span>
           </div>
         </div>

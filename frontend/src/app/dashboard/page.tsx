@@ -420,11 +420,11 @@ export default function DashboardPage() {
                   {/* Top Bar / Visual Header */}
                   <div className="p-5 pb-3">
                     <div className="flex items-start justify-between gap-3 mb-2">
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1">
                         <span className="inline-block px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-canvas border border-border text-amber-400 mb-1.5">
                           {project.target_style_code || "#Style 01"}
                         </span>
-                        <h2 className="text-lg font-cinzel font-bold text-obsidian-primary group-hover:text-amber-400 transition-colors truncate">
+                        <h2 className="text-lg font-cinzel font-bold text-obsidian-primary group-hover:text-amber-400 transition-colors whitespace-normal break-words leading-snug">
                           {project.title}
                         </h2>
                       </div>
@@ -434,12 +434,12 @@ export default function DashboardPage() {
                     </div>
 
                     {/* Operational Stage Badge */}
-                    <div className="flex items-center gap-2 mt-3 text-xs font-mono text-obsidian-secondary">
-                      <div className="w-2 h-2 rounded-full bg-amber-500 shrink-0" />
-                      <span className="text-amber-400 font-semibold">
+                    <div className="flex items-start gap-2 mt-3 text-xs font-mono text-obsidian-secondary">
+                      <div className="w-2 h-2 rounded-full bg-amber-500 shrink-0 mt-1" />
+                      <span className="text-amber-400 font-semibold shrink-0">
                         Stage {project.operational_stage}/16:
                       </span>
-                      <span className="truncate text-obsidian-primary">
+                      <span className="whitespace-normal break-words leading-snug text-obsidian-primary flex-1">
                         {project.stage_name}
                       </span>
                     </div>
@@ -772,11 +772,11 @@ export default function DashboardPage() {
                       Logline / Premise Synopsis
                     </label>
                     <textarea
-                      rows={3}
+                      rows={6}
                       value={newLogline}
                       onChange={(e) => setNewLogline(e.target.value)}
                       placeholder="In a cybernetic metropolis under perpetual rain, a rogue synthesis engineer uncovers an anomaly in the planetary atmospheric matrix..."
-                      className="w-full bg-canvas border border-border rounded-lg px-3 py-2 text-xs text-obsidian-primary placeholder:text-obsidian-muted focus:outline-none focus:border-amber-500 resize-none font-sans"
+                      className="w-full bg-canvas border border-border rounded-lg p-3 text-xs text-obsidian-primary placeholder:text-obsidian-muted focus:outline-none focus:border-amber-500 resize-y min-h-[160px] sm:min-h-[180px] leading-relaxed font-sans"
                     />
                   </div>
                 </div>

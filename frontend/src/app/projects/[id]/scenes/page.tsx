@@ -212,35 +212,37 @@ export default function ScenesStoryboardPage() {
         {/* =========================================================================
          * Header: Dynamic Storyboard Title & Metrics
          * ========================================================================= */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border/70 pb-4">
-          <div>
-            <div className="flex items-center gap-2">
+        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 border-b border-border/70 pb-4">
+          <div className="space-y-1.5">
+            <div>
               <Link
                 href="/dashboard"
-                className="text-obsidian-muted hover:text-obsidian-primary transition-colors text-xs flex items-center gap-1 font-mono"
+                className="text-obsidian-muted hover:text-obsidian-primary transition-colors text-xs inline-flex items-center gap-1.5 font-mono"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />
                 <span>Slate</span>
               </Link>
-              <span className="text-obsidian-muted text-xs font-mono">/</span>
-              <h1 className="font-cinzel text-lg sm:text-xl font-bold text-obsidian-primary uppercase tracking-wider flex items-center gap-2">
-                <Grid className="w-5 h-5 text-amber-500" />
-                <span>
-                  {scenes.length > 0 ? `${scenes.length}-Scene ` : ""}
-                  {structureName || (totalActs === 3 ? "3-Act" : totalActs === 5 ? "5-Act" : "4-Act")} Visual Storyboard
-                </span>
-              </h1>
             </div>
-            <p className="text-xs font-mono text-obsidian-muted mt-1 flex items-center gap-2">
-              <span>{scenes.length} Scenes Total</span>
+            <h1 className="font-cinzel text-lg sm:text-xl font-bold text-obsidian-primary uppercase tracking-wider flex items-start gap-2.5 leading-snug">
+              <Grid className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+              <span className="break-words">
+                {scenes.length > 0 ? `${scenes.length}-Scene ` : ""}
+                {structureName || (totalActs === 3 ? "3-Act" : totalActs === 5 ? "5-Act" : "4-Act")} Visual Storyboard
+              </span>
+            </h1>
+            <div className="text-xs font-mono text-obsidian-muted flex flex-wrap items-center gap-x-2 gap-y-1.5 pt-0.5">
+              <span className="text-obsidian-secondary">{scenes.length} Scenes Total</span>
               <span>&bull;</span>
-              <span>{totalRuntimeSeconds.toFixed(1)}s Runtime (~{runtimeMinutes}m {runtimeSecs}s)</span>
+              <span className="text-obsidian-secondary">{totalRuntimeSeconds.toFixed(1)}s Runtime (~{runtimeMinutes}m {runtimeSecs}s)</span>
               <span>&bull;</span>
-              <span className="text-emerald-400 font-semibold">QC Continuum: 96%</span>
-            </p>
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/25 text-emerald-400 font-semibold shrink-0">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                QC Continuum: 96%
+              </span>
+            </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 pt-1 sm:pt-0">
             <Link
               href={`/projects/${projectId}/studio`}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-canvas hover:bg-elevated border border-border text-obsidian-secondary hover:text-amber-400 text-xs font-medium transition-colors"
