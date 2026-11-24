@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 
@@ -108,19 +109,28 @@ async def list_preview_providers(
     }
 
 
-def _resolve_resolution(aspect_ratio: str) -> tuple[int, int]:
-    """Resolve width and height from aspect ratio."""
+def _resolve_preview_resolution(aspect_ratio: str) -> tuple[int, int]:
+    """Resolve lightweight 360p draft preview resolution (multiples of 8/16).
+    
+    GUARDRAIL: Strictly used for rapid preview iteration. Final master
+    renders and production packages preserve full 4K / UHD resolution.
+    """
     ar = aspect_ratio.strip()
     if ar == "16:9":
-        return 1024, 576
+        return 640, 360
     elif ar == "9:16":
-        return 576, 1024
+        return 360, 640
     elif ar == "2.39:1":
-        return 1024, 512
-    return 1024, 1024
+        return 864, 360
+    return 360, 360
+
+
+# Alias for backwards compatibility
+_resolve_resolution = _resolve_preview_resolution
 
 
 @router.post("/scenes/{scene_id}/generate-preview", status_code=status.HTTP_200_OK)
+@router.post("/previews/scenes/{scene_id}/generate-preview", status_code=status.HTTP_200_OK)
 async def generate_scene_preview(
     scene_id: str,
     payload: GeneratePreviewRequest = GeneratePreviewRequest(),
@@ -170,7 +180,7 @@ async def generate_scene_preview(
         enable_fallback=payload.enable_fallback,
     )
 
-    provider = get_image_provider(provider_type=payload.provider)
+    provider = get_image_provider()
 
     try:
         result = await provider.generate(req)
@@ -272,7 +282,126 @@ async def generate_scene_preview(
     }
 
 
+@router.post("/projects/{project_id}/generate-preview", status_code=status.HTTP_200_OK)
+@router.post("/previews/projects/{project_id}/generate-preview", status_code=status.HTTP_200_OK)
+async def generate_project_concept_preview(
+    project_id: str,
+    payload: GeneratePreviewRequest = GeneratePreviewRequest(),
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Generate rapid 360p cinematic concept preview for Stage 1 or project-level visualization."""
+    try:
+        p_uuid = uuid.UUID(project_id)
+        stmt = select(ProjectModel).where(ProjectModel.id == p_uuid)
+    except ValueError:
+        stmt = select(ProjectModel).where(ProjectModel.slug == project_id)
+
+    project = (await session.execute(stmt)).scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    settings = get_settings()
+    effective_provider = (payload.provider or settings.image_provider_default).lower()
+
+    # Build prompt if not overridden
+    prompt = payload.prompt
+    if not prompt or not prompt.strip():
+        transpile_res = LivePromptTranspiler.transpile(
+            provider_target=effective_provider,
+            style_code=project.target_style_code or "#Style 01",
+            action_description=f"Opening concept keyframe still for {project.title}",
+            aspect_ratio=payload.aspect_ratio,
+            model=payload.model,
+        )
+        prompt = transpile_res["positive_prompt"]
+
+    width, height = _resolve_preview_resolution(payload.aspect_ratio)
+    steps = payload.steps or settings.sd35_default_steps
+
+    req = ImageGenerationRequest(
+        prompt=prompt,
+        negative_prompt=payload.negative_prompt,
+        seed=payload.seed,
+        randomize_seed=payload.randomize_seed,
+        width=width,
+        height=height,
+        guidance_scale=4.5,
+        num_inference_steps=steps,
+        provider=payload.provider,
+        model=payload.model,
+        enable_fallback=payload.enable_fallback,
+    )
+
+    provider = get_image_provider()
+    try:
+        result = await provider.generate(req)
+    except Exception as exc:
+        logger.error("project_preview_failed", project_id=str(project.id), error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Failed to generate concept preview: {str(exc)}")
+
+    # Check if scene 1 exists to attach
+    scenes_stmt = select(SceneModel).where(SceneModel.project_id == project.id).order_by(SceneModel.scene_number.asc())
+    scenes = (await session.execute(scenes_stmt)).scalars().all()
+    primary_scene = scenes[0] if scenes else None
+
+    # Register in AssetModel (CAS deduplication)
+    asset_stmt = select(AssetModel).where(AssetModel.sha256_checksum == result.sha256_checksum)
+    asset = (await session.execute(asset_stmt)).scalar_one_or_none()
+    if not asset:
+        asset = AssetModel(
+            project_id=project.id,
+            shot_id=None,
+            asset_type="SCENE_PREVIEW",
+            storage_key=result.local_path,
+            sha256_checksum=result.sha256_checksum,
+            file_size_bytes=result.file_size_bytes,
+            mime_type=result.mime_type,
+            duration_seconds=5.0,
+        )
+        session.add(asset)
+
+    # Persist preview in project.settings for studio reloads
+    current_settings = dict(project.settings or {})
+    current_settings["preview_url"] = result.local_url
+    current_settings["preview_seed"] = result.seed
+    current_settings["preview_provider"] = result.provider
+    if result.model:
+        current_settings["preview_model"] = result.model
+    project.settings = current_settings
+    flag_modified(project, "settings")
+
+    await session.commit()
+
+    return {
+        "status": "success",
+        "preview_url": result.local_url,
+        "seed": result.seed,
+        "width": result.width,
+        "height": result.height,
+        "steps": result.steps,
+        "provider": result.provider,
+        "model": result.model,
+        "rate_limit_info": result.rate_limit_info,
+        "data": {
+            "project_id": str(project.id),
+            "scene_id": str(primary_scene.id) if primary_scene else None,
+            "preview_url": result.local_url,
+            "seed": result.seed,
+            "prompt": prompt,
+            "width": result.width,
+            "height": result.height,
+            "steps": result.steps,
+            "provider": result.provider,
+            "model": result.model,
+            "rate_limit_info": result.rate_limit_info,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+
+
 @router.post("/shots/{shot_id}/generate-preview", status_code=status.HTTP_200_OK)
+@router.post("/previews/shots/{shot_id}/generate-preview", status_code=status.HTTP_200_OK)
 async def generate_shot_preview(
     shot_id: str,
     payload: GeneratePreviewRequest = GeneratePreviewRequest(),
@@ -328,7 +457,7 @@ async def generate_shot_preview(
         enable_fallback=payload.enable_fallback,
     )
 
-    provider = get_image_provider(provider_type=payload.provider)
+    provider = get_image_provider()
 
     try:
         result = await provider.generate(req)

@@ -18,6 +18,8 @@ import {
   RefreshCw,
   ChevronLeft,
   ChevronRight,
+  AlertTriangle,
+  Sparkles,
 } from "lucide-react";
 
 export default function ScenesStoryboardPage() {
@@ -29,56 +31,18 @@ export default function ScenesStoryboardPage() {
   const [selectedScene, setSelectedScene] = useState<Scene | null>(null);
   const [currentFilter, setCurrentFilter] = useState<ActFilterType>("ALL");
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [isGeneratingBlueprint, setIsGeneratingBlueprint] = useState(false);
   const [isBlueprintModalOpen, setIsBlueprintModalOpen] = useState(false);
   const [currentPage, setCurrentPage] = useState<number>(1);
 
-  const generateMock50Scenes = useCallback(() => {
-    const list: Scene[] = [];
-    for (let i = 1; i <= 50; i++) {
-      let actNum = 1;
-      let beat = "World Ordinary Life & Environmental Hook";
-      const slug = `SCENE ${i.toString().padStart(2, "0")} - EXT. RAIN ALLEY - NIGHT`;
-
-      if (i <= 12) {
-        actNum = 1;
-        if (i === 1) beat = "Inciting Hook & Ordinary Reality";
-        else if (i === 6) beat = "Inciting Incident & Disruption";
-        else if (i === 12) beat = "Plot Point 1: Threshold Crossing";
-      } else if (i <= 25) {
-        actNum = 2;
-        if (i === 18) beat = "First Trial & Syndicate Ambush";
-        else if (i === 25) beat = "Midpoint Reversal: False Victory/Defeat";
-      } else if (i <= 38) {
-        actNum = 3;
-        if (i === 35) beat = "All Is Lost Crisis & Collapse";
-        else if (i === 38) beat = "Plot Point 2: Breakthrough Revelation";
-      } else {
-        actNum = 4;
-        if (i === 45) beat = "Climactic Confrontation with Syndicate";
-        else if (i === 50) beat = "Final Catharsis & Master Resolution";
-      }
-
-      list.push({
-        id: `scene_${projectId}_${i}`,
-        project_id: projectId,
-        scene_number: i,
-        act_number: actNum,
-        slugline: slug,
-        narrative_goal: beat,
-        duration_target: 5.0,
-        status: i < 5 ? "QC_PASSED" : i < 8 ? "GENERATING" : "PLANNED",
-        shots_count: 2,
-        created_at: new Date().toISOString(),
-      });
-    }
-    setScenes(list);
-  }, [projectId]);
-
   // Load project & scenes
-  const loadScenesData = useCallback(async () => {
+  const loadScenesData = useCallback(async (options?: { silent?: boolean }) => {
     try {
-      setIsLoading(true);
+      if (!options?.silent) {
+        setIsLoading(true);
+      }
+      setError(null);
       const [projRes, scenesRes] = await Promise.allSettled([
         api.projects.get(projectId),
         api.scenes.list(projectId),
@@ -86,33 +50,28 @@ export default function ScenesStoryboardPage() {
 
       if (projRes.status === "fulfilled" && projRes.value?.data) {
         setProject(projRes.value.data);
-      } else {
-        setProject({
-          id: projectId,
-          title: "Cyberpunk Hollywood Master Cut",
-          slug: "cyberpunk-master",
-          status: "IN_PRODUCTION",
-          aspect_ratio: "2.39:1",
-          target_style_code: "#Style 01",
-          operational_stage: 3,
-          stage_name: "4-Act Storyboard & 50-Scene Blueprint",
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        });
       }
 
       if (scenesRes.status === "fulfilled" && scenesRes.value?.data) {
-        setScenes(scenesRes.value.data);
-      } else {
-        generateMock50Scenes();
+        const newScenes = scenesRes.value.data;
+        setScenes(newScenes);
+        setSelectedScene((prev) => {
+          if (!prev) return null;
+          const found = newScenes.find((s) => s.id === prev.id);
+          return found || prev;
+        });
+      } else if (scenesRes.status === "rejected") {
+        throw new Error(scenesRes.reason?.message || "Failed to load scenes from server");
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      generateMock50Scenes();
+      setError(err?.message || "Failed to load scenes. Please check your connection and retry.");
     } finally {
-      setIsLoading(false);
+      if (!options?.silent) {
+        setIsLoading(false);
+      }
     }
-  }, [projectId, generateMock50Scenes]);
+  }, [projectId]);
 
   useEffect(() => {
     if (projectId) {
@@ -128,6 +87,7 @@ export default function ScenesStoryboardPage() {
   const handleConfirmBlueprint = async (config: BlueprintConfig) => {
     try {
       setIsGeneratingBlueprint(true);
+      setError(null);
       await api.scenes.generateBlueprint(projectId, {
         total_scenes: config.total_scenes,
         duration_mode: config.duration_mode,
@@ -137,9 +97,9 @@ export default function ScenesStoryboardPage() {
       await loadScenesData();
       setIsBlueprintModalOpen(false);
       setCurrentPage(1);
-    } catch (err) {
+    } catch (err: any) {
       console.error("Blueprint generation error:", err);
-      generateMock50Scenes();
+      setError(`Blueprint generation failed: ${err?.message || "Unknown error"}. Try resuming or re-generating the Act.`);
     } finally {
       setIsGeneratingBlueprint(false);
     }
@@ -176,23 +136,43 @@ export default function ScenesStoryboardPage() {
     setCurrentPage(1);
   };
 
-  // Filter scenes
+  // Narrative structure metadata from project settings / treatment
+  const treatment = (project?.settings as any)?.treatment;
+  const structureType: string = treatment?.structure_type || "4_act";
+  const structureName: string = treatment?.structure_name || "";
+  const treatmentActs: Array<any> | undefined = treatment?.acts;
+
+  // Determine total acts dynamically: treatment acts length, or by structure type, or max scene act
+  const maxSceneAct = scenes.reduce((max, s) => Math.max(max, s.act_number || 1), 1);
+  const totalActs =
+    treatmentActs?.length ||
+    (structureType === "3_act"
+      ? 3
+      : structureType === "5_act"
+      ? 5
+      : Math.max(4, maxSceneAct));
+
+  // Count scenes dynamically per act (1..totalActs)
+  const actCountMap: Record<number, number> = {};
+  for (let a = 1; a <= totalActs; a++) {
+    actCountMap[a] = scenes.filter((s) => (s.act_number || 1) === a).length;
+  }
+
+  // Filter scenes dynamically
   const filteredScenes = scenes.filter((s) => {
-    const act = s.act_number || 1;
     if (currentFilter === "ALL") return true;
+    const act = s.act_number || 1;
+    if (typeof currentFilter === "number") return act === currentFilter;
     if (currentFilter === "ACT_I") return act === 1;
     if (currentFilter === "ACT_II_A") return act === 2;
     if (currentFilter === "ACT_II_B") return act === 3;
     if (currentFilter === "ACT_III") return act === 4;
+    if (currentFilter === "ACT_IV") return act === 4;
+    if (currentFilter === "ACT_V") return act === 5;
+    const parsedNum = Number(currentFilter);
+    if (!isNaN(parsedNum)) return act === parsedNum;
     return true;
   });
-
-  const actCounts = {
-    act1: scenes.filter((s) => (s.act_number || 1) === 1).length,
-    act2a: scenes.filter((s) => (s.act_number || 1) === 2).length,
-    act2b: scenes.filter((s) => (s.act_number || 1) === 3).length,
-    act3: scenes.filter((s) => (s.act_number || 1) === 4).length,
-  };
 
   const PAGE_SIZE = 60;
   const totalPages = Math.max(1, Math.ceil(filteredScenes.length / PAGE_SIZE));
@@ -245,7 +225,10 @@ export default function ScenesStoryboardPage() {
               <span className="text-obsidian-muted text-xs font-mono">/</span>
               <h1 className="font-cinzel text-lg sm:text-xl font-bold text-obsidian-primary uppercase tracking-wider flex items-center gap-2">
                 <Grid className="w-5 h-5 text-amber-500" />
-                <span>{scenes.length > 0 ? `${scenes.length}-Scene` : "Hollywood"} 4-Act Visual Storyboard</span>
+                <span>
+                  {scenes.length > 0 ? `${scenes.length}-Scene ` : ""}
+                  {structureName || (totalActs === 3 ? "3-Act" : totalActs === 5 ? "5-Act" : "4-Act")} Visual Storyboard
+                </span>
               </h1>
             </div>
             <p className="text-xs font-mono text-obsidian-muted mt-1 flex items-center gap-2">
@@ -274,7 +257,7 @@ export default function ScenesStoryboardPage() {
             </Link>
             <button
               type="button"
-              onClick={loadScenesData}
+              onClick={() => loadScenesData()}
               title="Refresh Storyboard"
               className="p-1.5 rounded-lg bg-canvas hover:bg-elevated border border-border text-obsidian-muted hover:text-obsidian-primary transition-colors"
             >
@@ -290,25 +273,76 @@ export default function ScenesStoryboardPage() {
           currentFilter={currentFilter}
           onChangeFilter={handleFilterChange}
           totalScenes={scenes.length}
-          actCounts={actCounts}
+          actCounts={actCountMap}
+          totalActs={totalActs}
+          actsData={treatmentActs}
+          structureType={structureType}
           onGenerateBlueprint={handleOpenBlueprintModal}
           isGeneratingBlueprint={isGeneratingBlueprint}
           onExportPackage={handleExportPackage}
         />
 
+        {/* Error Notification Banner */}
+        {error && (
+          <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-between text-xs text-rose-300">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+              <span>{error}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => loadScenesData()}
+                className="px-3 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 font-bold border border-rose-500/40 transition-colors"
+              >
+                Retry
+              </button>
+              <button
+                type="button"
+                onClick={() => setError(null)}
+                className="text-rose-400 hover:text-rose-200 text-sm font-bold px-1"
+              >
+                &times;
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* =========================================================================
          * 4-Act Visual Storyboard Grid (Virtualized / Paginated)
          * ========================================================================= */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3.5">
-          {displayedScenes.map((scene) => (
-            <SceneCard
-              key={scene.id}
-              scene={scene}
-              isSelected={selectedScene?.id === scene.id}
-              onSelect={(s) => setSelectedScene(s)}
-            />
-          ))}
-        </div>
+        {scenes.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-16 px-4 border border-dashed border-border rounded-2xl bg-panel/50 text-center space-y-4">
+            <div className="w-12 h-12 rounded-full bg-amber-500/10 flex items-center justify-center text-amber-400">
+              <Grid className="w-6 h-6" />
+            </div>
+            <div className="space-y-1">
+              <h3 className="font-cinzel text-base font-bold text-obsidian-primary uppercase">No Storyboard Scenes Yet</h3>
+              <p className="text-xs text-obsidian-muted max-w-md">
+                Launch the Polya AI Screenplay Writer Blueprint generator to create 50 to 450 calibrated scenes with character cast and dramatic beats.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleOpenBlueprintModal}
+              className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-canvas font-bold text-xs flex items-center gap-2 transition-colors shadow-glow"
+            >
+              <Sparkles className="w-4 h-4" />
+              <span>Generate Blueprint</span>
+            </button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3.5">
+            {displayedScenes.map((scene) => (
+              <SceneCard
+                key={scene.id}
+                scene={scene}
+                isSelected={selectedScene?.id === scene.id}
+                onSelect={(s) => setSelectedScene(s)}
+              />
+            ))}
+          </div>
+        )}
 
         {/* Pagination Bar for Large Scene Counts (>60 scenes) */}
         {totalPages > 1 && (

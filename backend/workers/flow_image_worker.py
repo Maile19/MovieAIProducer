@@ -31,6 +31,7 @@ import threading
 import time
 from typing import Any
 from urllib.parse import urlparse
+import uuid
 from zoneinfo import ZoneInfo
 
 from PIL import Image, ImageChops, ImageStat
@@ -347,20 +348,39 @@ def claim_next_job_and_lock_account(
     return None, None, None
 
 
-def claim_job_for_specific_account(conn: sqlite3.Connection, account_id: int) -> sqlite3.Row | None:
-    """Atomically claim the next queued job eligible for a currently held warm account."""
+def claim_job_for_specific_account(
+    conn: sqlite3.Connection,
+    account_id: int,
+    character_id: str | None = None,
+) -> sqlite3.Row | None:
+    """Atomically claim the next queued job eligible for a currently held warm account.
+    Enforces strict character isolation: warm session can only claim subsequent jobs for the SAME character.
+    """
     cursor = conn.cursor()
     with conn:
-        cursor.execute(
-            """
-            SELECT * FROM flow_image_jobs
-            WHERE status = 'queued'
-              AND (preferred_account_id IS NULL OR preferred_account_id = ?)
-            ORDER BY created_at ASC
-            LIMIT 1
-            """,
-            (account_id,),
-        )
+        if character_id:
+            cursor.execute(
+                """
+                SELECT * FROM flow_image_jobs
+                WHERE status = 'queued'
+                  AND (preferred_account_id IS NULL OR preferred_account_id = ?)
+                  AND character_id = ?
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                (account_id, character_id),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT * FROM flow_image_jobs
+                WHERE status = 'queued'
+                  AND (preferred_account_id IS NULL OR preferred_account_id = ?)
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                (account_id,),
+            )
         job = cursor.fetchone()
         if not job:
             return None
@@ -383,23 +403,40 @@ def claim_job_for_specific_account(conn: sqlite3.Connection, account_id: int) ->
                 """,
                 (now_iso, account_id),
             )
-            logger.info(f"[WarmClaim] Job {job['id']} claimed by warm Akun #{account_id}.")
+            logger.info(
+                f"[WarmClaim] Job {job['id']} (char={job['character_id']}) claimed by warm Akun #{account_id}."
+            )
             return job
     return None
 
 
-def has_queued_jobs_for_other_accounts(conn: sqlite3.Connection, current_account_id: int) -> bool:
-    """Check if queued jobs exist that could run on other accounts."""
+def has_queued_jobs_for_other_accounts(
+    conn: sqlite3.Connection,
+    current_account_id: int,
+    current_character_id: str | None = None,
+) -> bool:
+    """Check if queued jobs exist that could run on other accounts or for other characters."""
     cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT 1 FROM flow_image_jobs
-        WHERE status = 'queued'
-          AND (preferred_account_id IS NULL OR preferred_account_id != ?)
-        LIMIT 1
-        """,
-        (current_account_id,),
-    )
+    if current_character_id:
+        cursor.execute(
+            """
+            SELECT 1 FROM flow_image_jobs
+            WHERE status = 'queued'
+              AND ((preferred_account_id IS NULL OR preferred_account_id != ?) OR character_id != ?)
+            LIMIT 1
+            """,
+            (current_account_id, current_character_id),
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT 1 FROM flow_image_jobs
+            WHERE status = 'queued'
+              AND (preferred_account_id IS NULL OR preferred_account_id != ?)
+            LIMIT 1
+            """,
+            (current_account_id,),
+        )
     return cursor.fetchone() is not None
 
 
@@ -465,13 +502,17 @@ def normalize_asset_slot(slot: str | None) -> str:
 
 
 def auto_attach_job_result(conn: sqlite3.Connection, job_id: str, image_url: str):
-    """Atomically auto-attach completed Google Flow image result to character or state in SQLite."""
+    """Atomically auto-attach completed Google Flow image result to character, state, or scene shot in SQLite."""
     try:
+        # Introspect columns to support both full production schema and isolated test schemas
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(flow_image_jobs)").fetchall()]
+        has_scene_id = "scene_id" in cols
+        select_clause = "character_id, asset_slot, target_type, state_id, prompt, reference_image_paths, aspect_ratio"
+        if has_scene_id:
+            select_clause += ", scene_id"
+
         row = conn.execute(
-            """
-            SELECT character_id, asset_slot, target_type, state_id, prompt, reference_image_paths, aspect_ratio
-            FROM flow_image_jobs WHERE id = ?
-            """,
+            f"SELECT {select_clause} FROM flow_image_jobs WHERE id = ?",
             (job_id,),
         ).fetchone()
 
@@ -486,6 +527,7 @@ def auto_attach_job_result(conn: sqlite3.Connection, job_id: str, image_url: str
         ref_paths_raw = row[5]
         ref_paths = json.loads(ref_paths_raw) if (ref_paths_raw and isinstance(ref_paths_raw, str)) else (ref_paths_raw or [])
         aspect_ratio = row[6] or "16:9"
+        scene_id = str(row[7]) if has_scene_id and len(row) > 7 and row[7] else None
 
         if target_type == "state" and state_id:
             cur = conn.execute(
@@ -548,6 +590,61 @@ def auto_attach_job_result(conn: sqlite3.Connection, job_id: str, image_url: str
                 logger.info(f"[AutoAttach] Attached {job_id} -> character={char_id} slot={slot_key} (col={target_col})")
             else:
                 logger.warning(f"[AutoAttach] Zero rows updated for character {char_id}")
+            return
+
+        if scene_id:
+            shot_row = conn.execute(
+                "SELECT id, fg_bg_layers FROM shots WHERE scene_id = ? ORDER BY shot_number ASC LIMIT 1",
+                (scene_id,),
+            ).fetchone()
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            if shot_row:
+                shot_id = str(shot_row[0])
+                raw_layers = shot_row[1]
+                existing_layers = {}
+                if raw_layers:
+                    try:
+                        existing_layers = json.loads(raw_layers) if isinstance(raw_layers, str) else dict(raw_layers)
+                    except Exception:
+                        existing_layers = {}
+
+                # Non-destructive JSON merge: retain old keys, only add/update preview_url, preview_provider, job_id, updated_at
+                existing_layers["preview_url"] = image_url
+                existing_layers["preview_provider"] = "google_flow"
+                existing_layers["job_id"] = job_id
+                existing_layers["updated_at"] = now_iso
+
+                cur = conn.execute(
+                    "UPDATE shots SET fg_bg_layers = ? WHERE id = ?",
+                    (json.dumps(existing_layers), shot_id),
+                )
+                if cur.rowcount > 0:
+                    logger.info(f"[AutoAttach] Attached {job_id} -> scene={scene_id} shot={shot_id}")
+                else:
+                    logger.warning(f"[AutoAttach] Zero rows updated for shot {shot_id} in scene {scene_id}")
+            else:
+                # If scene has no shots yet, create shot #1
+                s_row = conn.execute("SELECT duration_target FROM scenes WHERE id = ?", (scene_id,)).fetchone()
+                dur = float(s_row[0]) if (s_row and s_row[0]) else 5.0
+                new_shot_id = str(uuid.uuid4())
+                layers = {
+                    "preview_url": image_url,
+                    "preview_provider": "google_flow",
+                    "job_id": job_id,
+                    "updated_at": now_iso,
+                }
+                conn.execute(
+                    """
+                    INSERT INTO shots (
+                        id, scene_id, shot_number, duration_seconds, camera_code, lens_code,
+                        comp_code, light_code, act_code, speed_code, fg_bg_layers, status, created_at
+                    ) VALUES (?, ?, 1, ?, '#Cam 01', '#Lens 01', '#Comp 01', '#Light 01', '#Act 01', '#Speed 01', ?, 'PLANNED', ?)
+                    """,
+                    (new_shot_id, scene_id, dur, json.dumps(layers), now_iso),
+                )
+                logger.info(f"[AutoAttach] Created shot #1 and attached {job_id} -> scene={scene_id} shot={new_shot_id}")
+            return
     except Exception as exc:
         logger.error(f"[AutoAttach] Failed to auto-attach job {job_id}: {exc}", exc_info=True)
 
@@ -565,12 +662,19 @@ def update_job_status(
 ):
     now_utc = datetime.now(timezone.utc).isoformat()
     with conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM flow_image_jobs WHERE id = ?", (job_id,))
+        curr = cursor.fetchone()
+        if curr and curr["status"] == "cancelled":
+            logger.info(f"Job {job_id} already marked 'cancelled'. Skipping status update to '{status}'.")
+            return
+
         if status == "completed":
             conn.execute(
                 """
                 UPDATE flow_image_jobs
                 SET status = ?, output_filename = ?, image_url = ?, completed_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status != 'cancelled'
                 """,
                 (status, output_filename, image_url, now_utc, job_id),
             )
@@ -580,7 +684,7 @@ def update_job_status(
                 """
                 UPDATE flow_image_jobs
                 SET status = ?, error_message = ?, debug_screenshot_url = ?, completed_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status != 'cancelled'
                 """,
                 (status, error_message, debug_screenshot_url, now_utc, job_id),
             )
@@ -589,7 +693,7 @@ def update_job_status(
                 """
                 UPDATE flow_image_jobs
                 SET status = ?, assigned_account_id = ?, started_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status != 'cancelled'
                 """,
                 (status, assigned_account_id, now_utc, job_id),
             )
@@ -598,7 +702,7 @@ def update_job_status(
                 """
                 UPDATE flow_image_jobs
                 SET status = 'queued', retry_count = retry_count + 1, error_message = ?, debug_screenshot_url = ?
-                WHERE id = ?
+                WHERE id = ? AND status != 'cancelled'
                 """,
                 (error_message, debug_screenshot_url, job_id),
             )
@@ -610,7 +714,8 @@ def record_account_success(conn: sqlite3.Connection, account_id: int):
         conn.execute(
             """
             UPDATE flow_accounts
-            SET daily_count = daily_count + 1,
+            SET status = 'active',
+                daily_count = daily_count + 1,
                 total_count = total_count + 1,
                 consecutive_failures = 0,
                 last_used_at = ?,
@@ -632,7 +737,10 @@ def record_account_failure(
         cursor = conn.cursor()
         cursor.execute("SELECT consecutive_failures FROM flow_accounts WHERE id = ?", (account_id,))
         row = cursor.fetchone()
-        fails = (row["consecutive_failures"] if row else 0) + 1
+        if row is not None:
+            fails = (row["consecutive_failures"] if isinstance(row, sqlite3.Row) else row[0]) + 1
+        else:
+            fails = 1
 
         if fails >= 3:
             cooldown_until = (datetime.now(timezone.utc) + timedelta(minutes=cooldown_minutes)).isoformat()
@@ -646,14 +754,16 @@ def record_account_failure(
             )
             logger.warning(f"Akun #{account_id} mengalami {fails} kegagalan berturut-turut. Cooldown {cooldown_minutes}m.")
         else:
+            # Explicitly reset status back to 'active' on transient failures to prevent freezing accounts in 'busy'
             cursor.execute(
                 """
                 UPDATE flow_accounts
-                SET consecutive_failures = ?, last_error = ?, updated_at = ?
+                SET status = 'active', consecutive_failures = ?, last_error = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (fails, error_msg, now_utc, account_id),
             )
+            logger.info(f"Akun #{account_id} kegagalan {fails}/3 dicatat. Status di-reset ke 'active'.")
 
 
 def find_matching_locator(page: Page, selectors: list[str], timeout_ms: int = 3000):
@@ -1169,6 +1279,17 @@ def execute_flow_generation(
     # Bersihkan prompt: normalisasi whitespace & hilangkan newline mentah
     clean_prompt = " ".join(prompt.split())
 
+    # Bersihkan sisa media-chip dan konten lama di kanvas
+    try:
+        page.evaluate("""() => {
+            const chips = document.querySelectorAll('.media-chip, .reference-chip, [role="button"][aria-label*="delete" i], [role="button"][aria-label*="remove" i], .attachment-chip, button.media-chip-remove');
+            for (const c of chips) {
+                try { c.click(); } catch(e) {}
+            }
+        }""")
+    except Exception:
+        pass
+
     # Bersihkan teks prompt input
     try:
         page.evaluate("""(el) => {
@@ -1178,6 +1299,7 @@ def execute_flow_generation(
             range.selectNodeContents(el);
             sel.removeAllRanges();
             sel.addRange(range);
+            document.execCommand('delete', false, null);
         }""", prompt_loc.element_handle())
         page.keyboard.press("Backspace")
         page.wait_for_timeout(100)
@@ -1243,6 +1365,23 @@ def execute_flow_generation(
 
     while time.time() - start_wait < 90:
         elapsed = time.time() - start_wait
+
+        # Cek apakah job dibatalkan oleh klien / timeout
+        try:
+            c_conn = get_db_connection()
+            try:
+                c_cur = c_conn.cursor()
+                c_cur.execute("SELECT status FROM flow_image_jobs WHERE id = ?", (job_id,))
+                c_row = c_cur.fetchone()
+                if c_row and c_row["status"] == "cancelled":
+                    logger.info(f"[{card_label}] Job {job_id} dibatalkan oleh klien/timeout. Menghentikan render...")
+                    raise RuntimeError(f"Job {job_id} dibatalkan oleh klien/timeout.")
+            finally:
+                c_conn.close()
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
 
         page_text = page.locator("body").inner_text()
         for rl_msg in selectors.get("rate_limit_indicators", []):
@@ -1406,10 +1545,11 @@ def worker_thread_loop(worker_slot_id: int):
         warm_account: sqlite3.Row | None = None
         warm_lock: AccountProfileLock | None = None
         warm_batch_count: int = 0
+        warm_character_id: str | None = None
         last_activity_time: float = time.time()
 
         def close_warm_context():
-            nonlocal warm_context, warm_page, warm_account, warm_lock, warm_batch_count
+            nonlocal warm_context, warm_page, warm_account, warm_lock, warm_batch_count, warm_character_id
             if warm_context:
                 try:
                     warm_context.close()
@@ -1430,6 +1570,7 @@ def worker_thread_loop(worker_slot_id: int):
             warm_account = None
             warm_lock = None
             warm_batch_count = 0
+            warm_character_id = None
 
         while running:
             # 1. Resource Guard: Jika RAM < 1800MB dan slot > 0, throttle slot sekunder
@@ -1468,8 +1609,8 @@ def worker_thread_loop(worker_slot_id: int):
 
                 conn = get_db_connection()
                 try:
-                    subsequent_job = claim_job_for_specific_account(conn, warm_account["id"])
-                    other_queued = has_queued_jobs_for_other_accounts(conn, warm_account["id"])
+                    subsequent_job = claim_job_for_specific_account(conn, warm_account["id"], character_id=warm_character_id)
+                    other_queued = has_queued_jobs_for_other_accounts(conn, warm_account["id"], current_character_id=warm_character_id)
                 finally:
                     conn.close()
 
@@ -1602,9 +1743,10 @@ def worker_thread_loop(worker_slot_id: int):
                 warm_account = account
                 warm_lock = profile_lock
                 warm_batch_count = 1
+                warm_character_id = str(job["character_id"]) if job["character_id"] else None
                 last_activity_time = time.time()
                 logger.info(
-                    f"[WorkerSlot-{worker_slot_id}] Job {job_id} SUKSES! Browser tetap warm untuk job berikutnya."
+                    f"[WorkerSlot-{worker_slot_id}] Job {job_id} SUKSES! Browser tetap warm untuk job berikutnya (char={warm_character_id})."
                 )
 
             except Exception as e:
@@ -1644,6 +1786,7 @@ def worker_thread_loop(worker_slot_id: int):
                 warm_account = None
                 warm_lock = None
                 warm_batch_count = 0
+                warm_character_id = None
                 time.sleep(3.0)
 
         # On shutdown

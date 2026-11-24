@@ -108,6 +108,7 @@ export default function ProductionBiblePage() {
 
   const handlePatchCharacterAsset = useCallback(
     (characterId: string, slot: string, imageUrl: string, metaPatch?: Record<string, any>) => {
+      if (slot === "state") return; // Guard: isolate state patches from turnaround cards
       setCharacters((prev) =>
         prev.map((c) => {
           if (c.id !== characterId) return c;
@@ -122,7 +123,8 @@ export default function ProductionBiblePage() {
             action: "action_image_url",
             expression: "expression_image_url",
           };
-          const targetCol = colMap[slot] || ("front_image_url" as any);
+          const targetCol = colMap[slot];
+          if (!targetCol) return c;
 
           const updatedMetadata = {
             ...(c.sheet_metadata || {}),
@@ -137,6 +139,24 @@ export default function ProductionBiblePage() {
             ...c,
             [targetCol]: imageUrl,
             sheet_metadata: updatedMetadata,
+          };
+        })
+      );
+    },
+    []
+  );
+
+  const handlePatchCharacterStateAsset = useCallback(
+    (characterId: string, stateId: string, imageUrl: string) => {
+      setCharacters((prev) =>
+        prev.map((c) => {
+          if (c.id !== characterId) return c;
+          const updatedStates = (c.states || []).map((s) =>
+            s.id === stateId ? { ...s, image_url: imageUrl } : s
+          );
+          return {
+            ...c,
+            states: updatedStates,
           };
         })
       );
@@ -321,6 +341,7 @@ export default function ProductionBiblePage() {
               onRefresh={loadBibleData}
               onSilentRefresh={() => loadBibleData({ silent: true })}
               onPatchCharacterAsset={handlePatchCharacterAsset}
+              onPatchCharacterStateAsset={handlePatchCharacterStateAsset}
             />
           )}
 

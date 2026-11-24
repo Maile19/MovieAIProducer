@@ -51,6 +51,7 @@ class LivePromptTranspiler:
         aspect_ratio: str = "16:9",
         preset_rules: dict[str, Any] | None = None,
         is_non_verbal: bool = False,
+        model: str | None = None,
     ) -> dict[str, Any]:
         target = provider_target.lower().strip()
 
@@ -181,7 +182,11 @@ class LivePromptTranspiler:
                 "blurry, low quality, oversaturated, deformed anatomy, extra limbs, bad eyes, "
                 "CGI render artifacts, plastic skin, 3d cartoon, text, watermark, signature, cropped"
             )
-            engine = "9router_multimodel_v1"
+            if model and model.strip():
+                clean_model = model.strip().replace("/", "_").replace("-", "_").replace(".", "_")
+                engine = f"9router_{clean_model}"
+            else:
+                engine = "9router_multimodel_v1"
 
         elif target in ("sd35", "sd35_large", "huggingface", "sd35_large_hf"):
             # Hugging Face Stable Diffusion 3.5 Large
@@ -235,6 +240,8 @@ class LivePromptTranspiler:
         metadata = {
             "target_engine": engine,
             "aspect_ratio": aspect_ratio,
+            "model": model,
+            "selected_model": model,
             "codes": {
                 "style": style_code,
                 "camera": camera_code,
@@ -258,5 +265,8 @@ class LivePromptTranspiler:
             "provider_target": target,
             "positive_prompt": positive,
             "negative_prompt": negative,
+            "positive": positive,
+            "negative": negative,
+            "engine": engine,
             "metadata": metadata,
         }

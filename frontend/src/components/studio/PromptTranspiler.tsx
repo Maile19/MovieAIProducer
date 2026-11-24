@@ -44,6 +44,7 @@ export default function PromptTranspiler({
   const [selectedEngine, setSelectedEngine] = useState<
     "veo" | "kling" | "runway" | "sora" | "comfyui" | "9router" | "sd35"
   >("9router");
+  const [selected9RouterModel, setSelected9RouterModel] = useState<string>("ag/gemini-3.8-flash");
   const [transpileResult, setTranspileResult] = useState<TranspileResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -58,6 +59,39 @@ export default function PromptTranspiler({
     { id: "comfyui", label: "ComfyUI", badge: "Wan 2.1" },
   ] as const;
 
+  const NINEROUTER_MODELS = [
+    {
+      value: "ag/gemini-3.8-flash",
+      title: "AG/Gemini 3.8-Flash",
+      badge: "Recommended",
+      description: "Ultra-fast multimodal prompt synthesis & visual keyframe compiler",
+    },
+    {
+      value: "geminis",
+      title: "Multi-Combo Pool",
+      badge: "Auto-Failover",
+      description: "Dynamic multi-account failover pool across Gemini cluster",
+    },
+    {
+      value: "ag/gemini-4-argon",
+      title: "AG/Gemini 4-Argon",
+      badge: "Ultra-Res",
+      description: "Extreme parameter fidelity for IMAX-grade visual concepts",
+    },
+    {
+      value: "ag/gemini-3.1-pro-high",
+      title: "AG/Gemini 3.1-Pro",
+      badge: "Deep-Reasoning",
+      description: "Advanced cinematic storytelling and subtext calibration",
+    },
+    {
+      value: "gemini/gemini-3.8-flash",
+      title: "Gemini 3.8-Flash Direct",
+      badge: "Direct",
+      description: "Standard direct endpoint routing for Gemini 3.8 Flash",
+    },
+  ];
+
   // Trigger live transpile whenever parameters change
   useEffect(() => {
     let isCancelled = false;
@@ -67,6 +101,7 @@ export default function PromptTranspiler({
         setIsLoading(true);
         const payload: TranspileInput = {
           provider_target: selectedEngine,
+          model: selectedEngine === "9router" ? selected9RouterModel : undefined,
           style_code: styleCode,
           camera_code: camCode,
           lens_code: lensCode,
@@ -83,15 +118,21 @@ export default function PromptTranspiler({
 
         const res = await api.transpile.transpilePrompt(payload);
         if (!isCancelled && res?.data) {
-          setTranspileResult(res.data);
+          const raw = res.data as any;
+          setTranspileResult({
+            positive: raw.positive || raw.positive_prompt || "",
+            negative: raw.negative || raw.negative_prompt || "",
+            engine: raw.engine || (selectedEngine === "9router" ? `9Router • ${selected9RouterModel}` : raw.metadata?.target_engine || selectedEngine),
+            metadata: raw.metadata,
+          });
         }
       } catch {
         // Fallback local compilation if network glitch occurs
         if (!isCancelled) {
           setTranspileResult({
-            positive: `[${selectedEngine.toUpperCase()}]: Cinematic film in ${aspectRatio}. ${styleCode}, shot on ${lensCode} with ${camCode}, ${compCode}. ${characterDna}, ${actionDescription}. Lighting: ${lightCode}. Motion: ${speedCode}. Award-winning cinematography, photorealistic 35mm film grain.`,
+            positive: `[${selectedEngine.toUpperCase()}${selectedEngine === "9router" ? ` • ${selected9RouterModel}` : ""}]: Cinematic film in ${aspectRatio}. ${styleCode}, shot on ${lensCode} with ${camCode}, ${compCode}. ${characterDna}, ${actionDescription}. Lighting: ${lightCode}. Motion: ${speedCode}. Award-winning cinematography, photorealistic 35mm film grain.`,
             negative: "lowres, bad anatomy, bad hands, text, error, blurry, deformed limbs, watermark",
-            engine: `${selectedEngine}_cinematic_v2`,
+            engine: selectedEngine === "9router" ? `9Router • ${selected9RouterModel}` : `${selectedEngine}_cinematic_v2`,
             metadata: {
               prompt_tokens_est: 84,
               aspect_ratio: aspectRatio,
@@ -109,6 +150,7 @@ export default function PromptTranspiler({
     };
   }, [
     selectedEngine,
+    selected9RouterModel,
     styleCode,
     lightCode,
     actCode,
@@ -165,6 +207,20 @@ export default function PromptTranspiler({
         value={selectedEngine}
         onChange={(val) => setSelectedEngine(val as any)}
       />
+
+      {/* 9Router Model Selection Dropdown (Only when 9router engine selected) */}
+      {selectedEngine === "9router" && (
+        <div className="animate-in fade-in duration-150">
+          <ObsidianDropdown
+            size="sm"
+            label="9Router AI Model Selection"
+            icon={<Sparkles className="w-4 h-4 text-amber-400" />}
+            options={NINEROUTER_MODELS}
+            value={selected9RouterModel}
+            onChange={(val) => setSelected9RouterModel(val)}
+          />
+        </div>
+      )}
 
       {/* Compiled Positive Prompt Box */}
       <div className="space-y-1.5">
@@ -229,7 +285,12 @@ export default function PromptTranspiler({
       {/* Engine Target Parameters Footer */}
       <div className="pt-2 border-t border-border flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono text-obsidian-muted">
         <div>
-          Engine: <strong className="text-obsidian-secondary">{transpileResult?.engine || selectedEngine}</strong>
+          Engine:{" "}
+          <strong className="text-obsidian-secondary">
+            {selectedEngine === "9router"
+              ? `9Router • ${selected9RouterModel}`
+              : transpileResult?.engine || selectedEngine}
+          </strong>
         </div>
         <div className="flex items-center gap-2">
           <span>Aspect: {aspectRatio}</span>

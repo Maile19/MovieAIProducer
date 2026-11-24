@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { useParams } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import AppShell from "@/components/layout/AppShell";
 import LeftNavPipeline from "@/components/studio/LeftNavPipeline";
 import DualViewportPlayer, { AspectRatioType } from "@/components/studio/DualViewportPlayer";
@@ -10,19 +11,32 @@ import ApprovalGateModal from "@/components/studio/ApprovalGateModal";
 import MatrixSelector, { SelectedMatrixState } from "@/components/studio/MatrixSelector";
 import PromptTranspiler from "@/components/studio/PromptTranspiler";
 import SavePresetModal from "@/components/presets/SavePresetModal";
-import { api, Project } from "@/lib/api";
+import { api, Project, Character, PipelineStatusResponse } from "@/lib/api";
 import { Loader2, AlertCircle, ArrowLeft, RefreshCw, BookmarkPlus, Sparkles } from "lucide-react";
 import Link from "next/link";
 
 export default function StudioPage() {
   const params = useParams();
+  const queryClient = useQueryClient();
   const projectId = (params?.id as string) || "";
 
   const [project, setProject] = useState<Project | null>(null);
+  const [pipelineStatus, setPipelineStatus] = useState<PipelineStatusResponse | null>(null);
+  const [viewingStage, setViewingStage] = useState<number>(1);
   const [catalog, setCatalog] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isSavePresetModalOpen, setIsSavePresetModalOpen] = useState(false);
+
+  // 360p Preview state (Point 8 & Refinement 4)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewProvider, setPreviewProvider] = useState<string | null>(null);
+  const [isLoadingPreview, setIsLoadingPreview] = useState<boolean>(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
+  // Characters for B-Roll DNA Master Lock continuity
+  const [characters, setCharacters] = useState<Character[]>([]);
+  const [activeCharacterId, setActiveCharacterId] = useState<string | null>(null);
 
   // Studio viewport & matrix state
   const [aspectRatio, setAspectRatio] = useState<AspectRatioType>("2.39:1");
@@ -36,21 +50,29 @@ export default function StudioPage() {
     speedCode: "#Speed 01",
   });
 
-  // Fetch project and matrix catalog
+  // Fetch project, matrix catalog, and characters
   const loadStudioData = useCallback(async () => {
     try {
       setIsLoading(true);
       setErrorMsg(null);
 
-      // Fetch project
-      const [projRes, catalogRes] = await Promise.allSettled([
+      // Fetch project, catalog, and character DNA anchors in parallel
+      const [projRes, catalogRes, charsRes] = await Promise.allSettled([
         api.projects.get(projectId),
         api.catalog.getMatrix(),
+        api.bible.listCharacters(projectId),
       ]);
 
       if (projRes.status === "fulfilled" && projRes.value?.data) {
         const p = projRes.value.data;
         setProject(p);
+        if (p.pipeline_status) {
+          setPipelineStatus(p.pipeline_status);
+          const currentWorking = p.pipeline_status.header_metrics?.current_working_stage || p.operational_stage || 1;
+          setViewingStage((prev) => prev || currentWorking);
+        } else {
+          setViewingStage((prev) => prev || p.operational_stage || 1);
+        }
         if (p.aspect_ratio) {
           if (p.aspect_ratio === "2.39:1" || p.aspect_ratio === "16:9" || p.aspect_ratio === "9:16") {
             setAspectRatio(p.aspect_ratio as AspectRatioType);
@@ -59,40 +81,27 @@ export default function StudioPage() {
         if (p.target_style_code) {
           setSelectedMatrix((prev) => ({ ...prev, styleCode: p.target_style_code }));
         }
+        // Restore persistent preview across studio reloads
+        if (p.settings && typeof p.settings.preview_url === "string") {
+          setPreviewUrl(p.settings.preview_url);
+        }
+        if (p.settings && typeof p.settings.preview_provider === "string") {
+          setPreviewProvider(p.settings.preview_provider);
+        }
       } else {
-        // Fallback for new or mocked project
-        setProject({
-          id: projectId,
-          title: "Cyberpunk Hollywood Master Cut",
-          slug: "cyberpunk-master",
-          status: "IN_PRODUCTION",
-          aspect_ratio: "2.39:1",
-          target_style_code: "#Style 01",
-          operational_stage: 3,
-          stage_name: "4-Act Storyboard & 50-Scene Blueprint",
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-          settings: {
-            gate_history: [
-              {
-                action: "APPROVE",
-                stage: 1,
-                notes: "Initial logline approved by showrunner.",
-                timestamp: new Date().toISOString(),
-              },
-              {
-                action: "APPROVE",
-                stage: 2,
-                notes: "Visual style #Style 01 selected.",
-                timestamp: new Date().toISOString(),
-              },
-            ],
-          },
-        });
+        setErrorMsg("Failed to load project details from server.");
       }
 
       if (catalogRes.status === "fulfilled" && catalogRes.value?.data) {
         setCatalog(catalogRes.value.data);
+      }
+
+      if (charsRes.status === "fulfilled" && charsRes.value?.data) {
+        const charList = charsRes.value.data;
+        if (Array.isArray(charList)) {
+          setCharacters(charList);
+          setActiveCharacterId((prev) => prev || charList[0]?.id || null);
+        }
       }
     } catch (err: any) {
       setErrorMsg(err.message || "Failed to load studio project.");
@@ -111,19 +120,65 @@ export default function StudioPage() {
     setSelectedMatrix((prev) => ({ ...prev, ...updates }));
   };
 
-  const handleStageSelect = async (newStage: number) => {
-    if (!project) return;
+  const handleStageSelect = (newStage: number) => {
+    // Pure viewport navigation: strictly does NOT mutate database operational_stage
+    setViewingStage(newStage);
+  };
+
+  const handleApproveGate = async (stageNum: number, notes?: string) => {
     try {
-      // Optimistic update
-      setProject({ ...project, operational_stage: newStage });
-      await api.projects.update(projectId, {
-        settings: {
-          ...project.settings,
-          preview_stage: newStage,
-        },
+      const res = await api.projects.gateSignoff(projectId, {
+        stage: stageNum,
+        action: "APPROVE",
+        notes: notes || `Showrunner Stage ${stageNum} signoff confirmed.`,
       });
-    } catch {
-      // Non-blocking
+      if (res?.data) {
+        setPipelineStatus(res.data);
+        await queryClient.invalidateQueries({ queryKey: ["projects"] });
+        await loadStudioData();
+      }
+    } catch (err: any) {
+      console.error("Failed to approve gate", err);
+    }
+  };
+
+  const handleRevokeGate = async (stageNum: number, notes?: string) => {
+    try {
+      const res = await api.projects.gateSignoff(projectId, {
+        stage: stageNum,
+        action: "REVOKE",
+        notes: notes || `Stage ${stageNum} gate revoked for revision.`,
+      });
+      if (res?.data) {
+        setPipelineStatus(res.data);
+        await queryClient.invalidateQueries({ queryKey: ["projects"] });
+        await loadStudioData();
+      }
+    } catch (err: any) {
+      console.error("Failed to revoke gate", err);
+    }
+  };
+
+  const handleGeneratePreview = async () => {
+    try {
+      setIsLoadingPreview(true);
+      setPreviewError(null);
+      const res = await api.previews.generateProjectPreview(projectId, {
+        aspect_ratio: aspectRatio,
+        provider: "9router",
+        model: "ag/gemini-3.8-flash",
+      });
+      if (res && res.preview_url) {
+        setPreviewUrl(res.preview_url);
+        if (res.provider) {
+          setPreviewProvider(res.provider);
+        }
+      }
+    } catch (err: any) {
+      console.error("Failed to generate 360p preview", err);
+      setPreviewError(err?.message || "Preview generation failed. Please try again.");
+    } finally {
+      setIsLoadingPreview(false);
     }
   };
 
@@ -169,14 +224,17 @@ export default function StudioPage() {
     );
   }
 
-  const currentStage = project?.operational_stage || 1;
+  const currentWorkingStage = pipelineStatus?.header_metrics?.current_working_stage || project?.operational_stage || 1;
+  const currentWorkingStep = pipelineStatus?.header_metrics?.current_working_step || 1;
+  const activeViewingStage = viewingStage || currentWorkingStage;
+  const viewingStageDef = pipelineStatus?.stages?.[`S${activeViewingStage.toString().padStart(2, "0")}`];
   const gateHistory = Array.isArray(project?.settings?.gate_history) ? project.settings.gate_history : [];
 
   return (
     <AppShell
       activeProjectId={projectId}
       activeProjectTitle={project?.title || "Production Studio"}
-      currentStage={currentStage}
+      currentStage={currentWorkingStage}
       stageName={project?.stage_name}
     >
       <div className="space-y-4">
@@ -248,8 +306,14 @@ export default function StudioPage() {
           {/* Left Pane: 16-Stage Pipeline & 12-Step Tree (Cols 3) */}
           <div className="lg:col-span-3 space-y-4">
             <LeftNavPipeline
-              currentStage={currentStage}
+              viewingStage={activeViewingStage}
+              currentWorkingStage={currentWorkingStage}
+              stages={pipelineStatus?.stages}
+              steps={pipelineStatus?.steps}
+              headerMetrics={pipelineStatus?.header_metrics}
               onSelectStage={handleStageSelect}
+              onApproveGate={handleApproveGate}
+              onRevokeGate={handleRevokeGate}
               isProjectLocked={project?.status === "LOCKED"}
             />
           </div>
@@ -260,26 +324,41 @@ export default function StudioPage() {
             <DualViewportPlayer
               aspectRatio={aspectRatio}
               onChangeAspectRatio={setAspectRatio}
-              currentSceneTitle={`STAGE ${currentStage}: ${project?.stage_name || "Hollywood Sequence"}`}
+              currentSceneTitle={`STAGE ${activeViewingStage}: ${viewingStageDef?.name || project?.stage_name || "Hollywood Sequence"}`}
               styleCode={selectedMatrix.styleCode}
               cameraCode={selectedMatrix.camCode}
               lightingCode={selectedMatrix.lightCode}
+              previewUrl={previewUrl}
+              previewProvider={previewProvider}
+              isLoadingPreview={isLoadingPreview}
+              onGeneratePreview={handleGeneratePreview}
+              characterList={characters}
+              activeCharacterId={activeCharacterId}
+              onSelectCharacter={setActiveCharacterId}
+              projectId={projectId}
+              previewError={previewError}
             />
 
             {/* 12-Step Timeline Scrubber */}
             <ScrubberTimeline
-              currentStep={Math.min(currentStage, 12)}
+              viewingStep={Math.min(activeViewingStage, 12)}
+              currentWorkingStep={currentWorkingStep}
+              stepStatuses={pipelineStatus?.steps}
               onSelectStep={(step) => handleStageSelect(step)}
-              maxCompletedStep={currentStage}
+              maxCompletedStep={pipelineStatus?.header_metrics?.completed_steps_count || 1}
             />
 
             {/* Human Approval Gate Controls */}
             <ApprovalGateModal
               projectId={projectId}
-              currentStage={currentStage}
+              projectTitle={project?.title || "Production"}
+              currentStage={activeViewingStage}
               projectStatus={project?.status}
               gateHistory={gateHistory}
-              onGateProcessed={loadStudioData}
+              onGateProcessed={async () => {
+                await queryClient.invalidateQueries({ queryKey: ["projects"] });
+                await loadStudioData();
+              }}
             />
           </div>
 

@@ -81,6 +81,14 @@ class CharacterModel(Base):
         Integer,
         nullable=True,
     )
+    narrative_summary: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    voice_dna_profile: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
     sheet_metadata: Mapped[dict] = mapped_column(
         JSON,
         default=dict,
@@ -116,6 +124,10 @@ class CharacterStateModel(Base):
     state_code: Mapped[str] = mapped_column(
         String(16),
         nullable=False,
+    )
+    state_label: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
     )
     wardrobe: Mapped[str] = mapped_column(
         Text,

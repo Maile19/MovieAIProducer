@@ -23,6 +23,8 @@ import {
   Palette,
   Filter,
   Bot,
+  Trash2,
+  Loader2,
 } from "lucide-react";
 import AppShell from "@/components/layout/AppShell";
 import { useAuth } from "@/hooks/useAuth";
@@ -46,22 +48,24 @@ export default function DashboardPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [filterStage, setFilterStage] = useState<string>("all");
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [projectToDelete, setProjectToDelete] = useState<Project | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
     setMounted(true);
   }, []);
 
-  // Lock body scroll when create modal is open to prevent background scrolling on mobile
+  // Lock body scroll when create or delete modal is open to prevent background scrolling on mobile
   useEffect(() => {
-    if (isCreateModalOpen) {
+    if (isCreateModalOpen || projectToDelete) {
       const originalOverflow = document.body.style.overflow;
       document.body.style.overflow = "hidden";
       return () => {
         document.body.style.overflow = originalOverflow;
       };
     }
-  }, [isCreateModalOpen]);
+  }, [isCreateModalOpen, projectToDelete]);
 
   // Form State for Create Production Modal
   const [newTitle, setNewTitle] = useState("");
@@ -97,13 +101,13 @@ export default function DashboardPage() {
     return Array.from(map.values());
   }, [presetsData?.data]);
 
-  // Fetch Projects Slate
+  // Fetch Projects Slate (identical queryKey and limit to AppShell for cache sharing)
   const {
     data: projectsData,
     isLoading: projectsLoading,
   } = useQuery({
-    queryKey: ["projects", searchQuery],
-    queryFn: () => api.projects.list({ search: searchQuery.trim() || undefined }),
+    queryKey: ["projects"],
+    queryFn: () => api.projects.list({ limit: 200 }),
     enabled: isAuthenticated,
   });
 
@@ -121,6 +125,20 @@ export default function DashboardPage() {
     onError: (err: unknown) => {
       const msg = err instanceof Error ? err.message : "Failed to initialize new production";
       setFormError(msg);
+    },
+  });
+
+  // Delete Project Mutation
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => api.projects.delete(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+      setProjectToDelete(null);
+      setDeleteError(null);
+    },
+    onError: (err: unknown) => {
+      const msg = err instanceof Error ? err.message : "Failed to delete production";
+      setDeleteError(msg);
     },
   });
 
@@ -195,21 +213,35 @@ export default function DashboardPage() {
     });
   };
 
-  const projects: Project[] = projectsData?.data || [];
+  // User's complete slate of productions
+  const allProjects: Project[] = React.useMemo(() => projectsData?.data || [], [projectsData?.data]);
 
-  // Filter projects by stage category
-  const filteredProjects = projects.filter((p) => {
-    if (filterStage === "pre-prod") return p.operational_stage <= 5;
-    if (filterStage === "production") return p.operational_stage >= 6 && p.operational_stage <= 11;
-    if (filterStage === "post") return p.operational_stage >= 12;
-    return true;
-  });
+  // Summary Metrics (100% dynamic & real-time across user's complete slate)
+  const totalCount = allProjects.length;
+  const preProdCount = allProjects.filter((p) => p.operational_stage <= 5).length;
+  const prodCount = allProjects.filter((p) => p.operational_stage >= 6 && p.operational_stage <= 11).length;
+  const postCount = allProjects.filter((p) => p.operational_stage >= 12).length;
 
-  // Summary Metrics
-  const totalCount = projects.length;
-  const preProdCount = projects.filter((p) => p.operational_stage <= 5).length;
-  const prodCount = projects.filter((p) => p.operational_stage >= 6 && p.operational_stage <= 11).length;
-  const postCount = projects.filter((p) => p.operational_stage >= 12).length;
+  // Client-side instant & responsive filtering for search and stage category
+  const filteredProjects = React.useMemo(() => {
+    return allProjects.filter((p) => {
+      // Stage category filter
+      if (filterStage === "pre-prod" && p.operational_stage > 5) return false;
+      if (filterStage === "production" && (p.operational_stage < 6 || p.operational_stage > 11)) return false;
+      if (filterStage === "post" && p.operational_stage < 12) return false;
+
+      // Responsive search query filter
+      if (searchQuery.trim()) {
+        const q = searchQuery.trim().toLowerCase();
+        const matchTitle = p.title.toLowerCase().includes(q);
+        const matchSlug = p.slug?.toLowerCase().includes(q);
+        const matchStyle = p.target_style_code?.toLowerCase().includes(q);
+        if (!matchTitle && !matchSlug && !matchStyle) return false;
+      }
+
+      return true;
+    });
+  }, [allProjects, filterStage, searchQuery]);
 
   return (
     <AppShell>
@@ -320,7 +352,7 @@ export default function DashboardPage() {
               label="Slate Stage Filter"
               icon={<Filter className="w-3.5 h-3.5 text-amber-500" />}
               options={[
-                { value: "all", title: "All Slate Productions", description: `All ${projects.length} film projects`, badge: `${projects.length}` },
+                { value: "all", title: "All Slate Productions", description: `All ${totalCount} film projects`, badge: `${totalCount}` },
                 { value: "pre-prod", title: "Pre-Production", description: "Stages 1-5 (Bible, DNA, Script Breakdown)", badge: `${preProdCount}` },
                 { value: "production", title: "Active Generation", description: "Stages 6-11 (Act I-III Gen, QC)", badge: `${prodCount}` },
                 { value: "post", title: "Post / Master", description: "Stages 12-16 (Assembly, Delivery)", badge: `${postCount}` },
@@ -490,14 +522,30 @@ export default function DashboardPage() {
                       )}
                     </div>
 
-                    {/* Enter Studio Primary Button */}
-                    <Link
-                      href={`/projects/${project.id}/studio`}
-                      className="p-1.5 rounded-md bg-amber-500 hover:bg-amber-600 text-canvas transition-colors flex items-center justify-center shrink-0"
-                      title="Enter Production"
-                    >
-                      <ArrowRight className="w-4 h-4" />
-                    </Link>
+                    {/* Quick Action Buttons (Delete & Enter Studio) */}
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setDeleteError(null);
+                          setProjectToDelete(project);
+                        }}
+                        title={`Delete ${project.title}`}
+                        className="p-1.5 rounded-md bg-canvas hover:bg-rose-500/10 border border-border hover:border-rose-500/40 text-obsidian-muted hover:text-rose-400 transition-colors flex items-center justify-center shrink-0 cursor-pointer"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+
+                      <Link
+                        href={`/projects/${project.id}/studio`}
+                        className="p-1.5 rounded-md bg-amber-500 hover:bg-amber-600 text-canvas transition-colors flex items-center justify-center shrink-0"
+                        title="Enter Production"
+                      >
+                        <ArrowRight className="w-4 h-4" />
+                      </Link>
+                    </div>
                   </div>
                 </div>
               );
@@ -805,6 +853,97 @@ export default function DashboardPage() {
                 setNewLogline(synopsis);
               }}
             />
+          </div>,
+          document.body
+        )}
+
+        {/* =========================================================================
+         * Delete Production Confirmation Modal (Rendered via Portal to document.body)
+         * ========================================================================= */}
+        {projectToDelete && mounted && createPortal(
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
+            onClick={() => {
+              // Block closing backdrop click when delete mutation is in flight
+              if (!deleteMutation.isPending) {
+                setProjectToDelete(null);
+                setDeleteError(null);
+              }
+            }}
+          >
+            <div
+              className="w-full max-w-md rounded-xl bg-panel border border-border shadow-studio overflow-hidden flex flex-col p-6 space-y-4 animate-in zoom-in-95 duration-150"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
+                  <AlertCircle className="w-5 h-5" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h3 className="font-cinzel font-bold text-base text-obsidian-primary">
+                    Delete Production Slate?
+                  </h3>
+                  <p className="text-xs text-obsidian-secondary font-mono mt-1">
+                    This action is permanent and cannot be undone.
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-lg bg-canvas border border-border/80 text-xs font-mono space-y-1">
+                <div className="text-obsidian-muted uppercase text-[10px]">Target Production:</div>
+                <div className="text-amber-400 font-semibold truncate text-sm">
+                  {projectToDelete.title}
+                </div>
+                <div className="text-obsidian-secondary text-[11px]">
+                  Stage {projectToDelete.operational_stage}/16 &bull; {projectToDelete.aspect_ratio} &bull; {projectToDelete.target_style_code}
+                </div>
+              </div>
+
+              <p className="text-xs text-obsidian-secondary leading-relaxed">
+                Deleting this project will permanently remove its 50-Scene Storyboard, Master Production Bible, character matrices, shots, and any generated media assets.
+              </p>
+
+              {deleteError && (
+                <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 flex items-center gap-2 text-rose-400 text-xs font-mono">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span className="truncate">{deleteError}</span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-border">
+                <button
+                  type="button"
+                  disabled={deleteMutation.isPending}
+                  onClick={() => {
+                    if (!deleteMutation.isPending) {
+                      setProjectToDelete(null);
+                      setDeleteError(null);
+                    }
+                  }}
+                  className="px-4 py-2 rounded-lg bg-canvas hover:bg-elevated border border-border text-obsidian-secondary hover:text-obsidian-primary text-xs font-medium transition-colors disabled:opacity-50 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={deleteMutation.isPending}
+                  onClick={() => deleteMutation.mutate(projectToDelete.id)}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-semibold text-xs transition-colors shadow-sm disabled:opacity-50 cursor-pointer"
+                >
+                  {deleteMutation.isPending ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Deleting Production...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Delete Production</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
           </div>,
           document.body
         )}

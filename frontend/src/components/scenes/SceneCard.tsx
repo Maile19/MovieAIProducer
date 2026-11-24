@@ -103,6 +103,24 @@ export default function SceneCard({ scene, isSelected, onSelect }: SceneCardProp
         </div>
       </div>
 
+      {/* Visual Preview Keyframe Thumbnail */}
+      {scene.preview_url && (
+        <div className="relative w-full aspect-video rounded-lg overflow-hidden border border-border my-2 bg-canvas group/img">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={scene.preview_url}
+            alt={`Scene ${scene.scene_number} Preview`}
+            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+            loading="lazy"
+          />
+          {scene.preview_provider && (
+            <span className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/80 text-[8px] font-mono text-amber-400 font-bold uppercase backdrop-blur-xs border border-white/10">
+              {scene.preview_provider === "google_flow" ? "FLOW" : scene.preview_provider}
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Middle: Slugline & Narrative Beat Goal */}
       <div className="my-2.5 space-y-1">
         <div className="font-mono text-xs font-bold text-obsidian-primary truncate group-hover:text-amber-400 transition-colors">

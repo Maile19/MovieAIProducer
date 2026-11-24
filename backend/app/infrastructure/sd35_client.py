@@ -90,6 +90,81 @@ class ImageGenerationProvider(ABC):
         raise NotImplementedError
 
 
+def clamp_sd35_dimensions(width: int, height: int) -> tuple[int, int]:
+    """Snap width and height to SD 3.5 Large constraints:
+    - Multiples of 64
+    - Clamped strictly within [512, 1024]
+    - Proportional scaling for both landscape and portrait (including 9:16)
+    """
+    if width <= 0 or height <= 0:
+        return 1024, 1024
+
+    gen_width = width
+    gen_height = height
+
+    if gen_width < 512 or gen_height < 512:
+        if gen_width >= gen_height:
+            # Landscape or Square
+            aspect = gen_width / gen_height
+            if abs(aspect - 16 / 9) < 0.03:
+                # 16:9 standard: 1024x576
+                gen_width, gen_height = 1024, 576
+            elif aspect > 2.0:
+                # 2.39:1 scope: 1024x512
+                gen_width, gen_height = 1024, 512
+            elif aspect == 1.0:
+                gen_width, gen_height = 512, 512
+            else:
+                scale = 512.0 / gen_height
+                scaled_w = gen_width * scale
+                if scaled_w > 1024.0:
+                    scaled_w = 1024.0
+                    scaled_h = max(512.0, 1024.0 / aspect)
+                else:
+                    scaled_h = 512.0
+                gen_width = int(round(scaled_w / 64.0) * 64)
+                gen_height = int(round(scaled_h / 64.0) * 64)
+        else:
+            # Portrait (e.g. 9:16)
+            inv_aspect = gen_height / gen_width
+            if abs(inv_aspect - 16 / 9) < 0.03:
+                # 9:16 vertical standard: 576x1024
+                gen_width, gen_height = 576, 1024
+            elif inv_aspect > 2.0:
+                gen_width, gen_height = 512, 1024
+            else:
+                scale = 512.0 / gen_width
+                scaled_h = gen_height * scale
+                if scaled_h > 1024.0:
+                    scaled_h = 1024.0
+                    scaled_w = max(512.0, 1024.0 / inv_aspect)
+                else:
+                    scaled_w = 512.0
+                gen_width = int(round(scaled_w / 64.0) * 64)
+                gen_height = int(round(scaled_h / 64.0) * 64)
+
+    # Strictly clamp both dimensions within [512, 1024] and ensure step of 64
+    gen_width = max(512, min(1024, int(round(gen_width / 64.0) * 64)))
+    gen_height = max(512, min(1024, int(round(gen_height / 64.0) * 64)))
+    return gen_width, gen_height
+
+
+def resolve_provider_name(name: str | None) -> str | None:
+    """Normalize provider aliases to canonical provider names."""
+    if not name:
+        return None
+    n = name.lower().strip()
+    if n in ("9router", "nine_router", "ag_gemini_flash", "antigravity", "gemini_flash", "ag/gemini-3.8-flash"):
+        return "9router"
+    if n in ("sd35", "sd35_large_hf", "hf", "huggingface"):
+        return "sd35_large_hf"
+    if n in ("mock", "offline", "local"):
+        return "mock"
+    if n in ("router", "dynamic", "auto"):
+        return None
+    return n
+
+
 class SD35HuggingFaceProvider(ImageGenerationProvider):
     """Client for stabilityai/stable-diffusion-3.5-large hosted on Hugging Face Spaces."""
 
@@ -123,6 +198,7 @@ class SD35HuggingFaceProvider(ImageGenerationProvider):
         headers = self._get_headers()
 
         steps = request.num_inference_steps if request.num_inference_steps > 0 else self.default_steps
+        gen_width, gen_height = clamp_sd35_dimensions(request.width, request.height)
 
         # Payload structure according to /gradio_api/info
         payload = {
@@ -131,15 +207,15 @@ class SD35HuggingFaceProvider(ImageGenerationProvider):
                 request.negative_prompt,
                 request.seed,
                 request.randomize_seed,
-                request.width,
-                request.height,
+                gen_width,
+                gen_height,
                 request.guidance_scale,
                 steps,
             ]
         }
 
         call_url = f"{self.space_url}/gradio_api/call/infer"
-        logger.info("sd35_initiating_call", prompt=request.prompt[:60], steps=steps, space_url=self.space_url)
+        logger.info("sd35_initiating_call", prompt=request.prompt[:60], steps=steps, width=gen_width, height=gen_height, space_url=self.space_url)
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_seconds)) as client:
             try:
@@ -291,13 +367,14 @@ class SD35HuggingFaceProvider(ImageGenerationProvider):
         local_url = f"{self.public_url_prefix}/{file_id}"
         logger.info("sd35_saved_locally", local_path=str(target_path), local_url=local_url, size=file_size)
 
+        gen_width, gen_height = clamp_sd35_dimensions(request.width, request.height)
         return ImageGenerationResult(
             local_path=str(target_path),
             local_url=local_url,
             remote_url=download_url,
             seed=used_seed,
-            width=request.width,
-            height=request.height,
+            width=gen_width,
+            height=gen_height,
             steps=steps,
             file_size_bytes=file_size,
             mime_type=mime_type,
@@ -574,20 +651,22 @@ class DynamicImageProviderRouter(ImageGenerationProvider):
         self.fallback_chain = fallback_chain or ["9router", "sd35_large_hf", "mock"]
 
     async def generate(self, request: ImageGenerationRequest) -> ImageGenerationResult:
-        req_provider = (request.provider or self.default_provider).lower().strip()
+        req_provider_raw = request.provider or self.default_provider
+        req_provider = resolve_provider_name(req_provider_raw) or (req_provider_raw.lower().strip() if req_provider_raw else self.default_provider)
         primary_provider = self.providers.get(req_provider)
 
         execution_order: list[tuple[str, ImageGenerationProvider]] = []
         if primary_provider:
             execution_order.append((req_provider, primary_provider))
         else:
-            def_prov = self.providers.get(self.default_provider)
+            def_prov_key = resolve_provider_name(self.default_provider) or self.default_provider
+            def_prov = self.providers.get(def_prov_key)
             if def_prov:
-                execution_order.append((self.default_provider, def_prov))
+                execution_order.append((def_prov_key, def_prov))
 
         if request.enable_fallback:
             for fallback_name in self.fallback_chain:
-                fb_norm = fallback_name.lower().strip()
+                fb_norm = resolve_provider_name(fallback_name) or fallback_name.lower().strip()
                 if fb_norm in self.providers and not any(p[0] == fb_norm for p in execution_order):
                     execution_order.append((fb_norm, self.providers[fb_norm]))
 
@@ -611,7 +690,7 @@ class DynamicImageProviderRouter(ImageGenerationProvider):
                         "primary_error": str(last_err),
                     }
                 return result
-            except (ZeroGPUQuotaExceededError, RateLimitExceededError, ImageGenerationError) as err:
+            except (ZeroGPUQuotaExceededError, RateLimitExceededError, ImageGenerationError, Exception) as err:
                 logger.warning(
                     "provider_execution_failed",
                     provider=p_name,

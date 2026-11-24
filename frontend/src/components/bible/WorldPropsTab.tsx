@@ -67,7 +67,7 @@ export default function WorldPropsTab({
         code: "#Prop 01",
         name: "Neural Deck 'Onyx-7'",
         material: "Matte carbon-fiber chassis with copper cooling ribs and braided fiber-optic cable.",
-        weight: "Hero operational device carried by Cipher Vance.",
+        weight: "Hero operational device carried by the protagonist.",
         action: "Plugs directly into occipital cranial port with tactile mechanical click.",
       },
       {

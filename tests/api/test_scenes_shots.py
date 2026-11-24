@@ -1,4 +1,6 @@
+from unittest.mock import patch
 from fastapi.testclient import TestClient
+from backend.app.domain.screenwriter import PolyaScreenwriterEngine
 
 
 def test_50_scene_blueprint_generation_and_filtering(client: TestClient, auth_headers: dict[str, str]):
@@ -6,16 +8,32 @@ def test_50_scene_blueprint_generation_and_filtering(client: TestClient, auth_he
     create_p = client.post("/api/v1/projects", json={"title": "Epic Cyberpunk Saga"}, headers=auth_headers)
     project_id = create_p.json()["data"]["id"]
 
-    # 2. Bulk generate standard 50-Scene 4-Act Blueprint
+    # 2. Verify legacy instant blueprint is deprecated -> returns 400
     blueprint_resp = client.post(
         f"/api/v1/projects/{project_id}/scenes",
         json={"generate_blueprint": True},
         headers=auth_headers,
     )
-    assert blueprint_resp.status_code == 201
-    assert blueprint_resp.json()["data"]["scenes_generated"] == 50
+    assert blueprint_resp.status_code == 400
+    err_msg = blueprint_resp.json().get("error", {}).get("message", "") or blueprint_resp.text
+    assert "deprecated" in err_msg.lower()
 
-    # 3. List all scenes
+    # 3. Seed 50 scenes via CRUD
+    for i in range(1, 51):
+        act = 1 if i <= 12 else (2 if i <= 25 else (3 if i <= 38 else 4))
+        client.post(
+            f"/api/v1/projects/{project_id}/scenes",
+            json={
+                "act_number": act,
+                "scene_number": i,
+                "slugline": f"EXT. SECTOR {i} - NIGHT",
+                "narrative_goal": f"Beat {i}",
+                "duration_target": 15.0 if act % 2 == 1 else 10.0,
+            },
+            headers=auth_headers,
+        )
+
+    # 4. List all scenes
     all_scenes_resp = client.get(f"/api/v1/projects/{project_id}/scenes", headers=auth_headers)
     assert all_scenes_resp.status_code == 200
     scenes = all_scenes_resp.json()["data"]
@@ -25,13 +43,13 @@ def test_50_scene_blueprint_generation_and_filtering(client: TestClient, auth_he
     assert scenes[49]["scene_number"] == 50
     assert scenes[49]["act_number"] == 4
 
-    # 4. Filter by Act 1 (Scenes 1-12)
+    # 5. Filter by Act 1 (Scenes 1-12)
     act1_resp = client.get(f"/api/v1/projects/{project_id}/scenes?act=1", headers=auth_headers)
     assert act1_resp.status_code == 200
     act1_scenes = act1_resp.json()["data"]
     assert len(act1_scenes) == 12
 
-    # 5. Filter by Act 2 (Scenes 13-25)
+    # 6. Filter by Act 2 (Scenes 13-25)
     act2_resp = client.get(f"/api/v1/projects/{project_id}/scenes?act=2", headers=auth_headers)
     assert act2_resp.status_code == 200
     assert len(act2_resp.json()["data"]) == 13
@@ -301,12 +319,12 @@ def test_dynamic_duration_pacing_and_auto_split(client: TestClient, auth_headers
 
 
 def test_flexible_blueprint_generation_scales_and_durations(client: TestClient, auth_headers: dict[str, str]):
-    # 1. Test 100-Scene Generation with Dynamic Hollywood Pacing (15s Acts I & III, 10s Acts II & IV)
-    create_p100 = client.post("/api/v1/projects", json={"title": "100-Scene Featurette"}, headers=auth_headers)
-    p100_id = create_p100.json()["data"]["id"]
+    """Verify legacy instant blueprint on POST /projects/{project_id}/scenes is rejected with 400."""
+    create_p = client.post("/api/v1/projects", json={"title": "100-Scene Featurette"}, headers=auth_headers)
+    project_id = create_p.json()["data"]["id"]
 
-    bp100_resp = client.post(
-        f"/api/v1/projects/{p100_id}/scenes",
+    bp_resp = client.post(
+        f"/api/v1/projects/{project_id}/scenes",
         json={
             "generate_blueprint": True,
             "total_scenes": 100,
@@ -315,193 +333,163 @@ def test_flexible_blueprint_generation_scales_and_durations(client: TestClient, 
         },
         headers=auth_headers,
     )
-    assert bp100_resp.status_code == 201
-    bp100_data = bp100_resp.json()["data"]
-    assert bp100_data["scenes_generated"] == 100
-    # Dynamic mode: Act 1 (25 * 3 = 75) + Act 2 (25 * 2 = 50) + Act 3 (25 * 3 = 75) + Act 4 (25 * 2 = 50) = 250 shots
-    assert bp100_data["shots_generated"] == 250
-    assert bp100_data["duration_mode"] == "dynamic"
-
-    # Verify Act distribution for 100 scenes (25 per act)
-    act1_resp = client.get(f"/api/v1/projects/{p100_id}/scenes?act=1", headers=auth_headers)
-    assert act1_resp.status_code == 200
-    act1_scenes = act1_resp.json()["data"]
-    assert len(act1_scenes) == 25
-    assert act1_scenes[0]["duration_target"] == 15.0
-    assert act1_scenes[0]["shots_count"] == 3
-
-    act2_resp = client.get(f"/api/v1/projects/{p100_id}/scenes?act=2", headers=auth_headers)
-    assert act2_resp.status_code == 200
-    act2_scenes = act2_resp.json()["data"]
-    assert len(act2_scenes) == 25
-    assert act2_scenes[0]["duration_target"] == 10.0
-    assert act2_scenes[0]["shots_count"] == 2
-
-    # 2. Test 420-Scene Generation with Flat 10s Pacing and Bulk SQLite Insertion
-    create_p420 = client.post("/api/v1/projects", json={"title": "420-Scene Full Feature"}, headers=auth_headers)
-    p420_id = create_p420.json()["data"]["id"]
-
-    bp420_resp = client.post(
-        f"/api/v1/projects/{p420_id}/scenes",
-        json={
-            "generate_blueprint": True,
-            "total_scenes": 420,
-            "duration_mode": "flat_10s",
-            "auto_split_shots": True,
-        },
-        headers=auth_headers,
-    )
-    assert bp420_resp.status_code == 201
-    bp420_data = bp420_resp.json()["data"]
-    assert bp420_data["scenes_generated"] == 420
-    # 420 scenes @ 10s = 2 shots each = 840 shots
-    assert bp420_data["shots_generated"] == 840
-    assert bp420_data["duration_mode"] == "flat_10s"
-
-    # Check Act 1 count: 420 / 4 = 105 scenes
-    act1_420 = client.get(f"/api/v1/projects/{p420_id}/scenes?act=1", headers=auth_headers)
-    assert act1_420.status_code == 200
-    assert len(act1_420.json()["data"]) == 105
-    assert act1_420.json()["data"][0]["duration_target"] == 10.0
-
-    # 3. Test Legacy flat_5s Mode
-    create_p5s = client.post("/api/v1/projects", json={"title": "Legacy 5s Film"}, headers=auth_headers)
-    p5s_id = create_p5s.json()["data"]["id"]
-
-    bp5s_resp = client.post(
-        f"/api/v1/projects/{p5s_id}/scenes",
-        json={
-            "generate_blueprint": True,
-            "total_scenes": 50,
-            "duration_mode": "flat_5s",
-            "auto_split_shots": True,
-        },
-        headers=auth_headers,
-    )
-    assert bp5s_resp.status_code == 201
-    bp5s_data = bp5s_resp.json()["data"]
-    assert bp5s_data["scenes_generated"] == 50
-    assert bp5s_data["shots_generated"] == 50
-    assert bp5s_data["duration_mode"] == "flat_5s"
-
-    # 4. Test clear_existing=True overwrite
-    re_bp = client.post(
-        f"/api/v1/projects/{p5s_id}/scenes",
-        json={
-            "generate_blueprint": True,
-            "total_scenes": 100,
-            "duration_mode": "flat_15s",
-            "clear_existing": True,
-        },
-        headers=auth_headers,
-    )
-    assert re_bp.status_code == 201
-    re_scenes = client.get(f"/api/v1/projects/{p5s_id}/scenes", headers=auth_headers).json()["data"]
-    assert len(re_scenes) == 100
+    assert bp_resp.status_code == 400
+    err_text = bp_resp.json().get("error", {}).get("message", "") or bp_resp.text
+    assert "deprecated" in err_text.lower()
+    assert "/blueprint/" in err_text
 
 
 def test_staged_llm_writer_phase_a_and_phase_b(client: TestClient, auth_headers: dict[str, str]):
-    # 1. Create project with characters
-    create_p = client.post("/api/v1/projects", json={"title": "Chronicles of Arya"}, headers=auth_headers)
-    project_id = create_p.json()["data"]["id"]
+    import re
 
-    client.post(
-        f"/api/v1/projects/{project_id}/characters",
-        json={
-            "name": "Arya",
-            "role": "Cybernetic Infiltrator",
-            "base_prompt": "Female operative with glowing neural interface tattoo",
-        },
-        headers=auth_headers,
-    )
+    async def fake_llm(messages: list[dict[str, str]], retry_on_parse_error: bool = True) -> dict:
+        user_content = messages[-1]["content"] if messages else ""
+        if "Treatment" in user_content:
+            total = 50 if "Total Scenes Target: 50" in user_content else 100
+            b1 = 12 if total == 50 else 25
+            b2 = 25 if total == 50 else 50
+            b3 = 38 if total == 50 else 75
+            return {
+                "title": "Chronicles of Arya",
+                "logline": "A rogue operative seeks to liberate an imprisoned synthetic mind.",
+                "theme": "Liberation",
+                "dramatic_premise": "Arya defies the syndicate.",
+                "total_scenes": total,
+                "acts": [
+                    {"act_number": 1, "act_title": "Setup", "start_scene": 1, "end_scene": b1, "dramatic_goal": "Setup", "key_beat": "Beat 1"},
+                    {"act_number": 2, "act_title": "Confrontation", "start_scene": b1 + 1, "end_scene": b2, "dramatic_goal": "Trials", "key_beat": "Beat 2"},
+                    {"act_number": 3, "act_title": "Crisis", "start_scene": b2 + 1, "end_scene": b3, "dramatic_goal": "Dark Night", "key_beat": "Beat 3"},
+                    {"act_number": 4, "act_title": "Resolution", "start_scene": b3 + 1, "end_scene": total, "dramatic_goal": "Resolution", "key_beat": "Beat 4"},
+                ],
+            }
 
-    # 2. Phase A: Master Treatment & Beat Sheet
-    treat_resp = client.post(
-        f"/api/v1/projects/{project_id}/blueprint/treatment",
-        json={
-            "total_scenes": 100,
-            "duration_mode": "dynamic",
-            "premise": "A rogue operative seeks to liberate an imprisoned synthetic mind.",
-            "clear_existing": True,
-        },
-        headers=auth_headers,
-    )
-    assert treat_resp.status_code == 200
-    treatment = treat_resp.json()["data"]
-    assert treatment["title"] == "Chronicles of Arya"
-    assert "logline" in treatment
-    assert len(treatment["acts"]) == 4
-    assert treatment["acts"][0]["start_scene"] == 1
-    assert treatment["acts"][0]["end_scene"] == 25
+        # Sub-chunk scene writing
+        match = re.search(r"Scene (\d+) to Scene (\d+)", user_content)
+        if match:
+            s_start = int(match.group(1))
+            s_end = int(match.group(2))
+        else:
+            s_start, s_end = 1, 12
 
-    # 3. Phase B: Generate Act 1
-    act1_resp = client.post(
-        f"/api/v1/projects/{project_id}/blueprint/generate-act",
-        json={
+        return {
             "act_number": 1,
-            "total_scenes": 100,
-            "duration_mode": "dynamic",
-            "auto_split_shots": True,
-        },
-        headers=auth_headers,
-    )
-    assert act1_resp.status_code == 200
-    act1_data = act1_resp.json()["data"]
-    assert act1_data["act_number"] == 1
-    assert act1_data["scenes_generated"] == 25
-    assert act1_data["total_saved_for_project"] == 25
-    assert act1_data["act_summary"] != ""
+            "act_title": "Dynamic Act",
+            "act_summary": "Arya executes the next phase of the operation.",
+            "scenes": [
+                {
+                    "scene_number": i,
+                    "slugline": f"EXT. SECTOR {i} - NIGHT",
+                    "narrative_goal": f"Arya advances beat {i}",
+                    "primary_character": "Arya",
+                    "dialogue": f"Dialogue line for scene {i}.",
+                    "duration_seconds": 15.0,
+                }
+                for i in range(s_start, s_end + 1)
+            ],
+        }
 
-    # Check status endpoint
-    status_resp = client.get(f"/api/v1/projects/{project_id}/blueprint/status", headers=auth_headers)
-    assert status_resp.status_code == 200
-    st_data = status_resp.json()["data"]
-    assert st_data["has_treatment"] is True
-    assert st_data["total_scenes"] == 25
-    assert 1 in st_data["completed_acts"]
+    with patch.object(PolyaScreenwriterEngine, "_call_llm", side_effect=fake_llm):
+        # 1. Create project with characters
+        create_p = client.post("/api/v1/projects", json={"title": "Chronicles of Arya"}, headers=auth_headers)
+        project_id = create_p.json()["data"]["id"]
 
-    # 4. Phase B: Generate Act 2 (with persistent context from Act 1)
-    act2_resp = client.post(
-        f"/api/v1/projects/{project_id}/blueprint/generate-act",
-        json={
-            "act_number": 2,
-            "total_scenes": 100,
-            "duration_mode": "dynamic",
-            "auto_split_shots": True,
-        },
-        headers=auth_headers,
-    )
-    assert act2_resp.status_code == 200
-    act2_data = act2_resp.json()["data"]
-    assert act2_data["act_number"] == 2
-    assert act2_data["scenes_generated"] == 25
-    assert act2_data["total_saved_for_project"] == 50
+        client.post(
+            f"/api/v1/projects/{project_id}/characters",
+            json={
+                "name": "Arya",
+                "role": "Cybernetic Infiltrator",
+                "base_prompt": "Female operative with glowing neural interface tattoo",
+            },
+            headers=auth_headers,
+        )
 
-    # 5. Full Batch Write Orchestration Test (50 scenes)
-    bw_project = client.post("/api/v1/projects", json={"title": "Staged End-to-End Saga"}, headers=auth_headers).json()["data"]["id"]
-    bw_resp = client.post(
-        f"/api/v1/projects/{bw_project}/blueprint/batch-write",
-        json={
-            "total_scenes": 50,
-            "duration_mode": "dynamic",
-            "premise": "A covert team executes an impossible memory-heist.",
-            "auto_split_shots": True,
-            "clear_existing": True,
-        },
-        headers=auth_headers,
-    )
-    assert bw_resp.status_code == 200
-    bw_data = bw_resp.json()["data"]
-    assert bw_data["total_scenes"] == 50
-    assert bw_data["total_shots"] > 50
-    assert len(bw_data["acts"]) == 4
+        # 2. Phase A: Master Treatment & Beat Sheet
+        treat_resp = client.post(
+            f"/api/v1/projects/{project_id}/blueprint/treatment",
+            json={
+                "total_scenes": 100,
+                "duration_mode": "dynamic",
+                "premise": "A rogue operative seeks to liberate an imprisoned synthetic mind.",
+                "clear_existing": True,
+            },
+            headers=auth_headers,
+        )
+        assert treat_resp.status_code == 200
+        treatment = treat_resp.json()["data"]
+        assert treatment["title"] == "Chronicles of Arya"
+        assert "logline" in treatment
+        assert len(treatment["acts"]) == 4
+        assert treatment["acts"][0]["start_scene"] == 1
+        assert treatment["acts"][0]["end_scene"] == 25
 
-    # Verify scenes have populated slugline, narrative_goal, and shots have dialogue
-    all_scenes = client.get(f"/api/v1/projects/{bw_project}/scenes", headers=auth_headers).json()["data"]
-    assert len(all_scenes) == 50
-    for s in all_scenes:
-        assert s["slugline"] != ""
-        assert s["narrative_goal"] != ""
-        assert s["shots_count"] >= 1
+        # 3. Phase B: Generate Act 1
+        act1_resp = client.post(
+            f"/api/v1/projects/{project_id}/blueprint/generate-act",
+            json={
+                "act_number": 1,
+                "total_scenes": 100,
+                "duration_mode": "dynamic",
+                "auto_split_shots": True,
+            },
+            headers=auth_headers,
+        )
+        assert act1_resp.status_code == 200
+        act1_data = act1_resp.json()["data"]
+        assert act1_data["act_number"] == 1
+        assert act1_data["scenes_generated"] == 25
+        assert act1_data["total_saved_for_project"] == 25
+        assert act1_data["act_summary"] != ""
+
+        # Check status endpoint
+        status_resp = client.get(f"/api/v1/projects/{project_id}/blueprint/status", headers=auth_headers)
+        assert status_resp.status_code == 200
+        st_data = status_resp.json()["data"]
+        assert st_data["has_treatment"] is True
+        assert st_data["total_scenes"] == 25
+        assert 1 in st_data["completed_acts"]
+
+        # 4. Phase B: Generate Act 2 (with persistent context from Act 1)
+        act2_resp = client.post(
+            f"/api/v1/projects/{project_id}/blueprint/generate-act",
+            json={
+                "act_number": 2,
+                "total_scenes": 100,
+                "duration_mode": "dynamic",
+                "auto_split_shots": True,
+            },
+            headers=auth_headers,
+        )
+        assert act2_resp.status_code == 200
+        act2_data = act2_resp.json()["data"]
+        assert act2_data["act_number"] == 2
+        assert act2_data["scenes_generated"] == 25
+        assert act2_data["total_saved_for_project"] == 50
+
+        # 5. Full Batch Write Orchestration Test (50 scenes)
+        bw_project = client.post("/api/v1/projects", json={"title": "Staged End-to-End Saga"}, headers=auth_headers).json()["data"]["id"]
+        bw_resp = client.post(
+            f"/api/v1/projects/{bw_project}/blueprint/batch-write",
+            json={
+                "total_scenes": 50,
+                "duration_mode": "dynamic",
+                "premise": "A covert team executes an impossible memory-heist.",
+                "auto_split_shots": True,
+                "clear_existing": True,
+            },
+            headers=auth_headers,
+        )
+        assert bw_resp.status_code == 200
+        bw_data = bw_resp.json()["data"]
+        assert bw_data["total_scenes"] == 50
+        assert bw_data["total_shots"] > 50
+        assert len(bw_data["acts"]) == 4
+
+        # Verify scenes have populated slugline, narrative_goal, and shots have dialogue
+        all_scenes = client.get(f"/api/v1/projects/{bw_project}/scenes", headers=auth_headers).json()["data"]
+        assert len(all_scenes) == 50
+        for s in all_scenes:
+            assert s["slugline"] != ""
+            assert s["narrative_goal"] != ""
+            assert s["shots_count"] >= 1
 
 

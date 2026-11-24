@@ -3,6 +3,7 @@
 import React, { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useQuery } from "@tanstack/react-query";
 import {
   Clapperboard,
   LayoutDashboard,
@@ -13,9 +14,11 @@ import {
   Menu,
   X,
   ChevronDown,
+  ChevronRight,
   Settings,
 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
+import { api, Project } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 interface AppShellProps {
@@ -37,6 +40,27 @@ export default function AppShell({
   const { user, logout } = useAuth();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [userDropdownOpen, setUserDropdownOpen] = useState(false);
+  const [isMyProjectsExpanded, setIsMyProjectsExpanded] = useState(true);
+
+  // Synchronized User Projects Query (identical queryKey and limit to DashboardPage)
+  const { data: projectsData, isLoading: projectsLoading } = useQuery({
+    queryKey: ["projects"],
+    queryFn: () => api.projects.list({ limit: 200 }),
+    enabled: !!user,
+  });
+
+  const userProjects: Project[] = projectsData?.data || [];
+
+  // Stage color coding helper for project hierarchy
+  const getStageBadgeStyle = (stage: number) => {
+    if (stage <= 5) {
+      return "bg-blue-500/10 text-blue-400 border-blue-500/30";
+    }
+    if (stage <= 11) {
+      return "bg-amber-500/10 text-amber-400 border-amber-500/30";
+    }
+    return "bg-emerald-500/10 text-emerald-400 border-emerald-500/30";
+  };
 
   // Navigation Links
   const navItems = [
@@ -77,7 +101,8 @@ export default function AppShell({
   ];
 
   return (
-    <div className="min-h-screen bg-canvas/75 backdrop-blur-[2px] text-obsidian-primary flex flex-col selection:bg-amber-500/20 selection:text-amber-400">
+    <div className="relative min-h-screen bg-canvas/75 text-obsidian-primary flex flex-col selection:bg-amber-500/20 selection:text-amber-400">
+      <div className="fixed inset-0 pointer-events-none -z-10 backdrop-blur-[2px]" />
       {/* =========================================================================
        * Global Showrunner Header (Sticky, 1440px desktop & 390px mobile responsive)
        * ========================================================================= */}
@@ -148,14 +173,14 @@ export default function AppShell({
           </nav>
 
           {/* Right: Studio Engine Status & User Profile */}
-          <div className="flex items-center gap-3">
-            {/* Studio Online Indicator (Desktop) */}
-            <div className="hidden xl:flex items-center gap-2 px-2.5 py-1 rounded bg-canvas border border-border text-[11px] font-mono text-obsidian-secondary">
-              <span className="relative flex h-2 w-2">
+          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+            {/* Polya AI Live Status Indicator (Universal Responsive) */}
+            <div className="flex items-center gap-1.5 sm:gap-2 px-2 sm:px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-[10px] sm:text-[11px] font-mono text-emerald-400 font-semibold shrink-0 shadow-sm">
+              <span className="relative flex h-2 w-2 shrink-0">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
               </span>
-              <span className="text-[10px] text-emerald-400 font-semibold">STUDIO ONLINE</span>
+              <span className="tracking-wide">Polya AI</span>
             </div>
 
             {/* User Profile & Menu */}
@@ -243,77 +268,179 @@ export default function AppShell({
               </Link>
             )}
 
-            {/* Mobile Menu Hamburger Toggle */}
+            {/* Navigation Hamburger Toggle (Responsive across Mobile & Desktop) */}
             <button
               type="button"
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              className="lg:hidden p-2 rounded-lg bg-canvas border border-border text-obsidian-secondary hover:text-obsidian-primary"
+              className="p-2 rounded-lg bg-canvas hover:bg-elevated border border-border text-obsidian-secondary hover:text-amber-400 transition-colors flex items-center justify-center shrink-0 cursor-pointer"
               aria-label="Toggle Navigation Menu"
             >
-              {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+              {mobileMenuOpen ? <X className="w-5 h-5 text-amber-400" /> : <Menu className="w-5 h-5" />}
             </button>
           </div>
         </div>
 
         {/* =========================================================================
-         * Mobile Navigation Drawer (390px viewport optimized)
+         * Navigation Drawer & "My Projects" Hierarchical Tree
          * ========================================================================= */}
         {mobileMenuOpen && (
-          <div className="lg:hidden border-t border-border bg-panel px-4 py-4 space-y-2 animate-in slide-in-from-top-2 duration-200">
-            {activeProjectTitle && (
-              <div className="p-3 rounded bg-canvas border border-border/80 mb-3">
-                <div className="text-[10px] font-mono text-obsidian-muted uppercase">
-                  Active Production
+          <>
+            <div
+              className="fixed inset-0 z-40 bg-canvas/60 backdrop-blur-xs"
+              onClick={() => setMobileMenuOpen(false)}
+            />
+            <div className="absolute top-16 right-0 w-full sm:w-96 border-b sm:border-l sm:rounded-bl-xl border-border bg-panel/95 backdrop-blur-md px-4 py-4 space-y-3 z-50 shadow-studio animate-in slide-in-from-top-2 duration-200">
+              <div className="flex items-center justify-between pb-2 border-b border-border/70">
+                <span className="text-[11px] font-mono uppercase tracking-wider text-obsidian-muted font-semibold flex items-center gap-1.5">
+                  <Film className="w-3.5 h-3.5 text-amber-500" />
+                  <span>Showrunner Console</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="p-1 rounded text-obsidian-muted hover:text-obsidian-primary transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {activeProjectTitle && (
+                <div className="p-3 rounded-lg bg-canvas border border-border/80">
+                  <div className="text-[10px] font-mono text-obsidian-muted uppercase">
+                    Active Production
+                  </div>
+                  <div className="text-sm font-semibold text-amber-400 truncate">
+                    {activeProjectTitle}
+                  </div>
+                  {stageName && (
+                    <div className="text-xs text-obsidian-secondary font-mono mt-0.5">
+                      Stage {currentStage || 1}: {stageName}
+                    </div>
+                  )}
                 </div>
-                <div className="text-sm font-semibold text-amber-400 truncate">
-                  {activeProjectTitle}
-                </div>
-                {stageName && (
-                  <div className="text-xs text-obsidian-secondary font-mono">
-                    Stage {currentStage || 1}: {stageName}
+              )}
+
+              {/* Standard Nav Items */}
+              <div className="space-y-1">
+                {navItems.map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      onClick={() => setMobileMenuOpen(false)}
+                      className={cn(
+                        "flex items-center gap-3 px-3 py-2 rounded-md text-xs sm:text-sm font-medium transition-all",
+                        item.active
+                          ? "bg-elevated text-amber-400 border border-amber-500/40 shadow-sm"
+                          : "text-obsidian-secondary hover:text-obsidian-primary hover:bg-canvas"
+                      )}
+                    >
+                      <Icon className="w-4 h-4 shrink-0" />
+                      <span>{item.name}</span>
+                    </Link>
+                  );
+                })}
+              </div>
+
+              {/* "My Projects" Hierarchical Tree (Collapsible Accordion) */}
+              <div className="pt-2 border-t border-border/70">
+                <button
+                  type="button"
+                  onClick={() => setIsMyProjectsExpanded(!isMyProjectsExpanded)}
+                  className="w-full flex items-center justify-between px-3 py-2 rounded-md bg-canvas/80 hover:bg-elevated border border-border transition-colors text-xs font-semibold text-obsidian-primary group cursor-pointer"
+                >
+                  <div className="flex items-center gap-2">
+                    <Film className="w-4 h-4 text-amber-500" />
+                    <span>My Projects</span>
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-500/10 text-amber-400 border border-amber-500/30">
+                      {userProjects.length}
+                    </span>
+                  </div>
+                  {isMyProjectsExpanded ? (
+                    <ChevronDown className="w-4 h-4 text-obsidian-muted group-hover:text-amber-400 transition-colors" />
+                  ) : (
+                    <ChevronRight className="w-4 h-4 text-obsidian-muted group-hover:text-amber-400 transition-colors" />
+                  )}
+                </button>
+
+                {isMyProjectsExpanded && (
+                  <div className="mt-1.5 max-h-72 overflow-y-auto space-y-1 pl-1 pr-1.5 py-1">
+                    {projectsLoading ? (
+                      <div className="space-y-1.5 py-2">
+                        {[1, 2, 3].map((i) => (
+                          <div
+                            key={i}
+                            className="h-8 rounded bg-canvas border border-border/50 animate-pulse"
+                          />
+                        ))}
+                      </div>
+                    ) : userProjects.length === 0 ? (
+                      <div className="py-4 text-center text-xs text-obsidian-muted font-mono rounded bg-canvas/40 border border-border/40 border-dashed">
+                        No productions commissioned yet.
+                      </div>
+                    ) : (
+                      userProjects.map((p, idx) => {
+                        const isCurrent =
+                          activeProjectId === p.id || activeProjectId === p.slug;
+                        return (
+                          <Link
+                            key={p.id}
+                            href={`/projects/${p.id}/studio`}
+                            onClick={() => setMobileMenuOpen(false)}
+                            className={cn(
+                              "flex items-center justify-between gap-2 px-2.5 py-2 rounded-md text-xs transition-all group/item",
+                              isCurrent
+                                ? "bg-amber-500/15 border border-amber-500/50 text-amber-300 font-semibold shadow-sm"
+                                : "hover:bg-canvas border border-transparent text-obsidian-secondary hover:text-obsidian-primary"
+                            )}
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className="text-[10px] font-mono text-obsidian-muted shrink-0 w-4 text-right">
+                                {idx + 1}.
+                              </span>
+                              <span className="truncate group-hover/item:text-amber-400 transition-colors">
+                                {p.title}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-canvas border border-border/60 text-obsidian-muted">
+                                {p.aspect_ratio}
+                              </span>
+                              <span
+                                className={cn(
+                                  "px-1.5 py-0.5 rounded text-[10px] font-mono border",
+                                  getStageBadgeStyle(p.operational_stage)
+                                )}
+                              >
+                                S{p.operational_stage}
+                              </span>
+                            </div>
+                          </Link>
+                        );
+                      })
+                    )}
                   </div>
                 )}
               </div>
-            )}
 
-            <div className="space-y-1">
-              {navItems.map((item) => {
-                const Icon = item.icon;
-                return (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    onClick={() => setMobileMenuOpen(false)}
-                    className={cn(
-                      "flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-all",
-                      item.active
-                        ? "bg-elevated text-amber-400 border border-amber-500/40"
-                        : "text-obsidian-secondary hover:text-obsidian-primary hover:bg-canvas"
-                    )}
+              {user && (
+                <div className="pt-2 border-t border-border mt-2">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setMobileMenuOpen(false);
+                      await logout();
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-rose-400 hover:bg-rose-500/10 rounded text-xs sm:text-sm font-medium transition-colors cursor-pointer"
                   >
-                    <Icon className="w-4 h-4 shrink-0" />
-                    <span>{item.name}</span>
-                  </Link>
-                );
-              })}
+                    <LogOut className="w-4 h-4" />
+                    <span>Sign Out ({user.email})</span>
+                  </button>
+                </div>
+              )}
             </div>
-
-            {user && (
-              <div className="pt-3 border-t border-border mt-3">
-                <button
-                  type="button"
-                  onClick={async () => {
-                    setMobileMenuOpen(false);
-                    await logout();
-                  }}
-                  className="w-full flex items-center gap-2 px-3 py-2 text-rose-400 hover:bg-rose-500/10 rounded text-sm font-medium"
-                >
-                  <LogOut className="w-4 h-4" />
-                  <span>Sign Out ({user.email})</span>
-                </button>
-              </div>
-            )}
-          </div>
+          </>
         )}
       </header>
 

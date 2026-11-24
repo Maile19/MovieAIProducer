@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import Link from "next/link";
 import {
   Play,
   Pause,
@@ -14,8 +15,10 @@ import {
   Layers,
   Film,
   Camera,
+  Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Character, resolveMediaUrl } from "@/lib/api";
 
 export type AspectRatioType = "2.39:1" | "16:9" | "9:16";
 export type ViewportMode = "dual" | "a_roll" | "b_roll";
@@ -27,6 +30,42 @@ interface DualViewportPlayerProps {
   styleCode?: string;
   cameraCode?: string;
   lightingCode?: string;
+  previewUrl?: string | null;
+  previewProvider?: string | null;
+  onGeneratePreview?: () => void;
+  isLoadingPreview?: boolean;
+  characterList?: Character[];
+  activeCharacterId?: string | null;
+  onSelectCharacter?: (characterId: string) => void;
+  projectId?: string;
+  previewError?: string | null;
+}
+
+function getProviderBadge(provider?: string | null): { label: string; className: string } | null {
+  if (!provider) return null;
+  const p = provider.toLowerCase();
+  if (p.includes("9router") || p.includes("gemini")) {
+    return {
+      label: "9Router",
+      className: "bg-emerald-500/20 text-emerald-300 border-emerald-500/40",
+    };
+  }
+  if (p.includes("sd35") || p.includes("hf") || p.includes("huggingface")) {
+    return {
+      label: "SD3.5",
+      className: "bg-cyan-500/20 text-cyan-300 border-cyan-500/40",
+    };
+  }
+  if (p.includes("mock") || p.includes("offline") || p.includes("local")) {
+    return {
+      label: "Offline Fallback",
+      className: "bg-amber-500/20 text-amber-300 border-amber-500/40",
+    };
+  }
+  return {
+    label: provider,
+    className: "bg-purple-500/20 text-purple-300 border-purple-500/40",
+  };
 }
 
 export default function DualViewportPlayer({
@@ -36,6 +75,15 @@ export default function DualViewportPlayer({
   styleCode = "#Style 01",
   cameraCode = "#Cam 01",
   lightingCode = "#Light 01",
+  previewUrl,
+  previewProvider,
+  onGeneratePreview,
+  isLoadingPreview = false,
+  characterList,
+  activeCharacterId,
+  onSelectCharacter,
+  projectId,
+  previewError,
 }: DualViewportPlayerProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [viewportMode, setViewportMode] = useState<ViewportMode>("dual");
@@ -44,6 +92,7 @@ export default function DualViewportPlayer({
   const [isMuted, setIsMuted] = useState(false);
   const [activeFrame, setActiveFrame] = useState(348); // 24 fps
   const [lastTransportKey, setLastTransportKey] = useState<string | null>(null);
+  const [charImgError, setCharImgError] = useState(false);
 
   // Playback loop simulation
   useEffect(() => {
@@ -112,8 +161,13 @@ export default function DualViewportPlayer({
       .padStart(2, "0")}`;
   };
 
-  // Aspect ratio styling container class
-  const getAspectContainerClass = () => {
+  // Aspect ratio styling container class:
+  // When media is present, enforce strict aspect ratio.
+  // In placeholder/empty state on mobile, allow normal flex flow with min-h-[280px] sm:min-h-[320px] to prevent HUD collision.
+  const getAspectContainerClass = (hasMedia: boolean) => {
+    if (!hasMedia) {
+      return "min-h-[280px] sm:min-h-[320px]";
+    }
     switch (aspectRatio) {
       case "2.39:1":
         return "aspect-[2.39/1]";
@@ -224,109 +278,308 @@ export default function DualViewportPlayer({
             <div
               className={cn(
                 "relative rounded-lg overflow-hidden border border-border/80 bg-obsidian-canvas flex flex-col justify-between shadow-2xl group",
-                viewportMode === "dual" ? getAspectContainerClass() : getAspectContainerClass() + " w-full max-w-[800px]"
+                viewportMode === "dual"
+                  ? getAspectContainerClass(Boolean(previewUrl))
+                  : cn(getAspectContainerClass(Boolean(previewUrl)), "w-full max-w-[800px]")
               )}
             >
-              {/* Cinematic Letterbox Simulation / Canvas */}
-              <div className="absolute inset-0 bg-gradient-to-tr from-black via-[#0B0F17] to-[#161D26] flex items-center justify-center overflow-hidden">
-                {/* Simulated Film Grain & Scanlines */}
+              {/* Layer 0: Ambient Background & Media Canvas */}
+              <div className="absolute inset-0 bg-gradient-to-tr from-black via-[#0B0F17] to-[#161D26] pointer-events-none z-0 overflow-hidden">
                 <div className="absolute inset-0 opacity-[0.07] bg-[radial-gradient(#fff_1px,transparent_1px)] [background-size:16px_16px]" />
-                
-                {/* Visual Viewport Placeholder Graphic */}
-                <div className="text-center p-6 space-y-3 z-10">
-                  <div className="w-16 h-16 rounded-2xl bg-panel/80 border border-amber-500/30 flex items-center justify-center mx-auto text-amber-400 shadow-glow">
-                    <Film className="w-8 h-8 animate-pulse" />
-                  </div>
-                  <div className="space-y-1">
-                    <div className="font-cinzel text-sm uppercase font-bold tracking-widest text-obsidian-primary">
-                      A-Roll Primary Generation
-                    </div>
-                    <div className="font-mono text-[11px] text-obsidian-muted flex items-center justify-center gap-2">
-                      <span>{styleCode}</span>
-                      <span>&bull;</span>
-                      <span>{cameraCode}</span>
-                      <span>&bull;</span>
-                      <span>{lightingCode}</span>
-                    </div>
-                  </div>
-                </div>
+
+                {previewUrl && (
+                  /* eslint-disable-next-line @next/next/no-img-element */
+                  <img
+                    src={previewUrl}
+                    alt="A-Roll 360p Live Preview"
+                    className="w-full h-full object-cover pointer-events-auto"
+                  />
+                )}
 
                 {/* Animated Playback Progress Glow Bar */}
                 {isPlaying && (
-                  <div className="absolute bottom-0 left-0 right-0 h-1 bg-amber-500 animate-pulse shadow-glow" />
+                  <div className="absolute bottom-0 left-0 right-0 h-1 bg-amber-500 animate-pulse shadow-glow z-10" />
                 )}
               </div>
 
-              {/* Viewport A Overlay Header */}
-              <div className="relative z-20 p-2.5 flex items-center justify-between bg-gradient-to-b from-black/80 to-transparent text-[11px] font-mono">
-                <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 font-bold border border-amber-500/30">
-                  A-ROLL // LIVE GENERATION
-                </span>
-                <span className="px-1.5 py-0.5 rounded bg-black/60 text-obsidian-muted border border-border">
-                  4K DCI &bull; {aspectRatio}
-                </span>
-              </div>
+              {/* Layer 1: Normal Document Flow Container */}
+              <div className="relative z-10 flex flex-col justify-between min-h-full flex-1 w-full">
+                {/* Viewport A Header Bar */}
+                {(() => {
+                  const providerBadge = getProviderBadge(previewProvider);
+                  return (
+                    <div className="shrink-0 p-2 sm:p-2.5 flex items-center justify-between gap-1.5 bg-gradient-to-b from-black/80 to-transparent text-[10px] sm:text-[11px] font-mono">
+                      <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                        <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 font-bold border border-amber-500/30 shrink-0">
+                          A-ROLL<span className="hidden sm:inline">{" // LIVE GENERATION"}</span>
+                        </span>
+                        {providerBadge && (
+                          <span
+                            className={cn(
+                              "px-1.5 py-0.5 rounded border text-[9px] sm:text-[10px] font-bold shrink-0",
+                              providerBadge.className
+                            )}
+                          >
+                            {providerBadge.label}
+                          </span>
+                        )}
+                        {previewUrl && onGeneratePreview && (
+                          <button
+                            type="button"
+                            onClick={onGeneratePreview}
+                            disabled={isLoadingPreview}
+                            className="px-1.5 py-0.5 rounded bg-slate-800/80 hover:bg-slate-700 text-amber-400 border border-border flex items-center gap-1 transition-colors text-[9px] sm:text-[10px] shrink-0 disabled:opacity-50 cursor-pointer"
+                            title="Regenerate 360p Preview"
+                          >
+                            <Sparkles className="w-2.5 h-2.5" />
+                            <span>Regen</span>
+                          </button>
+                        )}
+                      </div>
+                      <span className="px-1.5 py-0.5 rounded bg-black/60 text-obsidian-muted border border-border shrink-0 text-[9px] sm:text-[10px]">
+                        360p PREVIEW &bull; {aspectRatio}
+                      </span>
+                    </div>
+                  );
+                })()}
 
-              {/* Viewport A Overlay Footer: Timecode & Frame */}
-              <div className="relative z-20 p-2.5 flex items-center justify-between bg-gradient-to-t from-black/90 to-transparent text-[11px] font-mono text-obsidian-secondary">
-                <div className="flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                  <span className="text-obsidian-primary font-bold">
-                    {formatTimecode(timecodeSeconds)}
-                  </span>
+                {/* Center Interactive Stage */}
+                {previewUrl && isLoadingPreview ? (
+                  <div className="flex-1 flex flex-col items-center justify-center p-4 my-auto bg-black/65 backdrop-blur-[2px] rounded-lg mx-2 text-center space-y-2 z-20">
+                    <div className="w-9 h-9 border-2 border-amber-500 border-t-transparent rounded-full animate-spin mx-auto shadow-glow" />
+                    <div className="font-mono text-xs text-amber-400 font-bold uppercase tracking-wider">
+                      Regenerating 360p Preview...
+                    </div>
+                    <div className="font-mono text-[10px] text-obsidian-muted">
+                      Polya AI Preview Engine &bull; {aspectRatio}
+                    </div>
+                  </div>
+                ) : !previewUrl ? (
+                  <div className="flex-1 flex flex-col items-center justify-center p-3 sm:p-4 my-auto text-center space-y-2.5">
+                    {isLoadingPreview ? (
+                      <div className="space-y-2">
+                        <div className="w-10 h-10 border-2 border-amber-500 border-t-transparent rounded-full animate-spin mx-auto shadow-glow" />
+                        <div className="font-mono text-xs text-amber-400 font-bold uppercase tracking-wider">
+                          Rendering 360p Preview...
+                        </div>
+                        <div className="font-mono text-[10px] text-obsidian-muted">
+                          Polya AI Preview Engine &bull; {aspectRatio}
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="w-12 h-12 rounded-xl bg-panel/80 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-glow">
+                          <Film className="w-6 h-6 animate-pulse" />
+                        </div>
+                        <div>
+                          <div className="font-cinzel text-xs sm:text-sm uppercase font-bold tracking-widest text-obsidian-primary">
+                            A-Roll Primary Generation
+                          </div>
+                          <div className="font-mono text-[10px] sm:text-[11px] text-obsidian-muted flex items-center justify-center gap-2 mt-0.5">
+                            <span>{styleCode}</span>
+                            <span>&bull;</span>
+                            <span>{cameraCode}</span>
+                            <span>&bull;</span>
+                            <span>{lightingCode}</span>
+                          </div>
+                        </div>
+
+                        {previewError && (
+                          <div className="px-3 py-1 rounded bg-rose-500/15 border border-rose-500/30 text-rose-300 font-mono text-[10px] max-w-xs">
+                            {previewError}
+                          </div>
+                        )}
+
+                        {onGeneratePreview && (
+                          <button
+                            type="button"
+                            onClick={onGeneratePreview}
+                            disabled={isLoadingPreview}
+                            className="mt-1 px-4 py-2 min-h-[38px] rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-mono font-bold text-xs flex items-center gap-1.5 shadow-glow transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
+                          >
+                            <Sparkles className="w-3.5 h-3.5" />
+                            <span>Generate 360p Preview</span>
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex-1" />
+                )}
+
+                {/* Bottom Footer Bar */}
+                <div className="shrink-0 p-2 sm:p-2.5 flex items-center justify-between bg-gradient-to-t from-black/90 to-transparent text-[11px] font-mono text-obsidian-secondary">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                    <span className="text-obsidian-primary font-bold">
+                      {formatTimecode(timecodeSeconds)}
+                    </span>
+                  </div>
+                  <span>FRAME {activeFrame.toString().padStart(5, "0")}</span>
                 </div>
-                <span>FRAME {activeFrame.toString().padStart(5, "0")}</span>
               </div>
             </div>
           )}
 
           {/* Viewport B: Reference Continuity Master (B-Roll / DNA Anchor) */}
-          {(viewportMode === "dual" || viewportMode === "b_roll") && (
-            <div
-              className={cn(
-                "relative rounded-lg overflow-hidden border border-border/80 bg-obsidian-canvas flex flex-col justify-between shadow-2xl group",
-                viewportMode === "dual" ? getAspectContainerClass() : getAspectContainerClass() + " w-full max-w-[800px]"
-              )}
-            >
-              {/* Reference Canvas Simulation */}
-              <div className="absolute inset-0 bg-gradient-to-tl from-black via-[#13171F] to-[#1E2530] flex items-center justify-center overflow-hidden">
-                <div className="absolute inset-0 opacity-[0.05] bg-[radial-gradient(#38bdf8_1px,transparent_1px)] [background-size:16px_16px]" />
-                
-                {/* Visual Viewport Placeholder Graphic */}
-                <div className="text-center p-6 space-y-3 z-10">
-                  <div className="w-16 h-16 rounded-2xl bg-panel/80 border border-blue-500/30 flex items-center justify-center mx-auto text-blue-400 shadow-sm">
-                    <Camera className="w-8 h-8" />
+          {(viewportMode === "dual" || viewportMode === "b_roll") && (() => {
+            const activeChar =
+              characterList?.find((c) => c.id === activeCharacterId) ||
+              characterList?.[0] ||
+              null;
+            const rawCharImageUrl =
+              activeChar?.front_image_url ||
+              activeChar?.closeup_image_url ||
+              activeChar?.three_quarter_image_url ||
+              activeChar?.side_image_url ||
+              null;
+            const charImageUrl = resolveMediaUrl(rawCharImageUrl);
+            const hasCharMedia = Boolean(charImageUrl && !charImgError);
+
+            return (
+              <div
+                className={cn(
+                  "relative rounded-lg overflow-hidden border border-border/80 bg-obsidian-canvas flex flex-col justify-between shadow-2xl group",
+                  viewportMode === "dual"
+                    ? getAspectContainerClass(hasCharMedia)
+                    : cn(getAspectContainerClass(hasCharMedia), "w-full max-w-[800px]")
+                )}
+              >
+                {/* Layer 0: Ambient Background & Character Media */}
+                <div className="absolute inset-0 bg-gradient-to-tl from-black via-[#13171F] to-[#1E2530] pointer-events-none z-0 overflow-hidden">
+                  <div className="absolute inset-0 opacity-[0.05] bg-[radial-gradient(#38bdf8_1px,transparent_1px)] [background-size:16px_16px]" />
+
+                  {hasCharMedia && (
+                    <div className="relative w-full h-full">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={charImageUrl!}
+                        alt={activeChar?.name || "Character Continuity Anchor"}
+                        onError={() => setCharImgError(true)}
+                        className="w-full h-full object-cover object-top pointer-events-auto"
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/30 pointer-events-none z-10" />
+                      <div className="absolute inset-0 border border-blue-500/20 pointer-events-none z-10" />
+                    </div>
+                  )}
+                </div>
+
+                {/* Layer 1: Normal Document Flow Container */}
+                <div className="relative z-10 flex flex-col justify-between min-h-full flex-1 w-full">
+                  {/* Viewport B Header Bar */}
+                  <div className="shrink-0 p-2 sm:p-2.5 flex items-center justify-between gap-1.5 bg-gradient-to-b from-black/80 to-transparent text-[10px] sm:text-[11px] font-mono">
+                    <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                      <span className="px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 font-bold border border-blue-500/30 shrink-0">
+                        B-ROLL<span className="hidden sm:inline">{" // DNA MASTER LOCK"}</span>
+                      </span>
+                      {characterList && characterList.length > 1 && onSelectCharacter && (
+                        <select
+                          value={activeChar?.id || ""}
+                          onChange={(e) => {
+                            setCharImgError(false);
+                            onSelectCharacter(e.target.value);
+                          }}
+                          className="px-1.5 py-0.5 rounded bg-black/80 text-blue-300 border border-blue-500/40 text-[9px] sm:text-[10px] font-mono focus:outline-none focus:ring-1 focus:ring-blue-400 max-w-[110px] sm:max-w-[140px] truncate cursor-pointer"
+                          title="Switch Active Continuity Anchor"
+                        >
+                          {characterList.map((c) => (
+                            <option key={c.id} value={c.id} className="bg-slate-900 text-white">
+                              {c.name}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      {characterList && characterList.length === 1 && activeChar && (
+                        <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/20 text-[9px] sm:text-[10px] truncate max-w-[100px]">
+                          {activeChar.name}
+                        </span>
+                      )}
+                    </div>
+                    {activeChar ? (
+                      <span className="px-1.5 py-0.5 rounded bg-black/60 text-emerald-400 border border-emerald-500/30 shrink-0 text-[9px] sm:text-[10px]">
+                        QC PASS
+                      </span>
+                    ) : (
+                      <span className="px-1.5 py-0.5 rounded bg-black/60 text-obsidian-muted border border-border shrink-0 text-[9px] sm:text-[10px]">
+                        NO ANCHOR
+                      </span>
+                    )}
                   </div>
-                  <div className="space-y-1">
-                    <div className="font-cinzel text-sm uppercase font-bold tracking-widest text-obsidian-primary">
-                      Reference Continuity Anchor
+
+                  {/* Center Interactive Stage or Caption */}
+                  {hasCharMedia ? (
+                    <div className="flex-1 flex flex-col justify-end px-3 pb-1">
+                      <div className="space-y-0.5">
+                        <div className="font-cinzel text-xs font-bold text-white tracking-wider flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+                          <span>{activeChar?.name}</span>
+                        </div>
+                        <div className="font-mono text-[9px] text-blue-300/80">
+                          DNA SEED #{activeChar?.dna_seed || "LOCKED"} &bull; {activeChar?.role || "LEAD"}
+                        </div>
+                      </div>
                     </div>
-                    <div className="font-mono text-[11px] text-obsidian-muted flex items-center justify-center gap-2">
-                      <span>Face Seed #Protagonist_01</span>
-                      <span>&bull;</span>
-                      <span>98.4% Match</span>
+                  ) : activeChar ? (
+                    <div className="flex-1 flex flex-col items-center justify-center p-3 sm:p-4 my-auto text-center space-y-2.5 max-w-xs mx-auto">
+                      <div className="w-12 h-12 rounded-xl bg-panel/80 border border-blue-500/30 flex items-center justify-center mx-auto text-blue-400 shadow-sm">
+                        <Camera className="w-6 h-6" />
+                      </div>
+                      <div className="space-y-1">
+                        <div className="font-cinzel text-xs sm:text-sm uppercase font-bold tracking-wider text-obsidian-primary">
+                          {activeChar.name}
+                        </div>
+                        <div className="font-mono text-[10px] sm:text-[11px] text-obsidian-muted">
+                          Role: {activeChar.role} &bull; DNA Seed #{activeChar.dna_seed || "Pending"}
+                        </div>
+                      </div>
+                      {projectId && (
+                        <Link
+                          href={`/projects/${projectId}/bible#characters`}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 min-h-[36px] rounded-lg bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/40 text-blue-300 font-mono text-[11px] font-semibold transition-colors cursor-pointer"
+                        >
+                          <span>Upload Character Sheet</span>
+                        </Link>
+                      )}
                     </div>
+                  ) : (
+                    <div className="flex-1 flex flex-col items-center justify-center p-3 sm:p-4 my-auto text-center space-y-2.5 max-w-xs mx-auto">
+                      <div className="w-12 h-12 rounded-xl bg-panel/80 border border-border flex items-center justify-center mx-auto text-obsidian-muted shadow-sm">
+                        <Layers className="w-6 h-6" />
+                      </div>
+                      <div className="space-y-1">
+                        <div className="font-cinzel text-xs sm:text-sm uppercase font-bold tracking-wider text-obsidian-primary">
+                          No Character Anchor
+                        </div>
+                        <p className="font-mono text-[10px] sm:text-[11px] text-obsidian-muted">
+                          Lock visual continuity across shots with biometric facial DNA.
+                        </p>
+                      </div>
+                      {projectId && (
+                        <Link
+                          href={`/projects/${projectId}/bible#characters`}
+                          className="inline-flex items-center gap-1.5 px-4 py-2 min-h-[38px] rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-mono text-xs font-semibold shadow-md transition-all active:scale-95 cursor-pointer"
+                        >
+                          <Sparkles className="w-3.5 h-3.5" />
+                          <span>Configure DNA Lock</span>
+                        </Link>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Viewport B Footer Bar */}
+                  <div className="shrink-0 p-2 sm:p-2.5 flex items-center justify-between gap-1 bg-gradient-to-t from-black/90 to-transparent text-[10px] sm:text-[11px] font-mono text-obsidian-secondary">
+                    <span className="text-obsidian-muted truncate">
+                      {activeChar ? "INSIGHTFACE BIOMETRIC REF" : "CONTINUITY DISABLED"}
+                    </span>
+                    <span className="text-blue-400 font-semibold shrink-0">
+                      {activeChar ? "IMMUTABLE ANCHOR" : "UNLOCKED"}
+                    </span>
                   </div>
                 </div>
               </div>
-
-              {/* Viewport B Overlay Header */}
-              <div className="relative z-20 p-2.5 flex items-center justify-between bg-gradient-to-b from-black/80 to-transparent text-[11px] font-mono">
-                <span className="px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 font-bold border border-blue-500/30">
-                  B-ROLL // DNA MASTER LOCK
-                </span>
-                <span className="px-1.5 py-0.5 rounded bg-black/60 text-emerald-400 border border-emerald-500/30">
-                  QC PASS: 94.2
-                </span>
-              </div>
-
-              {/* Viewport B Overlay Footer */}
-              <div className="relative z-20 p-2.5 flex items-center justify-between bg-gradient-to-t from-black/90 to-transparent text-[11px] font-mono text-obsidian-secondary">
-                <span className="text-obsidian-muted">INSIGHTFACE BIOMETRIC REF</span>
-                <span className="text-blue-400 font-semibold">IMMUTABLE ANCHOR</span>
-              </div>
-            </div>
-          )}
+            );
+          })()}
         </div>
       </div>
 

@@ -10,10 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from backend.app.api.deps import get_current_user, get_session
-from backend.app.domain.story_writer import StagedStoryWriter, get_act_bounds
+from backend.app.domain.screenwriter import (
+    PolyaScreenwriterEngine,
+    extract_project_narrative_context,
+    get_act_bounds,
+    _determine_scene_duration,
+)
+from backend.app.domain.story_writer import StagedStoryWriter
 from backend.app.infrastructure.database.models.auth import UserModel
 from backend.app.infrastructure.database.models.character import CharacterModel
-from backend.app.infrastructure.database.models.project import ProjectModel
+from backend.app.infrastructure.database.models.project import MasterProductionBibleModel, ProjectModel
 from backend.app.infrastructure.database.models.story import SceneModel, ShotModel
 
 router = APIRouter(tags=["Scenes & Storyboard"])
@@ -46,17 +52,19 @@ class SceneAutoSplitRequest(BaseModel):
 
 
 class BlueprintTreatmentRequest(BaseModel):
-    total_scenes: int = Field(default=100, ge=1, le=500, description="Total scenes (50, 100, 200, 300, 400, 420)")
+    total_scenes: int = Field(default=100, ge=1, le=500, description="Total scenes (50, 100, 200, 300, 400, 420, 450)")
     duration_mode: str = Field(default="dynamic", description="dynamic | flat_10s | flat_15s | flat_5s")
     premise: str = Field(default="", description="Story premise / concept from director")
     clear_existing: bool = Field(default=False, description="Clear existing scenes if re-generating")
+    structure_type: str = Field(default="4_act", description="3_act | 4_act | youtube_viral | 5_act")
 
 
 class BlueprintActGenerateRequest(BaseModel):
-    act_number: int = Field(ge=1, le=4, description="Act to generate: 1 to 4")
+    act_number: int = Field(ge=1, le=5, description="Act to generate: 1 to 5")
     total_scenes: int = Field(default=100, ge=1, le=500, description="Total scenes planned")
     duration_mode: str = Field(default="dynamic", description="dynamic | flat_10s | flat_15s | flat_5s")
     auto_split_shots: bool = Field(default=True, description="Auto-split shots per scene")
+    structure_type: str = Field(default="4_act", description="3_act | 4_act | youtube_viral | 5_act")
 
 
 class BlueprintBatchWriteRequest(BaseModel):
@@ -65,6 +73,11 @@ class BlueprintBatchWriteRequest(BaseModel):
     premise: str = Field(default="")
     auto_split_shots: bool = Field(default=True)
     clear_existing: bool = Field(default=True)
+    structure_type: str = Field(default="4_act")
+
+
+class StructureRecommendationRequest(BaseModel):
+    total_scenes: int = Field(default=100, ge=1, le=500, description="Planned total scenes")
 
 
 class DialogueCalibrationRequest(BaseModel):
@@ -72,6 +85,12 @@ class DialogueCalibrationRequest(BaseModel):
     character_name: str = Field(default="Protagonist", description="Speaking character")
     target_language: str = Field(default="id-ID", description="Target locale: id-ID, en-US")
     max_seconds: float = Field(default=5.0, ge=1.0, le=60.0, description="Maximum duration limit")
+
+
+class SceneAttachPreviewRequest(BaseModel):
+    preview_url: str = Field(..., description="Local or remote URL of the preview image")
+    preview_provider: str = Field(default="google_flow", description="Provider used, e.g. google_flow, sd35_large_hf, 9router")
+    job_id: str | None = Field(default=None, description="Flow or external job ID if applicable")
 
 
 SHOT_CAMERA_TEMPLATES = [
@@ -204,11 +223,25 @@ async def list_project_scenes(
     stmt = stmt.order_by(SceneModel.act_number.asc(), SceneModel.scene_number.asc())
     scenes = (await session.execute(stmt)).scalars().all()
 
+    scene_ids = [s.id for s in scenes]
+    shots_by_scene: dict[uuid.UUID, list[ShotModel]] = {}
+    if scene_ids:
+        shots_stmt = select(ShotModel).where(ShotModel.scene_id.in_(scene_ids)).order_by(ShotModel.shot_number.asc())
+        all_shots = (await session.execute(shots_stmt)).scalars().all()
+        for sh in all_shots:
+            shots_by_scene.setdefault(sh.scene_id, []).append(sh)
+
     data = []
     for s in scenes:
-        # Get shot count for each scene
-        shots_count_stmt = select(func.count(ShotModel.id)).where(ShotModel.scene_id == s.id)
-        shot_count = (await session.execute(shots_count_stmt)).scalar() or 0
+        scene_shots = shots_by_scene.get(s.id, [])
+        shot_count = len(scene_shots)
+        primary_shot = scene_shots[0] if scene_shots else None
+
+        preview_url = None
+        preview_provider = None
+        if primary_shot and isinstance(primary_shot.fg_bg_layers, dict):
+            preview_url = primary_shot.fg_bg_layers.get("preview_url")
+            preview_provider = primary_shot.fg_bg_layers.get("preview_provider")
 
         data.append(
             {
@@ -221,6 +254,8 @@ async def list_project_scenes(
                 "duration_target": s.duration_target,
                 "status": s.status,
                 "shots_count": shot_count,
+                "preview_url": preview_url,
+                "preview_provider": preview_provider,
                 "created_at": s.created_at.isoformat(),
             }
         )
@@ -228,47 +263,22 @@ async def list_project_scenes(
     return {"data": data, "total_scenes": len(data)}
 
 
-def _calculate_act_and_beat(scene_num: int, total_scenes: int) -> tuple[int, str]:
-    """Calculate Act number (1-4) and dramatic beat for arbitrary total scene count."""
-    if total_scenes == 50:
-        act1_end, act2_end, act3_end = 12, 25, 38
-        act1_mid = 6
-        act3_mid = 35
-        act4_mid = 45
-    else:
-        act1_end = max(1, int(round(total_scenes * 0.25)))
-        act2_end = max(act1_end + 1, int(round(total_scenes * 0.50)))
-        act3_end = max(act2_end + 1, int(round(total_scenes * 0.75)))
-        act1_mid = max(1, int(round(act1_end * 0.5)))
-        act3_mid = act2_end + max(1, int(round((act3_end - act2_end) * 0.5)))
-        act4_mid = act3_end + max(1, int(round((total_scenes - act3_end) * 0.5)))
-
-    if scene_num <= act1_end:
-        act = 1
-        beat = (
-            "The Setup & Inciting Incident"
-            if scene_num == act1_mid
-            else ("Plot Point 1" if scene_num == act1_end else "World Ordinary Life")
-        )
-    elif scene_num <= act2_end:
-        act = 2
-        beat = "Midpoint Reversal" if scene_num == act2_end else "Rising Stakes & Trials"
-    elif scene_num <= act3_end:
-        act = 3
-        beat = (
-            "All is Lost Crisis"
-            if scene_num == act3_mid
-            else ("Plot Point 2 Breakthrough" if scene_num == act3_end else "Dark Night of Soul")
-        )
-    else:
-        act = 4
-        beat = (
-            "Climactic Confrontation"
-            if scene_num == act4_mid
-            else ("Final Catharsis & Resolution" if scene_num == total_scenes else "Race to the Climax")
-        )
-
-    return act, beat
+def _calculate_act_and_beat(scene_num: int, total_scenes: int, structure_type: str = "4_act") -> tuple[int, str]:
+    """Calculate Act number and dramatic beat dynamically based on structure."""
+    bounds = get_act_bounds(total_scenes, structure_type=structure_type)
+    for act_idx, (b_start, b_end) in enumerate(bounds):
+        if b_start <= scene_num <= b_end:
+            act = act_idx + 1
+            act_len = max(1, b_end - b_start + 1)
+            rel_pos = (scene_num - b_start) / act_len
+            if rel_pos < 0.33:
+                beat = f"Act {act} Setup & Initial Momentum"
+            elif rel_pos < 0.67:
+                beat = f"Act {act} Mid-Point Escalation"
+            else:
+                beat = f"Act {act} Climax Transition"
+            return act, beat
+    return len(bounds), "Final Catharsis & Resolution"
 
 
 def _determine_scene_duration(act: int, duration_mode: str) -> float:
@@ -281,10 +291,10 @@ def _determine_scene_duration(act: int, duration_mode: str) -> float:
     elif mode == "flat_5s":
         return 5.0
     elif mode == "dynamic":
-        # Hollywood cinematic pacing curve:
-        # Act I & III: Exposition, character depth, and emotional descent -> 15.0s
-        # Act II & IV: Rising tension, trials, and climactic action -> 10.0s
-        return 15.0 if act in (1, 3) else 10.0
+        # Hollywood cinematic pacing curve across acts 1 to 5:
+        # Odd acts (1, 3, 5): Exposition, character depth, and emotional descent -> 15.0s
+        # Even acts (2, 4): Rising tension, trials, and climactic action -> 10.0s
+        return 15.0 if act % 2 == 1 else 10.0
     return 10.0
 
 
@@ -295,158 +305,19 @@ async def create_or_blueprint_scenes(
     current_user: UserModel = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """Create a single scene or auto-generate the complete 50-to-420 Scene 4-Act Hollywood blueprint."""
+    """Create a single scene. Legacy instant blueprint is deprecated in favor of Polya AI Screenwriter."""
     project = await _resolve_project(project_id, session)
     now = datetime.now(timezone.utc)
 
     if payload.generate_blueprint:
-        if payload.clear_existing:
-            await session.execute(delete(SceneModel).where(SceneModel.project_id == project.id))
-
-        total_scenes = payload.total_scenes
-        duration_mode = payload.duration_mode
-        auto_split = payload.auto_split_shots
-
-        preset_data = (project.settings or {}).get("preset_data", {})
-        cold_open_cfg = preset_data.get("storyboard_defaults", {}).get("cold_open_30s", {})
-        cold_open_enabled = bool(cold_open_cfg.get("enabled", False))
-
-        # Bulk construct SceneModel and ShotModel entities in memory
-        created_scenes: list[SceneModel] = []
-        created_shots: list[ShotModel] = []
-
-        for num in range(1, total_scenes + 1):
-            act, beat = _calculate_act_and_beat(num, total_scenes)
-            pad_width = 3 if total_scenes >= 100 else 2
-            scene_id = uuid.uuid4()
-
-            if cold_open_enabled and act == 1 and num in (1, 2, 3):
-                duration_target = 10.0
-                if num == 1:
-                    slug = "SCENE 01 - INT/EXT. HIGH-VELOCITY CHAOS - DAY (COLD OPEN 0-10S)"
-                    goal = "In-Media-Res Shock Hook + Hero Prop Reveal: Immediate high-energy visual shock hook in media res, dramatic hero prop reveal, dynamic camera movement."
-                elif num == 2:
-                    slug = "SCENE 02 - EXT. RUNAWAY SLAPSTICK OBSTACLE COURSE - CONTINUOUS (COLD OPEN 10-20S)"
-                    goal = "Fast Slapstick Chaos Tease + Main Obstacle/Rival: Fast-paced comedic chaos tease, introduce antagonist/rival obstacle, rapid slapstick gag escalation."
-                else:  # num == 3
-                    slug = "SCENE 03 - EXT. PREVIEW OF THE ULTIMATE CLIMAX - CONTINUOUS (COLD OPEN 20-30S)"
-                    goal = "Peak Climax Preview + Freeze-Frame/Rewind Transition ke Scene 04: Preview of peak catastrophic climax, abrupt comical freeze-frame / VHS rewind sound effect transitioning to linear story at Scene 04 (Ordinary World)."
-            elif cold_open_enabled and act == 1 and num == 4:
-                duration_target = _determine_scene_duration(act, duration_mode)
-                slug = "SCENE 04 - INT. PROTAGONIST HOME / WORKSPACE - MORNING (ACT I: ORDINARY WORLD BEGINS)"
-                goal = "Linear Narrative Setup (Act I: Ordinary World): Introduction of protagonist's routine, desires, and mundane life before the inciting incident."
-            else:
-                duration_target = _determine_scene_duration(act, duration_mode)
-                slug = f"SCENE {str(num).zfill(pad_width)} - {project.title.upper()} - ACT {act}"
-                goal = f"Beat: {beat}. Scene narrative objective for cinematic progression."
-
-            scene = SceneModel(
-                id=scene_id,
-                project_id=project.id,
-                act_number=act,
-                scene_number=num,
-                slugline=slug,
-                narrative_goal=goal,
-                duration_target=duration_target,
-                status="PLANNED",
-                created_at=now,
-            )
-            created_scenes.append(scene)
-
-            if auto_split:
-                if duration_target <= 5.0:
-                    needed_shots = 1
-                elif duration_target <= 10.0:
-                    needed_shots = 2
-                else:
-                    needed_shots = 3
-
-                shot_duration = 5.0
-                for i in range(needed_shots):
-                    if cold_open_enabled and act == 1 and num in (1, 2, 3):
-                        if num == 1:
-                            c_code = "#Cam 19" if i == 0 else "#Cam 23"
-                            l_code = "#Lens 04" if i == 0 else "#Lens 02"
-                            cp_code = "#Comp 03" if i == 0 else "#Comp 01"
-                            sp_code = "#Speed 04"
-                            dlg = (
-                                "[SFX: Instant High-Pitched Comedic Whistle & Dramatic Boing - Protagonist eyes bulge in extreme close-up!]"
-                                if i == 0
-                                else "[SFX: Rapid Hero Prop Reveal Whoosh & Shimmering Bell Chime]"
-                            )
-                            trans = "NONE" if i == 0 else "J_CUT"
-                        elif num == 2:
-                            c_code = "#Cam 25" if i == 0 else "#Cam 06"
-                            l_code = "#Lens 02" if i == 0 else "#Lens 04"
-                            cp_code = "#Comp 01" if i == 0 else "#Comp 02"
-                            sp_code = "#Speed 04"
-                            dlg = (
-                                "[SFX: Rapid Slip, Cartoon Car Horn Honk & Exaggerated Shocked Gasp as Rival Appears]"
-                                if i == 0
-                                else "[SFX: Escalating Anvil Drop Whistle & Frantic Running Sound FX]"
-                            )
-                            trans = "NONE" if i == 0 else "J_CUT"
-                        else:  # num == 3
-                            c_code = "#Cam 19" if i == 0 else "#Cam 25"
-                            l_code = "#Lens 04" if i == 0 else "#Lens 03"
-                            cp_code = "#Comp 03"
-                            sp_code = "#Speed 04" if i == 0 else "#Speed 03"
-                            dlg = (
-                                "[SFX: Dramatic Orchestral Climax Swell Leading Directly to Disaster]"
-                                if i == 0
-                                else "[SFX: Record Scratch & VHS High-Speed Tape Rewind - 'Yep, that's me... you're probably wondering how I ended up here!']"
-                            )
-                            trans = "NONE" if i == 0 else "L_CUT"
-
-                        new_shot = ShotModel(
-                            id=uuid.uuid4(),
-                            scene_id=scene_id,
-                            shot_number=i + 1,
-                            duration_seconds=shot_duration,
-                            camera_code=c_code,
-                            lens_code=l_code,
-                            comp_code=cp_code,
-                            light_code="#Light 02",
-                            act_code="#Act 01",
-                            speed_code=sp_code,
-                            dialogue=dlg,
-                            transition_type=trans,
-                            status="PLANNED",
-                            created_at=now,
-                        )
-                    else:
-                        template = SHOT_CAMERA_TEMPLATES[min(i, len(SHOT_CAMERA_TEMPLATES) - 1)]
-                        new_shot = ShotModel(
-                            id=uuid.uuid4(),
-                            scene_id=scene_id,
-                            shot_number=i + 1,
-                            duration_seconds=shot_duration,
-                            camera_code=template["camera_code"],
-                            lens_code=template["lens_code"],
-                            comp_code=template["comp_code"],
-                            light_code=template["light_code"],
-                            act_code=template["act_code"],
-                            speed_code=template["speed_code"],
-                            status="PLANNED",
-                            created_at=now,
-                        )
-                    created_shots.append(new_shot)
-
-        # Single bulk transaction for SQLite performance & concurrency safety
-        session.add_all(created_scenes)
-        if created_shots:
-            session.add_all(created_shots)
-        await session.commit()
-
-        return {
-            "data": {
-                "message": f"Generated complete {len(created_scenes)}-Scene 4-Act Hollywood blueprint.",
-                "scenes_generated": len(created_scenes),
-                "shots_generated": len(created_shots),
-                "total_scenes": len(created_scenes),
-                "duration_mode": duration_mode,
-            }
-        }
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Legacy instant structural blueprint is deprecated. "
+                "Please use the Polya AI Screenplay Writer pipeline via /blueprint/treatment "
+                "and /blueprint/generate-act to generate calibrated scenes without mock fallbacks."
+            ),
+        )
 
     scene = SceneModel(
         id=uuid.uuid4(),
@@ -478,6 +349,39 @@ async def create_or_blueprint_scenes(
     }
 
 
+@router.post("/projects/{project_id}/blueprint/recommend-structure", status_code=status.HTTP_200_OK)
+async def recommend_narrative_structure(
+    project_id: str,
+    payload: StructureRecommendationRequest | None = None,
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Polya AI Strategic Advisory: Analyze project narrative and recommend optimal dramatic structure."""
+    project = await _resolve_project(project_id, session)
+    total_scenes = payload.total_scenes if payload else 100
+
+    bible_stmt = (
+        select(MasterProductionBibleModel)
+        .where(MasterProductionBibleModel.project_id == project.id)
+        .order_by(MasterProductionBibleModel.version.desc())
+        .limit(1)
+    )
+    bible = (await session.execute(bible_stmt)).scalar_one_or_none()
+
+    try:
+        project_ctx = extract_project_narrative_context(project, bible=bible)
+    except Exception:
+        project_ctx = None
+
+    writer = PolyaScreenwriterEngine()
+    advisory = writer.analyze_narrative_structure(
+        project_context=project_ctx,
+        title=project.title,
+        total_scenes=total_scenes,
+    )
+    return {"data": advisory}
+
+
 @router.post("/projects/{project_id}/blueprint/treatment", status_code=status.HTTP_200_OK)
 async def generate_blueprint_treatment(
     project_id: str,
@@ -485,7 +389,7 @@ async def generate_blueprint_treatment(
     current_user: UserModel = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """Phase A: Generate 4-Act Master Story Treatment and Beat Sheet."""
+    """Phase A: Generate Master Story Treatment and Beat Sheet strictly via Polya AI Screenwriter."""
     project = await _resolve_project(project_id, session)
 
     if payload.clear_existing:
@@ -495,27 +399,54 @@ async def generate_blueprint_treatment(
     char_stmt = select(CharacterModel).where(CharacterModel.project_id == project.id)
     characters_list = (await session.execute(char_stmt)).scalars().all()
     chars_data = [
-        {"name": c.name, "role": c.role, "base_prompt": c.base_prompt}
+        {
+            "name": c.name,
+            "role": c.role,
+            "base_prompt": c.base_prompt,
+            "narrative_summary": getattr(c, "narrative_summary", "") or "",
+        }
         for c in characters_list
     ]
+
+    bible_stmt = (
+        select(MasterProductionBibleModel)
+        .where(MasterProductionBibleModel.project_id == project.id)
+        .order_by(MasterProductionBibleModel.version.desc())
+        .limit(1)
+    )
+    bible = (await session.execute(bible_stmt)).scalar_one_or_none()
+
+    try:
+        project_ctx = extract_project_narrative_context(project, bible=bible)
+    except Exception:
+        project_ctx = None
 
     preset_data = (project.settings or {}).get("preset_data", {})
     cold_open_cfg = preset_data.get("storyboard_defaults", {}).get("cold_open_30s")
 
-    writer = StagedStoryWriter()
-    treatment = await writer.generate_treatment(
-        title=project.title,
-        total_scenes=payload.total_scenes,
-        premise=payload.premise,
-        characters=chars_data,
-        cold_open_30s=cold_open_cfg,
-    )
+    writer = PolyaScreenwriterEngine()
+    try:
+        treatment = await writer.generate_master_treatment(
+            project_context=project_ctx,
+            title=project.title,
+            total_scenes=payload.total_scenes,
+            premise=payload.premise,
+            characters=chars_data,
+            cold_open_30s=cold_open_cfg,
+            structure_type=payload.structure_type,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Polya AI Screenplay Treatment generation failed: {exc}",
+        )
 
     if not isinstance(project.settings, dict):
         project.settings = {}
     project.settings["treatment"] = treatment
     project.settings["treatment"]["duration_mode"] = payload.duration_mode
     project.settings["treatment"]["total_scenes"] = payload.total_scenes
+    project.settings["treatment"]["structure_type"] = payload.structure_type
     if "act_summaries" not in project.settings["treatment"]:
         project.settings["treatment"]["act_summaries"] = {}
     flag_modified(project, "settings")
@@ -531,16 +462,34 @@ async def generate_blueprint_act(
     current_user: UserModel = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """Phase B: Generate scenes and auto-split shots for a single Act with persistent context chaining."""
+    """Phase B: Generate scenes and auto-split shots for a single Act strictly via Polya AI Screenwriter."""
     project = await _resolve_project(project_id, session)
     now = datetime.now(timezone.utc)
 
     char_stmt = select(CharacterModel).where(CharacterModel.project_id == project.id)
     characters_list = (await session.execute(char_stmt)).scalars().all()
     chars_data = [
-        {"name": c.name, "role": c.role, "base_prompt": c.base_prompt}
+        {
+            "name": c.name,
+            "role": c.role,
+            "base_prompt": c.base_prompt,
+            "narrative_summary": getattr(c, "narrative_summary", "") or "",
+        }
         for c in characters_list
     ]
+
+    bible_stmt = (
+        select(MasterProductionBibleModel)
+        .where(MasterProductionBibleModel.project_id == project.id)
+        .order_by(MasterProductionBibleModel.version.desc())
+        .limit(1)
+    )
+    bible = (await session.execute(bible_stmt)).scalar_one_or_none()
+
+    try:
+        project_ctx = extract_project_narrative_context(project, bible=bible)
+    except Exception:
+        project_ctx = None
 
     preset_data = (project.settings or {}).get("preset_data", {})
     cold_open_cfg = (
@@ -552,18 +501,29 @@ async def generate_blueprint_act(
     )
 
     treatment = (project.settings or {}).get("treatment")
-    writer = StagedStoryWriter()
+    structure_type = payload.structure_type or (treatment or {}).get("structure_type", "4_act")
+
+    writer = PolyaScreenwriterEngine()
     if not treatment:
-        treatment = await writer.generate_treatment(
-            title=project.title,
-            total_scenes=payload.total_scenes,
-            characters=chars_data,
-            cold_open_30s=cold_open_cfg,
-        )
+        try:
+            treatment = await writer.generate_master_treatment(
+                project_context=project_ctx,
+                title=project.title,
+                total_scenes=payload.total_scenes,
+                characters=chars_data,
+                cold_open_30s=cold_open_cfg,
+                structure_type=structure_type,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Polya AI Screenplay Treatment generation failed: {exc}",
+            )
         if not isinstance(project.settings, dict):
             project.settings = {}
         project.settings["treatment"] = treatment
         project.settings["treatment"]["act_summaries"] = {}
+        project.settings["treatment"]["structure_type"] = structure_type
         flag_modified(project, "settings")
         await session.commit()
     elif cold_open_cfg and "cold_open_30s" not in treatment:
@@ -575,15 +535,23 @@ async def generate_blueprint_act(
     act_summaries_raw = (project.settings.get("treatment", {})).get("act_summaries", {})
     prev_summaries = {int(k): v for k, v in act_summaries_raw.items() if k.isdigit()}
 
-    act_result = await writer.generate_act_scenes(
-        act_number=payload.act_number,
-        total_scenes=payload.total_scenes,
-        treatment=treatment,
-        previous_act_summaries=prev_summaries,
-        characters=chars_data,
-        duration_mode=payload.duration_mode,
-        cold_open_30s=cold_open_cfg,
-    )
+    try:
+        act_result = await writer.generate_act_scenes(
+            act_number=payload.act_number,
+            total_scenes=payload.total_scenes,
+            treatment=treatment,
+            project_context=project_ctx,
+            previous_act_summaries=prev_summaries,
+            characters=chars_data,
+            duration_mode=payload.duration_mode,
+            cold_open_30s=cold_open_cfg,
+            structure_type=structure_type,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Polya AI Act {payload.act_number} generation failed: {exc}",
+        )
 
     scenes_data = act_result["scenes"]
     act_summary = act_result["act_summary"]
@@ -609,13 +577,38 @@ async def generate_blueprint_act(
         pad = 3 if payload.total_scenes >= 100 else 2
         scene_status = "FALLBACK" if sc_info.get("is_fallback") else "PLANNED"
 
+        slugline = sc_info.get("slugline") or f"SCENE {str(s_num).zfill(pad)} - INT. LOCATION - NIGHT"
+        narrative_goal = sc_info.get("narrative_goal") or f"Act {payload.act_number} dramatic progression."
+
+        if cold_open_active:
+            if s_num == 1:
+                if "COLD OPEN" not in slugline:
+                    slugline = f"{slugline} (COLD OPEN 0-10S)"
+                if "In-Media-Res Shock Hook" not in narrative_goal:
+                    narrative_goal = f"In-Media-Res Shock Hook + Hero Prop Reveal: {narrative_goal}"
+            elif s_num == 2:
+                if "COLD OPEN" not in slugline:
+                    slugline = f"{slugline} (COLD OPEN 10-20S)"
+                if "Fast Slapstick Chaos Tease" not in narrative_goal:
+                    narrative_goal = f"Fast Slapstick Chaos Tease + Main Obstacle/Rival: {narrative_goal}"
+            elif s_num == 3:
+                if "COLD OPEN" not in slugline:
+                    slugline = f"{slugline} (COLD OPEN 20-30S)"
+                if "Peak Climax Preview" not in narrative_goal:
+                    narrative_goal = f"Peak Climax Preview + Freeze-Frame/Rewind Transition ke Scene 04: {narrative_goal}"
+            elif s_num == 4:
+                if "ORDINARY WORLD BEGINS" not in slugline:
+                    slugline = f"{slugline} (ACT I: ORDINARY WORLD BEGINS)"
+                if "Ordinary World" not in narrative_goal:
+                    narrative_goal = f"Linear Narrative Setup (Act I: Ordinary World): {narrative_goal}"
+
         scene = SceneModel(
             id=scene_id,
             project_id=project.id,
             act_number=payload.act_number,
             scene_number=s_num,
-            slugline=sc_info.get("slugline") or f"SCENE {str(s_num).zfill(pad)} - INT. LOCATION - NIGHT",
-            narrative_goal=sc_info.get("narrative_goal") or f"Act {payload.act_number} dramatic progression.",
+            slugline=slugline,
+            narrative_goal=narrative_goal,
             duration_target=duration_target,
             status=scene_status,
             created_at=now,
@@ -640,10 +633,17 @@ async def generate_blueprint_act(
                         l_code = "#Lens 04" if i == 0 else "#Lens 02"
                         cp_code = "#Comp 03" if i == 0 else "#Comp 01"
                         sp_code = "#Speed 04"
-                        dlg = primary_dialogue if (i == 0 and primary_dialogue) else (
-                            "[SFX: Instant High-Pitched Comedic Whistle & Dramatic Boing - Protagonist eyes bulge in extreme close-up!]"
-                            if i == 0
-                            else "[SFX: Rapid Hero Prop Reveal Whoosh & Shimmering Bell Chime]"
+                        dlg = (
+                            primary_dialogue if (i == 0 and primary_dialogue and "[SFX:" in primary_dialogue)
+                            else (
+                                f"[SFX: Instant High-Pitched Comedic Whistle & Boing - {primary_dialogue}]"
+                                if (i == 0 and primary_dialogue)
+                                else (
+                                    "[SFX: Instant High-Pitched Comedic Whistle & Dramatic Boing - Protagonist eyes bulge in extreme close-up!]"
+                                    if i == 0
+                                    else "[SFX: Rapid Hero Prop Reveal Whoosh & Shimmering Bell Chime]"
+                                )
+                            )
                         )
                         trans = "NONE" if i == 0 else "J_CUT"
                     elif s_num == 2:
@@ -651,10 +651,17 @@ async def generate_blueprint_act(
                         l_code = "#Lens 02" if i == 0 else "#Lens 04"
                         cp_code = "#Comp 01" if i == 0 else "#Comp 02"
                         sp_code = "#Speed 04"
-                        dlg = primary_dialogue if (i == 0 and primary_dialogue) else (
-                            "[SFX: Rapid Slip, Cartoon Car Horn Honk & Exaggerated Shocked Gasp as Rival Appears]"
-                            if i == 0
-                            else "[SFX: Escalating Anvil Drop Whistle & Frantic Running Sound FX]"
+                        dlg = (
+                            primary_dialogue if (i == 0 and primary_dialogue and "[SFX:" in primary_dialogue)
+                            else (
+                                f"[SFX: Fast Slapstick Chaos - {primary_dialogue}]"
+                                if (i == 0 and primary_dialogue)
+                                else (
+                                    "[SFX: Rapid Slip, Cartoon Car Horn Honk & Exaggerated Shocked Gasp as Rival Appears]"
+                                    if i == 0
+                                    else "[SFX: Escalating Anvil Drop Whistle & Frantic Running Sound FX]"
+                                )
+                            )
                         )
                         trans = "NONE" if i == 0 else "J_CUT"
                     else:  # s_num == 3
@@ -662,10 +669,17 @@ async def generate_blueprint_act(
                         l_code = "#Lens 04" if i == 0 else "#Lens 03"
                         cp_code = "#Comp 03"
                         sp_code = "#Speed 04" if i == 0 else "#Speed 03"
-                        dlg = primary_dialogue if (i == 0 and primary_dialogue) else (
-                            "[SFX: Dramatic Orchestral Climax Swell Leading Directly to Disaster]"
-                            if i == 0
-                            else "[SFX: Record Scratch & VHS High-Speed Tape Rewind - 'Yep, that's me... you're probably wondering how I ended up here!']"
+                        dlg = (
+                            primary_dialogue if (i == 0 and primary_dialogue and "[SFX:" in primary_dialogue)
+                            else (
+                                f"[SFX: Peak Climax Preview - {primary_dialogue}]"
+                                if (i == 0 and primary_dialogue)
+                                else (
+                                    "[SFX: Dramatic Orchestral Climax Swell Leading Directly to Disaster]"
+                                    if i == 0
+                                    else "[SFX: Record Scratch & VHS High-Speed Tape Rewind - 'Yep, that's me... you're probably wondering how I ended up here!']"
+                                )
+                            )
                         )
                         trans = "NONE" if i == 0 else "L_CUT"
 
@@ -740,8 +754,8 @@ async def generate_blueprint_act(
             "end_scene": act_result["end_scene"],
             "act_summary": act_summary,
             "total_saved_for_project": total_saved,
-            "used_fallback": act_result["used_fallback"],
-            "generator_type": "procedural_fallback" if act_result["used_fallback"] else "llm_writer",
+            "used_fallback": False,
+            "generator_type": "polya_llm_screenwriter",
         }
     }
 
@@ -758,9 +772,13 @@ async def get_blueprint_status(
     treatment = (project.settings or {}).get("treatment")
     act_summaries = (treatment or {}).get("act_summaries", {})
     act_fallbacks = (treatment or {}).get("act_fallbacks", {})
+    structure_type = (treatment or {}).get("structure_type", "4_act")
+    total_scenes_val = (treatment or {}).get("total_scenes", 100)
+    bounds = get_act_bounds(total_scenes_val, structure_type=structure_type)
+    num_acts = len(bounds)
 
     act_counts: dict[int, int] = {}
-    for act in range(1, 5):
+    for act in range(1, num_acts + 1):
         st = select(func.count(SceneModel.id)).where(
             SceneModel.project_id == project.id,
             SceneModel.act_number == act,
@@ -798,22 +816,28 @@ async def batch_write_blueprint(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """Full end-to-end staged generation: Phase A treatment followed by sequential Phase B Acts."""
+    structure_type = payload.structure_type or "4_act"
+    bounds = get_act_bounds(payload.total_scenes, structure_type=structure_type)
+    num_acts = len(bounds)
+
     treatment_req = BlueprintTreatmentRequest(
         total_scenes=payload.total_scenes,
         duration_mode=payload.duration_mode,
         premise=payload.premise,
         clear_existing=payload.clear_existing,
+        structure_type=structure_type,
     )
     treatment_resp = await generate_blueprint_treatment(project_id, treatment_req, current_user, session)
     treatment_data = treatment_resp["data"]
 
     results = []
-    for act in range(1, 5):
+    for act in range(1, num_acts + 1):
         act_req = BlueprintActGenerateRequest(
             act_number=act,
             total_scenes=payload.total_scenes,
             duration_mode=payload.duration_mode,
             auto_split_shots=payload.auto_split_shots,
+            structure_type=structure_type,
         )
         act_resp = await generate_blueprint_act(project_id, act_req, current_user, session)
         results.append(act_resp["data"])
@@ -832,7 +856,7 @@ async def batch_write_blueprint(
 
     return {
         "data": {
-            "message": f"Successfully completed 4-Act staged generation for {total_scenes_cnt} scenes.",
+            "message": f"Successfully completed {num_acts}-Act staged generation for {total_scenes_cnt} scenes.",
             "total_scenes": total_scenes_cnt,
             "total_shots": total_shots_cnt,
             "treatment": treatment_data,
@@ -854,14 +878,16 @@ async def get_scene(
     if not scene:
         raise HTTPException(status_code=404, detail="Scene not found")
 
-    # Fetch preview_url from shots if generated
+    # Fetch preview_url and preview_provider from shots if generated
     shot_stmt = select(ShotModel).where(ShotModel.scene_id == s_uuid).order_by(ShotModel.shot_number.asc())
     shots = (await session.execute(shot_stmt)).scalars().all()
     preview_url = None
-    for sh in shots:
-        if isinstance(sh.fg_bg_layers, dict) and sh.fg_bg_layers.get("preview_url"):
-            preview_url = sh.fg_bg_layers.get("preview_url")
-            break
+    preview_provider = None
+    if shots:
+        primary = shots[0]
+        if isinstance(primary.fg_bg_layers, dict):
+            preview_url = primary.fg_bg_layers.get("preview_url")
+            preview_provider = primary.fg_bg_layers.get("preview_provider")
 
     return {
         "data": {
@@ -874,8 +900,80 @@ async def get_scene(
             "duration_target": scene.duration_target,
             "status": scene.status,
             "preview_url": preview_url,
+            "preview_provider": preview_provider,
             "created_at": scene.created_at.isoformat(),
         }
+    }
+
+
+@router.post("/scenes/{scene_id}/attach-preview", status_code=status.HTTP_200_OK)
+async def attach_scene_preview(
+    scene_id: str,
+    payload: SceneAttachPreviewRequest,
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Attach generated preview image to shot #1 of the scene via non-destructive JSON merge."""
+    try:
+        s_uuid = uuid.UUID(scene_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid scene UUID")
+
+    scene_stmt = select(SceneModel).where(SceneModel.id == s_uuid)
+    scene = (await session.execute(scene_stmt)).scalar_one_or_none()
+    if not scene:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scene not found")
+
+    shot_stmt = select(ShotModel).where(ShotModel.scene_id == s_uuid).order_by(ShotModel.shot_number.asc())
+    shots = (await session.execute(shot_stmt)).scalars().all()
+    primary_shot = shots[0] if shots else None
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    if primary_shot:
+        current_layers = dict(primary_shot.fg_bg_layers or {}) if isinstance(primary_shot.fg_bg_layers, dict) else {}
+        # Non-destructive JSON merge: retain old keys, only add/update preview_url, preview_provider, job_id, updated_at
+        current_layers["preview_url"] = payload.preview_url
+        current_layers["preview_provider"] = payload.preview_provider
+        if payload.job_id:
+            current_layers["job_id"] = payload.job_id
+        current_layers["updated_at"] = now_iso
+        primary_shot.fg_bg_layers = current_layers
+        flag_modified(primary_shot, "fg_bg_layers")
+    else:
+        current_layers = {
+            "preview_url": payload.preview_url,
+            "preview_provider": payload.preview_provider,
+            "job_id": payload.job_id,
+            "updated_at": now_iso,
+        }
+        primary_shot = ShotModel(
+            id=uuid.uuid4(),
+            scene_id=scene.id,
+            shot_number=1,
+            duration_seconds=scene.duration_target,
+            camera_code="#Cam 01",
+            lens_code="#Lens 01",
+            comp_code="#Comp 01",
+            light_code="#Light 01",
+            act_code="#Act 01",
+            speed_code="#Speed 01",
+            fg_bg_layers=current_layers,
+            status="PLANNED",
+            created_at=datetime.now(timezone.utc),
+        )
+        session.add(primary_shot)
+
+    await session.commit()
+    await session.refresh(primary_shot)
+
+    return {
+        "status": "success",
+        "scene_id": str(scene.id),
+        "shot_id": str(primary_shot.id),
+        "preview_url": payload.preview_url,
+        "preview_provider": payload.preview_provider,
+        "fg_bg_layers": primary_shot.fg_bg_layers,
     }
 
 

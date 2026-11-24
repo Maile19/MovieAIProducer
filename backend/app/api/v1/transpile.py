@@ -31,6 +31,7 @@ class TranspileRequest(BaseModel):
     aspect_ratio: str = Field(default="16:9", description="16:9 or 9:16")
     preset_rules: dict[str, Any] | None = Field(default=None, description="Preset rules dictionary")
     is_non_verbal: bool = Field(default=False, description="Whether non-verbal mode is active")
+    model: str | None = Field(default=None, description="Model identifier e.g. ag/gemini-3.8-flash for 9Router")
 
 
 @router.post("/transpile", status_code=status.HTTP_200_OK)
@@ -57,5 +58,6 @@ async def transpile_prompt(payload: TranspileRequest) -> dict[str, Any]:
         aspect_ratio=payload.aspect_ratio,
         preset_rules=payload.preset_rules,
         is_non_verbal=payload.is_non_verbal,
+        model=payload.model,
     )
     return {"data": result}

@@ -13,7 +13,10 @@ from backend.app.api.v1.bible import (
     get_character_sheet_prompts,
     _url_to_local_path,
 )
-from backend.app.infrastructure.database.models.character import CharacterModel
+from backend.app.infrastructure.database.models.character import (
+    CharacterModel,
+    CharacterStateModel,
+)
 from backend.app.infrastructure.database.models.project import (
     MasterProductionBibleModel,
     ProjectModel,
@@ -104,13 +107,14 @@ def test_guardrail_no_polia_leakage():
     assert "polia" not in str(preview_fields["image_provider"].annotation).lower()
 
 
-def test_seven_sheet_matrix_hierarchy_and_sequential_anchoring():
+def test_eight_sheet_matrix_hierarchy_and_sequential_anchoring():
     """
-    Seven-Sheet Character Matrix Verification:
+    Eight-Sheet Character Matrix & Dynamic State Verification:
     Card 1 is Character Close-Up (Master Face Anchor, 3:4, ref_candidates=[]).
     Card 2 is Expression Sheet (3x2 Grid, 16:9, ref_candidates=[Card 1 Close-Up]).
     Card 3 is Full Body Front (Primary Body Anchor, 3:4, ref_candidates=[Card 1 Close-Up]).
-    Cards 4-8 (side, 3/4, back, tpose, action) anchor to Card 1 Close-Up and Card 3 Full Body Front.
+    Cards 4-8 (side, 3/4, back, tpose, action) anchor strictly to Card 1 Close-Up and Card 3 Full Body Front.
+    Dynamic States anchor to Card 1 Close-Up and Card 2 Expression Sheet (+ Card 3 if present).
     All prompts must use pure natural prose without bracket headers or hex codes (#D4D4D4).
     """
     proj_id = uuid.uuid4()
@@ -166,25 +170,63 @@ def test_seven_sheet_matrix_hierarchy_and_sequential_anchoring():
     assert "#D4D4D4" not in card_front["positive_prompt"]
     assert "5500K neutral daylight studio softboxes" in card_front["positive_prompt"]
 
-    # 3. Card 4: Side Profile (Anchored to Card 1 Close-Up & Card 3 Full Body Front)
+    # 3. Card 4: Side Profile (Anchored strictly to Card 1 Close-Up & Card 3 Full Body Front)
     card_side = compile_sheet_prompt(char, proj, bible, "side")
     assert len(card_side["ref_candidates"]) == 2
     assert card_side["ref_candidates"][0][0] == "Card 1 Character Close-Up"
     assert card_side["ref_candidates"][1][0] == "Card 3 Full Body Front"
     assert "#D4D4D4" not in card_side["positive_prompt"]
 
-    # 4. Cards 5-8: three_quarter, back, tpose, action
+    # 4. Cards 5-8: three_quarter, back, tpose, action (strictly Card 1 and Card 3)
     for slot in ["three_quarter", "back", "tpose", "action"]:
         card = compile_sheet_prompt(char, proj, bible, slot)
         assert len(card["ref_candidates"]) == 2, f"{slot} must reference Card 1 and Card 3"
+        assert card["ref_candidates"][0][0] == "Card 1 Character Close-Up"
+        assert card["ref_candidates"][1][0] == "Card 3 Full Body Front"
         assert "#D4D4D4" not in card["positive_prompt"]
         assert "5500K neutral daylight studio softboxes" in card["positive_prompt"]
 
     # 5. Slot ordering in get_character_sheet_prompts
     slots = ["closeup", "expression", "front", "side", "three_quarter", "back", "tpose", "action"]
+    assert len(slots) == 8, "Must have exactly 8 cards"
     assert slots[0] == "closeup", "Slot 0 must be closeup (Card 1)"
     assert slots[1] == "expression", "Slot 1 must be expression (Card 2)"
     assert slots[2] == "front", "Slot 2 must be front (Card 3)"
+    assert slots[7] == "action", "Slot 7 must be action (Card 8)"
+
+    # 6. Dynamic State Anchor Verification (Card 1 Close-Up + Card 3 Full Body Front; Card 2 strictly excluded)
+    state_sample = CharacterStateModel(
+        id=uuid.uuid4(),
+        character_id=char.id,
+        state_code="#State 02",
+        state_label="Fatigue & Wear",
+        wardrobe="Torn tactical bodysuit, dirt streaks",
+        injuries_and_wear="Surface abrasions on cheek",
+        expression_anchor="Weary but vigilant",
+    )
+    state_compiled = compile_sheet_prompt(char, proj, bible, "state", target_state=state_sample)
+    assert state_compiled["recommended_aspect_ratio"] == "1:1"
+    assert len(state_compiled["ref_candidates"]) == 2
+    ref_names = [r[0] for r in state_compiled["ref_candidates"]]
+    assert "Card 1 Character Close-Up" in ref_names
+    assert "Card 3 Full Body Front" in ref_names
+    assert "Card 2 Expression Sheet" not in ref_names
+    assert "Torn tactical bodysuit" in state_compiled["positive_prompt"]
+    assert "Surface abrasions on cheek" in state_compiled["positive_prompt"]
+
+    # 7. Style-Lock Anime Preservation for Dynamic State
+    bible_anime = MasterProductionBibleModel(
+        project_id=proj_id,
+        style_parameters={"master_style_code": "#Style 15", "genre": "Anime / Cel Animation"},
+        world_rules={"world_setting": "Neo-Tokyo"},
+    )
+    anime_state = compile_sheet_prompt(char, proj, bible_anime, "state", target_state=state_sample)
+    assert "Clean studio animation character model sheet state portrait" in anime_state["positive_prompt"]
+    assert "animation" in anime_state["positive_prompt"].lower()
+
+
+# Backward-compatible alias
+test_seven_sheet_matrix_hierarchy_and_sequential_anchoring = test_eight_sheet_matrix_hierarchy_and_sequential_anchoring
 
 
 def test_slot_1_closeup_refinements_and_chaining():
@@ -635,4 +677,235 @@ def test_ninerouter_provider_429_raises_explicit_rate_limit_error(client: TestCl
     err_data2 = resp.json()
     err_msg2 = err_data2.get("detail") or err_data2.get("error", {}).get("message", "")
     assert "Google Flow" in err_msg2
+
+
+def test_stylized_anime_multimodal_anchoring_no_photorealism():
+    """
+    Verify Style 15 (Anime Shinkai / Ufotable) multimodal compilation:
+    1. Card 1-8 and Dynamic States must preserve 2D Anime cel-shading and lineart.
+    2. Zero leakage of photorealistic terms: visible pores, micro-wrinkles, human skin texture,
+       100mm portrait lens, medium-format camera, casting photograph, even softbox lighting.
+    3. Stored studio boilerplate (isolated on a flat seamless, softbox) is purged at runtime.
+    4. Aesthetic Constraints inline guardrail is appended to positive prompt.
+    5. Negative prompt contains photorealism anti-drift terms.
+    """
+    proj_id = uuid.uuid4()
+    char = CharacterModel(
+        id=uuid.uuid4(),
+        project_id=proj_id,
+        name="Kaito Ren",
+        role="PROTAGONIST",
+        base_prompt="24-year-old Japanese male with lean, angular bone structure and sharp, high cheekbones. He wears a frayed, charcoal-gray flight suit with reinforced carbon-fiber plating, isolated on a flat seamless Neutral Matte Light-Medium Studio Gray (#D4D4D4) studio background, even softbox lighting, zero environment props or color cast.",
+        dna_seed=939603,
+        closeup_image_url="/api/v1/assets/previews/char_closeup_master.png",
+        expression_image_url="/api/v1/assets/previews/char_expression_master.png",
+        front_image_url="/api/v1/assets/previews/char_front_master.png",
+    )
+    proj = ProjectModel(
+        id=proj_id,
+        title="Rain: The Last Awakening",
+        slug="rain-the-last-awakening",
+        target_style_code="#Style 15",
+    )
+    bible = MasterProductionBibleModel(
+        project_id=proj_id,
+        style_parameters={"master_style_code": "#Style 15", "genre": "Anime / Sci-Fi"},
+    )
+
+    photo_forbidden = [
+        "visible pores",
+        "micro-wrinkles",
+        "unretouched human skin texture",
+        "100mm portrait lens",
+        "medium-format camera",
+        "casting photograph",
+        "even softbox lighting",
+        "isolated on a flat seamless",
+        "#D4D4D4",
+    ]
+
+    # Verify all 8 sheet cards
+    slots = ["closeup", "expression", "front", "side", "three_quarter", "back", "tpose", "action"]
+    for s in slots:
+        compiled = compile_sheet_prompt(char, proj, bible, s)
+        pos = compiled["positive_prompt"]
+        neg = compiled["negative_prompt"]
+
+        # Assert no photorealistic leaks
+        for term in photo_forbidden:
+            assert term not in pos, f"Photorealistic term '{term}' leaked into {s} positive prompt!"
+
+        # Assert anime constraints and keywords
+        assert "Aesthetic Constraints: Strictly 2D anime cel-shaded illustration" in pos
+        assert "cel-shading" in pos.lower() or "cel-shaded" in pos.lower()
+        assert "photorealism" in neg
+        assert "real human photography" in neg
+
+    # Verify Card 2 Expression Sheet specifics
+    card2 = compile_sheet_prompt(char, proj, bible, "expression")
+    assert card2["width"] == 1344 and card2["height"] == 768
+    assert len(card2["ref_candidates"]) == 1
+    assert card2["ref_candidates"][0][0] == "Card 1 Character Close-Up"
+    assert "3-column by 2-row grid" in card2["positive_prompt"]
+    assert "delicate cel-shading" in card2["positive_prompt"]
+
+    # Verify Card 3 Full Body Front specifics
+    card3 = compile_sheet_prompt(char, proj, bible, "front")
+    assert card3["width"] == 768 and card3["height"] == 1024
+    assert len(card3["ref_candidates"]) == 1
+    assert card3["ref_candidates"][0][0] == "Card 1 Character Close-Up"
+    assert "frayed, charcoal-gray flight suit" in card3["positive_prompt"]
+    assert "model sheet A-pose" in card3["positive_prompt"]
+
+    # Verify Dynamic State specifics (#State 01) - Anchors [Card 1, Card 3], Card 2 strictly excluded
+    state01 = CharacterStateModel(
+        id=uuid.uuid4(),
+        character_id=char.id,
+        state_code="#State 01",
+        state_label="Normal Baseline",
+        wardrobe="Pristine flight suit with high-collar compression gear",
+        injuries_and_wear="Immaculate, zero defects",
+        expression_anchor="Composed, neutral resting gaze",
+    )
+    state_compiled = compile_sheet_prompt(char, proj, bible, "state", target_state=state01)
+    assert len(state_compiled["ref_candidates"]) == 2
+    state_ref_names = [r[0] for r in state_compiled["ref_candidates"]]
+    assert "Card 1 Character Close-Up" in state_ref_names
+    assert "Card 3 Full Body Front" in state_ref_names
+    assert "Card 2 Expression Sheet" not in state_ref_names
+    state_pos = state_compiled["positive_prompt"]
+    for term in photo_forbidden:
+        assert term not in state_pos, f"Photorealistic term '{term}' leaked into dynamic state prompt!"
+    assert "Pristine flight suit with high-collar compression gear" in state_pos
+    assert "Aesthetic Constraints: Strictly 2D anime" in state_pos
+    assert "cel-shading" in state_pos.lower()
+
+
+def test_strict_card_1_read_only_protection_during_downstream_generation(client: TestClient, auth_headers: dict[str, str]):
+    """
+    STRICT CARD 1 READ-ONLY PROTECTION (Guardrail Verification):
+    1. Verify that downstream generation endpoints (Cards 2-8 and Dynamic States) NEVER mutate,
+       overwrite, or delete Card 1: Character Close-Up (Master Anchor).
+    2. Card 1 must strictly serve as an input visual reference anchor for downstream chained compilation.
+    """
+    # 1. Create test project and character with initial Card 1
+    proj_resp = client.post(
+        "/api/v1/projects",
+        json={"title": "Downstream Protection Proj", "settings": {"synopsis": "Verifying Card 1 protection."}},
+        headers=auth_headers,
+    )
+    assert proj_resp.status_code == 201
+    project_id = proj_resp.json()["data"]["id"]
+
+    master_anchor_url = "/api/v1/assets/previews/master_anchor_card1_original.png"
+    char_resp = client.post(
+        f"/api/v1/projects/{project_id}/characters",
+        json={
+            "name": "General Kai",
+            "role": "PROTAGONIST",
+            "base_prompt": "A hardened veteran commander with cybernetic eye and scarred jawline",
+            "dna_seed": 778899,
+        },
+        headers=auth_headers,
+    )
+    assert char_resp.status_code == 201
+    char_id = char_resp.json()["data"]["id"]
+
+    # Directly seed Card 1 (Master Anchor) in SQLite via synchronous engine (parity with conftest.py)
+    from backend.app.infrastructure.database.models.character import CharacterModel
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session
+    from backend.app.core.config import get_settings
+
+    settings = get_settings()
+    engine = create_engine(f"sqlite:///{settings.database_path}")
+    with Session(engine) as session:
+        c = session.execute(select(CharacterModel).where(CharacterModel.id == uuid.UUID(char_id))).scalar_one()
+        c.closeup_image_url = master_anchor_url
+        session.commit()
+
+    # 2. Execute downstream generation for Card 2 (Expression Sheet), Card 3 (Front), Card 4 (Side)
+    with patch("backend.app.api.v1.bible.get_image_provider", return_value=MockFastImageProvider()):
+        # Render Card 2 (Expression)
+        res_card2 = client.post(
+            f"/api/v1/characters/{char_id}/generate-asset",
+            json={"target_type": "sheet", "angle": "expression", "provider": "ag_gemini_flash"},
+            headers=auth_headers,
+        )
+        assert res_card2.status_code == 200
+        assert res_card2.json()["status"] == "completed"
+
+        # Render Card 3 (Front)
+        res_card3 = client.post(
+            f"/api/v1/characters/{char_id}/generate-asset",
+            json={"target_type": "turnaround", "angle": "front", "provider": "ag_gemini_flash"},
+            headers=auth_headers,
+        )
+        assert res_card3.status_code == 200
+        assert res_card3.json()["status"] == "completed"
+
+        # Render Card 4 (Side)
+        res_card4 = client.post(
+            f"/api/v1/characters/{char_id}/generate-asset",
+            json={"target_type": "turnaround", "angle": "side", "provider": "ag_gemini_flash"},
+            headers=auth_headers,
+        )
+        assert res_card4.status_code == 200
+        assert res_card4.json()["status"] == "completed"
+
+    # 3. Query character and assert Card 1 is 100% untouched and intact
+    char_check = client.get(f"/api/v1/projects/{project_id}/characters", headers=auth_headers)
+    assert char_check.status_code == 200
+    chars = char_check.json()["data"]
+    target_char = next(c for c in chars if c["id"] == char_id)
+
+    # Card 1 must remain exactly the original master anchor URL
+    assert target_char["closeup_image_url"] == master_anchor_url, "Card 1 Close-Up MUST NEVER be mutated by downstream generation"
+    # Other cards must have been successfully populated
+    assert target_char["expression_image_url"] is not None
+    assert target_char["front_image_url"] is not None
+    assert target_char["side_image_url"] is not None
+
+
+def test_frontend_batch_downstream_orchestrator_guardrails():
+    """
+    Verify frontend CharacterMatrixTab.tsx implementation guarantees:
+    1. Global button label: 'Generate All Downstream for All Characters (Cards 2–8 + 5 States)'
+    2. Strict Card 1 protection: Card 1 is read-only input anchor and never modified.
+    3. Resume Mode / Skip Existing Assets toggle support.
+    4. Screen Wake Lock integration for mobile browser background resistance.
+    5. Target isolation: options?.targetChar ?? selectedChar.
+    6. Graceful skip for characters without Card 1.
+    7. Zero leakage of forbidden words ('polia' / 'hermes').
+    """
+    frontend_code = Path("frontend/src/components/bible/CharacterMatrixTab.tsx").read_text(encoding="utf-8")
+
+    # 1. Button label exact match
+    assert "Generate All Downstream for All Characters (Cards 2–8 + 5 States)" in frontend_code
+
+    # 2. Card 1 protection comments and logic
+    assert "Card 1 (Master Anchor) is read-only input anchor and NEVER modified" in frontend_code or "Card 1: Character Close-Up (Master Anchor) belum tersedia" in frontend_code
+    assert "STRICT CARD 1 PROTECTION ACTIVE" in frontend_code
+
+    # 3. Resume Mode support
+    assert "batchResumeMode" in frontend_code
+    assert "Skip kartu &amp; state yang sudah ter-generate (Resume Mode)" in frontend_code or "Skip kartu & state yang sudah ter-generate (Resume Mode)" in frontend_code
+
+    # 4. Mobile Screen Wake Lock support
+    assert "requestWakeLock" in frontend_code
+    assert "releaseWakeLock" in frontend_code
+    assert 'wakeLock' in frontend_code
+
+    # 5. Target isolation in handleRenderAsset
+    assert "options?.targetChar ?? selectedChar" in frontend_code
+
+    # 6. Graceful skip for characters without Card 1
+    assert "c.closeup_image_url" in frontend_code
+    assert "Di-skip (No Card 1)" in frontend_code or "Belum memiliki Card 1" in frontend_code
+
+    # 7. Zero forbidden words leakage
+    assert "polia" not in frontend_code.lower()
+    assert "hermes" not in frontend_code.lower()
+
+
 

@@ -16,7 +16,7 @@ export default function RulesInvariantsTab({
 }: RulesInvariantsTabProps) {
   const [continuityLaws, setContinuityLaws] = useState<string[]>(
     worldRules?.continuity_laws || [
-      "Protagonist Cipher Vance cybernetic optic lens is ALWAYS in the right eye socket (never inverted or flipped).",
+      "Protagonist signature biometric features and eye color must remain strictly consistent across all scenes (never inverted or flipped).",
       "Night exterior scenes must strictly maintain wet asphalt reflections and anamorphic horizontal lens flare streaks.",
       "High-Frequency Monoblade plasma hue is fixed at 450nm violet; never yellow, red, or green.",
       "No direct natural sunlight in lower-level scenes; illumination is motivated exclusively by neon, sodium vapor, or volumetric spotlights.",

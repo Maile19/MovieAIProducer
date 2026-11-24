@@ -320,7 +320,7 @@ def test_cold_open_treatment_and_act_scenes_generation(client: TestClient, auth_
 
 
 def test_cold_open_instant_blueprint_creation(client: TestClient, auth_headers: dict[str, str]):
-    """Verify POST /scenes with generate_blueprint=True applies Cold Open rules for preset."""
+    """Verify legacy instant structural blueprint on POST /scenes is deprecated and returns 400 Bad Request."""
     proj_resp = client.post(
         "/api/v1/projects",
         json={
@@ -342,26 +342,7 @@ def test_cold_open_instant_blueprint_creation(client: TestClient, auth_headers: 
         },
         headers=auth_headers,
     )
-    assert bp_resp.status_code == 201
-    assert bp_resp.json()["data"]["scenes_generated"] == 50
-
-    scenes_resp = client.get(f"/api/v1/projects/{project_id}/scenes", headers=auth_headers)
-    assert scenes_resp.status_code == 200
-    scenes = scenes_resp.json()["data"]
-
-    s1 = next(s for s in scenes if s["scene_number"] == 1)
-    s2 = next(s for s in scenes if s["scene_number"] == 2)
-    s3 = next(s for s in scenes if s["scene_number"] == 3)
-    s4 = next(s for s in scenes if s["scene_number"] == 4)
-
-    assert s1["duration_target"] == 10.0
-    assert s2["duration_target"] == 10.0
-    assert s3["duration_target"] == 10.0
-    assert s1["shots_count"] == 2
-    assert s2["shots_count"] == 2
-    assert s3["shots_count"] == 2
-
-    assert "COLD OPEN" in s1["slugline"]
-    assert "In-Media-Res Shock Hook" in s1["narrative_goal"]
-    assert "ORDINARY WORLD BEGINS" in s4["slugline"]
+    assert bp_resp.status_code == 400
+    err_msg = bp_resp.json().get("error", {}).get("message", "") or bp_resp.text
+    assert "deprecated" in err_msg.lower()
 

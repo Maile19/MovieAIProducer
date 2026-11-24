@@ -12,7 +12,6 @@ import {
   BookOpen,
   ArrowRight,
   Bot,
-  Zap,
   RefreshCw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -20,7 +19,7 @@ import { api } from "@/lib/api";
 import ObsidianDropdown from "@/components/ui/ObsidianDropdown";
 
 export type DurationMode = "dynamic" | "flat_10s" | "flat_15s" | "flat_5s";
-export type WriterMode = "staged_ai" | "instant_structural";
+export type StructureType = "3_act" | "4_act" | "youtube_viral" | "5_act";
 
 export interface BlueprintConfig {
   total_scenes: number;
@@ -28,7 +27,21 @@ export interface BlueprintConfig {
   auto_split_shots: boolean;
   clear_existing: boolean;
   premise?: string;
-  writer_mode?: WriterMode;
+  structure_type?: StructureType;
+}
+
+export interface StructureOption {
+  structure_type: StructureType;
+  label: string;
+  acts_count: number;
+  description: string;
+  act_labels: Array<{ act_number: number; title: string; percentage: string }>;
+}
+
+export interface AdvisoryData {
+  recommended_structure: StructureType;
+  strategic_rationale: string;
+  options: StructureOption[];
 }
 
 interface BlueprintModalProps {
@@ -48,6 +61,7 @@ const SCENE_OPTIONS = [
   { count: 300, label: "300 Scenes", tier: "Standard Feature", minutes: "~63 min" },
   { count: 400, label: "400 Scenes", tier: "Epic Feature Film", minutes: "~84 min" },
   { count: 420, label: "420 Scenes", tier: "Extended Feature Cut", minutes: "~88 min" },
+  { count: 450, label: "450 Scenes", tier: "Grand Epic Feature Cut", minutes: "~94 min" },
 ];
 
 const DURATION_OPTIONS: Array<{
@@ -88,28 +102,14 @@ const DURATION_OPTIONS: Array<{
 ];
 
 interface StageProgress {
-  phase: "A" | "B1" | "B2" | "B3" | "B4" | "COMPLETE";
+  phase: string;
   treatmentGenerated: boolean;
   logline?: string;
   theme?: string;
-  actStatuses: {
-    1: "pending" | "writing" | "saved" | "error";
-    2: "pending" | "writing" | "saved" | "error";
-    3: "pending" | "writing" | "saved" | "error";
-    4: "pending" | "writing" | "saved" | "error";
-  };
-  actFallbacks: {
-    1: boolean;
-    2: boolean;
-    3: boolean;
-    4: boolean;
-  };
-  actDetails: {
-    1?: { scenes: number; shots: number; summary: string };
-    2?: { scenes: number; shots: number; summary: string };
-    3?: { scenes: number; shots: number; summary: string };
-    4?: { scenes: number; shots: number; summary: string };
-  };
+  totalActs: number;
+  actStatuses: Record<number, "pending" | "writing" | "saved" | "error">;
+  actFallbacks: Record<number, boolean>;
+  actDetails: Record<number, { scenes: number; shots: number; summary: string }>;
   errorMsg?: string;
 }
 
@@ -119,7 +119,7 @@ export default function BlueprintModal({
   projectId,
   onRefreshScenes,
   existingScenesCount,
-  onGenerate,
+  onGenerate: _onGenerate,
   presetDefaults,
 }: BlueprintModalProps) {
   const initialScenes = presetDefaults?.total_scenes || 100;
@@ -130,7 +130,9 @@ export default function BlueprintModal({
 
   const [selectedScenes, setSelectedScenes] = useState<number>(initialScenes);
   const [selectedMode, setSelectedMode] = useState<DurationMode>(initialMode);
-  const [writerMode, setWriterMode] = useState<WriterMode>("staged_ai");
+  const [structureType, setStructureType] = useState<StructureType>("4_act");
+  const [advisoryData, setAdvisoryData] = useState<AdvisoryData | null>(null);
+  const [isLoadingAdvisory, setIsLoadingAdvisory] = useState<boolean>(false);
   const [premise, setPremise] = useState<string>("");
   const [autoSplitShots, setAutoSplitShots] = useState<boolean>(true);
   const [clearExisting, setClearExisting] = useState<boolean>(existingScenesCount > 0);
@@ -152,6 +154,29 @@ export default function BlueprintModal({
     }
   }, [isOpen, presetDefaults]);
 
+  // Fetch Polya AI Strategic Structure Advisory
+  useEffect(() => {
+    if (isOpen && projectId) {
+      setIsLoadingAdvisory(true);
+      api.blueprint
+        .recommendStructure(projectId, { total_scenes: selectedScenes })
+        .then((res) => {
+          if (res?.data) {
+            setAdvisoryData(res.data);
+            if (res.data.recommended_structure) {
+              setStructureType(res.data.recommended_structure);
+            }
+          }
+        })
+        .catch((err) => {
+          console.warn("Could not fetch structure advisory:", err);
+        })
+        .finally(() => {
+          setIsLoadingAdvisory(false);
+        });
+    }
+  }, [isOpen, projectId, selectedScenes]);
+
   // Check existing blueprint status on modal open
   useEffect(() => {
     if (isOpen && projectId) {
@@ -162,25 +187,19 @@ export default function BlueprintModal({
           if (st?.has_treatment && st.treatment) {
             const completed = st.completed_acts || [];
             const fallbacks = st.act_fallbacks || {};
+            const stType = (st.treatment.structure_type as StructureType) || "4_act";
+            const numActs = stType === "3_act" ? 3 : stType === "5_act" ? 5 : 4;
+            setStructureType(stType);
 
-            const actStatuses: StageProgress["actStatuses"] = {
-              1: completed.includes(1) ? "saved" : "pending",
-              2: completed.includes(2) ? "saved" : "pending",
-              3: completed.includes(3) ? "saved" : "pending",
-              4: completed.includes(4) ? "saved" : "pending",
-            };
+            const actStatuses: Record<number, "pending" | "writing" | "saved" | "error"> = {};
+            const actFallbacks: Record<number, boolean> = {};
+            const actDetails: Record<number, { scenes: number; shots: number; summary: string }> = {};
 
-            const actFallbacks: StageProgress["actFallbacks"] = {
-              1: !!fallbacks["1"],
-              2: !!fallbacks["2"],
-              3: !!fallbacks["3"],
-              4: !!fallbacks["4"],
-            };
-
-            const actDetails: StageProgress["actDetails"] = {};
-            for (let a = 1; a <= 4; a++) {
+            for (let a = 1; a <= numActs; a++) {
+              actStatuses[a] = completed.includes(a) ? "saved" : "pending";
+              actFallbacks[a] = !!fallbacks[String(a)];
               if (completed.includes(a)) {
-                actDetails[a as 1 | 2 | 3 | 4] = {
+                actDetails[a] = {
                   scenes: st.act_counts?.[a] || 0,
                   shots: 0,
                   summary: st.act_summaries?.[String(a)] || "",
@@ -188,12 +207,13 @@ export default function BlueprintModal({
               }
             }
 
-            const isAllComplete = completed.length === 4;
+            const isAllComplete = completed.length >= numActs;
             setStageProgress({
               phase: isAllComplete ? "COMPLETE" : "B1",
               treatmentGenerated: true,
               logline: st.treatment.logline,
               theme: st.treatment.theme,
+              totalActs: numActs,
               actStatuses,
               actFallbacks,
               actDetails,
@@ -232,68 +252,57 @@ export default function BlueprintModal({
     }
   }
 
-  const actQuartile = Math.round(selectedScenes * 0.25);
+  const selectedActsCount = structureType === "3_act" ? 3 : structureType === "5_act" ? 5 : 4;
+  const selectedStructureOption = advisoryData?.options.find((o) => o.structure_type === structureType);
+  const structureLabel =
+    selectedStructureOption?.label ||
+    (structureType === "3_act"
+      ? "Classic 3-Act"
+      : structureType === "5_act"
+      ? "5-Act Dramatic"
+      : structureType === "youtube_viral"
+      ? "YouTube Viral"
+      : "Hollywood 4-Act");
 
   const handleStartGeneration = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsGenerating(true);
 
-    if (writerMode === "instant_structural") {
+    let wakeLockSentinel: any = null;
+    if (typeof navigator !== "undefined" && "wakeLock" in navigator) {
       try {
-        if (onGenerate) {
-          await onGenerate({
-            total_scenes: selectedScenes,
-            duration_mode: selectedMode,
-            auto_split_shots: autoSplitShots,
-            clear_existing: clearExisting,
-            premise,
-            writer_mode: "instant_structural",
-          });
-        } else {
-          await api.scenes.generateBlueprint(projectId, {
-            total_scenes: selectedScenes,
-            duration_mode: selectedMode,
-            auto_split_shots: autoSplitShots,
-            clear_existing: clearExisting,
-          });
-          await onRefreshScenes();
-        }
-        onClose();
-      } catch (err) {
-        console.error("Instant blueprint error:", err);
-      } finally {
-        setIsGenerating(false);
+        wakeLockSentinel = await (navigator as any).wakeLock.request("screen");
+      } catch (wakeErr) {
+        console.warn("Screen Wake Lock not supported or refused:", wakeErr);
       }
-      return;
     }
 
-    // Staged AI Screenplay Writer Pipeline (Phase A -> Phase B1..B4)
+    const totalActs = structureType === "3_act" ? 3 : structureType === "5_act" ? 5 : 4;
+    const initialStatuses: Record<number, "pending" | "writing" | "saved" | "error"> = {};
+    const initialFallbacks: Record<number, boolean> = {};
+    for (let a = 1; a <= totalActs; a++) {
+      initialStatuses[a] = "pending";
+      initialFallbacks[a] = false;
+    }
+
     const initialProgress: StageProgress = {
       phase: "A",
       treatmentGenerated: false,
-      actStatuses: {
-        1: "pending",
-        2: "pending",
-        3: "pending",
-        4: "pending",
-      },
-      actFallbacks: {
-        1: false,
-        2: false,
-        3: false,
-        4: false,
-      },
+      totalActs,
+      actStatuses: initialStatuses,
+      actFallbacks: initialFallbacks,
       actDetails: {},
     };
     setStageProgress(initialProgress);
 
     try {
-      // Step 1: Phase A - Master Story Treatment & Beat Sheet
+      // Step 1: Phase A - Master Story Treatment & Beat Sheet (Polya AI Strict LLM Mode)
       const treatRes = await api.blueprint.generateTreatment(projectId, {
         total_scenes: selectedScenes,
         duration_mode: selectedMode,
         premise: premise.trim(),
         clear_existing: clearExisting,
+        structure_type: structureType,
       });
 
       const treatData = treatRes.data;
@@ -306,12 +315,12 @@ export default function BlueprintModal({
       }));
 
       // Step 2: Phase B - Act-by-Act Chunking & Persistent Context
-      for (let actNum = 1; actNum <= 4; actNum++) {
+      for (let actNum = 1; actNum <= totalActs; actNum++) {
         setStageProgress((prev) => {
           if (!prev) return initialProgress;
           return {
             ...prev,
-            phase: actNum === 1 ? "B1" : actNum === 2 ? "B2" : actNum === 3 ? "B3" : "B4",
+            phase: `B${actNum}`,
             actStatuses: {
               ...prev.actStatuses,
               [actNum]: "writing",
@@ -324,6 +333,7 @@ export default function BlueprintModal({
           total_scenes: selectedScenes,
           duration_mode: selectedMode,
           auto_split_shots: autoSplitShots,
+          structure_type: structureType,
         });
 
         const actData = actRes.data;
@@ -358,20 +368,26 @@ export default function BlueprintModal({
 
       setStageProgress((prev) => (prev ? { ...prev, phase: "COMPLETE" } : null));
     } catch (err: any) {
-      console.error("Staged generation error:", err);
+      console.error("Polya AI staged generation error:", err);
       setStageProgress((prev) => (prev ? { ...prev, errorMsg: err?.message || "Generation error" } : null));
     } finally {
       setIsGenerating(false);
+      if (wakeLockSentinel) {
+        try {
+          await wakeLockSentinel.release();
+        } catch {}
+      }
     }
   };
 
   // Dedicated Retry handler per Act
-  const handleRetryAct = async (actNum: 1 | 2 | 3 | 4) => {
+  const handleRetryAct = async (actNum: number) => {
     try {
       setStageProgress((prev) => {
         if (!prev) return null;
         return {
           ...prev,
+          errorMsg: undefined,
           actStatuses: {
             ...prev.actStatuses,
             [actNum]: "writing",
@@ -384,6 +400,7 @@ export default function BlueprintModal({
         total_scenes: selectedScenes,
         duration_mode: selectedMode,
         auto_split_shots: autoSplitShots,
+        structure_type: structureType,
       });
 
       const actData = actRes.data;
@@ -432,13 +449,16 @@ export default function BlueprintModal({
   const calculateProgressPercent = () => {
     if (!stageProgress) return 0;
     if (stageProgress.phase === "COMPLETE") return 100;
+    const totalActs = stageProgress.totalActs || 4;
+    const perActWeight = 80 / totalActs;
     let pct = 0;
     if (stageProgress.treatmentGenerated) pct += 20;
-    if (stageProgress.actStatuses[1] === "saved") pct += 20;
-    if (stageProgress.actStatuses[2] === "saved") pct += 20;
-    if (stageProgress.actStatuses[3] === "saved") pct += 20;
-    if (stageProgress.actStatuses[4] === "saved") pct += 20;
-    return pct;
+    for (let a = 1; a <= totalActs; a++) {
+      if (stageProgress.actStatuses[a] === "saved") {
+        pct += perActWeight;
+      }
+    }
+    return Math.min(100, Math.round(pct));
   };
 
   return (
@@ -542,53 +562,41 @@ export default function BlueprintModal({
                   )}
                 </div>
 
-                {/* Phase B: 4 Acts Status Cards with Per-Act Fallback & Retry Buttons */}
+                {/* Phase B: Dynamic Acts Status Cards with Per-Act Retry Buttons */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                  {[
-                    { act: 1, label: "Act I: Setup", desc: "Catalyst & Threshold" },
-                    { act: 2, label: "Act II-A: Rising", desc: "Trials & Midpoint" },
-                    { act: 3, label: "Act II-B: Dark Night", desc: "Descent & Crisis" },
-                    { act: 4, label: "Act III: Climax", desc: "Climax & Resolution" },
-                  ].map((item) => {
-                    const actStatus = stageProgress.actStatuses[item.act as 1 | 2 | 3 | 4];
-                    const isFallback = stageProgress.actFallbacks[item.act as 1 | 2 | 3 | 4];
-                    const details = stageProgress.actDetails[item.act as 1 | 2 | 3 | 4];
+                  {Array.from({ length: stageProgress.totalActs || 4 }, (_, i) => i + 1).map((actNum) => {
+                    const actStatus = stageProgress.actStatuses[actNum];
+                    const details = stageProgress.actDetails[actNum];
+                    const opt = advisoryData?.options?.find((o) => o.structure_type === structureType);
+                    const actLabel = opt?.act_labels?.[actNum - 1]?.title || `Act ${actNum}`;
+                    const actDesc = opt?.act_labels?.[actNum - 1]?.percentage ? `${opt.act_labels[actNum - 1].percentage} target volume` : "Dramatic Progression";
 
                     return (
                       <div
-                        key={item.act}
+                        key={actNum}
                         className={cn(
                           "p-3 rounded-xl border text-left transition-all flex flex-col justify-between",
                           actStatus === "writing"
                             ? "bg-amber-500/10 border-amber-500/50 shadow-sm"
-                            : isFallback
-                            ? "bg-amber-500/5 border-amber-500/40"
                             : actStatus === "saved"
                             ? "bg-emerald-500/10 border-emerald-500/40"
+                            : actStatus === "error"
+                            ? "bg-rose-500/10 border-rose-500/50"
                             : "bg-panel/40 border-border/80 opacity-60"
                         )}
                       >
                         <div>
                           <div className="flex items-center justify-between gap-1">
-                            <span className="font-bold text-xs text-obsidian-primary">{item.label}</span>
-                            {actStatus === "saved" && !isFallback && (
+                            <span className="font-bold text-xs text-obsidian-primary">{actLabel}</span>
+                            {actStatus === "saved" && (
                               <span className="text-[9px] text-emerald-400 bg-emerald-500/20 border border-emerald-500/30 px-1.5 py-0.5 rounded font-bold flex items-center gap-1">
                                 <CheckCircle2 className="w-2.5 h-2.5" />
                                 <span>LLM Saved</span>
                               </span>
                             )}
-                            {actStatus === "saved" && isFallback && (
-                              <span
-                                className="text-[9px] text-amber-300 bg-amber-500/20 border border-amber-500/40 px-1.5 py-0.5 rounded font-bold flex items-center gap-1"
-                                title="Babak ini menggunakan Procedural Fallback. Klik Retry untuk men-generate ulang dengan LLM."
-                              >
-                                <AlertTriangle className="w-2.5 h-2.5" />
-                                <span>Fallback Mode</span>
-                              </span>
-                            )}
                             {actStatus === "writing" && (
                               <span className="text-[9px] text-amber-400 font-bold flex items-center gap-1">
-                                <div className="w-2 h-2 border border-amber-400 border-t-transparent rounded-full animate-spin" />
+                                <div className="w-2.5 h-2.5 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
                                 <span>Writing...</span>
                               </span>
                             )}
@@ -596,10 +604,12 @@ export default function BlueprintModal({
                               <span className="text-[9px] text-obsidian-muted">Pending</span>
                             )}
                             {actStatus === "error" && (
-                              <span className="text-[9px] text-rose-400 font-bold">Failed</span>
+                              <span className="text-[9px] text-rose-400 bg-rose-500/20 border border-rose-500/40 px-1.5 py-0.5 rounded font-bold">
+                                Failed
+                              </span>
                             )}
                           </div>
-                          <div className="text-[9px] text-obsidian-muted mt-0.5">{item.desc}</div>
+                          <div className="text-[9px] text-obsidian-muted mt-0.5">{actDesc}</div>
                           {details && details.scenes > 0 && (
                             <div className="text-[9px] text-emerald-400/90 mt-1 font-mono">
                               {details.scenes} scenes saved to SQLite
@@ -608,25 +618,25 @@ export default function BlueprintModal({
                         </div>
 
                         {/* Retry Per Babak Button */}
-                        {(actStatus === "saved" || actStatus === "error" || isFallback) && (
+                        {(actStatus === "saved" || actStatus === "error") && (
                           <div className="mt-2.5 pt-2 border-t border-border/60 flex items-center justify-between">
                             <span className="text-[9px] text-obsidian-muted truncate">
-                              {isFallback ? "Procedural fallback used" : "Act intact in DB"}
+                              {actStatus === "saved" ? "Act intact in DB" : "Error occurred"}
                             </span>
                             <button
                               type="button"
-                              onClick={() => handleRetryAct(item.act as 1 | 2 | 3 | 4)}
-                              disabled={actStatus === "writing" || isGenerating}
+                              onClick={() => handleRetryAct(actNum)}
+                              disabled={isGenerating}
                               className={cn(
                                 "flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold font-mono transition-colors disabled:opacity-40",
-                                isFallback
-                                  ? "bg-amber-500/20 text-amber-300 border border-amber-500/50 hover:bg-amber-500/30"
+                                actStatus === "error"
+                                  ? "bg-rose-500/20 text-rose-300 border border-rose-500/50 hover:bg-rose-500/30"
                                   : "bg-canvas hover:bg-elevated border border-border text-obsidian-secondary hover:text-amber-400"
                               )}
-                              title={`Regenerate ${item.label} without altering other acts`}
+                              title={`Regenerate ${actLabel} via Polya AI Screenwriter`}
                             >
-                              <RefreshCw className={cn("w-2.5 h-2.5", actStatus === "writing" && "animate-spin")} />
-                              <span>{isFallback ? "Retry with LLM" : "Retry Act"}</span>
+                              <RefreshCw className="w-2.5 h-2.5" />
+                              <span>{actStatus === "error" ? "Retry with LLM" : "Retry Act"}</span>
                             </button>
                           </div>
                         )}
@@ -676,73 +686,123 @@ export default function BlueprintModal({
             </div>
           ) : (
             <>
-              {/* Writer Mode Selection */}
-              <div className="space-y-2">
-                <label className="text-obsidian-primary font-bold uppercase tracking-wider flex items-center gap-2">
-                  <Bot className="w-4 h-4 text-amber-500" />
-                  <span>Engine Mode</span>
-                </label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setWriterMode("staged_ai")}
-                    className={cn(
-                      "p-3 rounded-xl border text-left transition-all",
-                      writerMode === "staged_ai"
-                        ? "bg-amber-500/15 border-amber-500/60 shadow-sm"
-                        : "bg-canvas border-border hover:bg-elevated/70"
-                    )}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className={cn("text-xs font-bold", writerMode === "staged_ai" ? "text-amber-400" : "text-obsidian-primary")}>
-                        Staged AI Writer (Recommended)
+              {/* Screenwriter Engine Status (Strict LLM Mode) */}
+              <div className="p-3 rounded-xl bg-canvas border border-border flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="p-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400">
+                    <Bot className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-obsidian-primary flex items-center gap-2">
+                      <span>Polya AI Screenplay Writer</span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-mono font-bold border border-emerald-500/30">
+                        Strict LLM Mode
                       </span>
-                      {writerMode === "staged_ai" && <CheckCircle2 className="w-3.5 h-3.5 text-amber-400" />}
-                    </div>
-                    <p className="text-[10px] text-obsidian-muted mt-1 leading-relaxed">
-                      Writes full narrative goals, sluglines, and character dialogue act-by-act with persistent context chaining and per-act retry.
+                    </span>
+                    <p className="text-[10px] text-obsidian-muted mt-0.5">
+                      Writes full narrative goals, sluglines, and pacing-calibrated dialogue act-by-act with Character Cast &amp; Bible injection.
                     </p>
-                  </button>
+                  </div>
+                </div>
+              </div>
 
-                  <button
-                    type="button"
-                    onClick={() => setWriterMode("instant_structural")}
-                    className={cn(
-                      "p-3 rounded-xl border text-left transition-all",
-                      writerMode === "instant_structural"
-                        ? "bg-blue-500/15 border-blue-500/60 shadow-sm"
-                        : "bg-canvas border-border hover:bg-elevated/70"
-                    )}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className={cn("text-xs font-bold", writerMode === "instant_structural" ? "text-blue-400" : "text-obsidian-primary")}>
-                        Instant Structural Blueprint
-                      </span>
-                      {writerMode === "instant_structural" && <CheckCircle2 className="w-3.5 h-3.5 text-blue-400" />}
-                    </div>
-                    <p className="text-[10px] text-obsidian-muted mt-1 leading-relaxed">
-                      Instantly generates the complete 4-Act structure and auto-split camera shots in &lt;100ms.
-                    </p>
-                  </button>
+              {/* Polya AI Strategic Structure Advisory */}
+              <div className="space-y-2.5 p-3.5 rounded-xl bg-panel/60 border border-amber-500/30 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-amber-400" />
+                    <span className="text-xs font-bold text-obsidian-primary uppercase tracking-wider">
+                      Polya AI Strategic Structure Advisory
+                    </span>
+                  </div>
+                  {isLoadingAdvisory ? (
+                    <span className="text-[10px] text-amber-400 flex items-center gap-1">
+                      <div className="w-2.5 h-2.5 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
+                      <span>Analyzing Project DNA...</span>
+                    </span>
+                  ) : advisoryData?.recommended_structure ? (
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/40 font-bold">
+                      Recommended: {advisoryData.options.find(o => o.structure_type === advisoryData.recommended_structure)?.label || advisoryData.recommended_structure}
+                    </span>
+                  ) : null}
+                </div>
+
+                {/* Strategic Rationale Callout */}
+                {advisoryData?.strategic_rationale && (
+                  <div className="p-2.5 rounded-lg bg-amber-500/5 border border-amber-500/20 text-[10px] text-amber-300/90 leading-relaxed italic">
+                    &ldquo;{advisoryData.strategic_rationale}&rdquo;
+                  </div>
+                )}
+
+                {/* Structure Selection Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {(advisoryData?.options || [
+                    { structure_type: "3_act", label: "Classic 3-Act Structure", acts_count: 3, description: "Setup (25%), Confrontation (50%), Resolution (25%)" },
+                    { structure_type: "4_act", label: "Hollywood 4-Act Structure", acts_count: 4, description: "Industry-standard Save the Cat / Midpoint Split" },
+                    { structure_type: "youtube_viral", label: "YouTube Viral Structure", acts_count: 4, description: "0-10s Shock Hook, Rapid Chaos, Climax Twist" },
+                    { structure_type: "5_act", label: "5-Act Dramatic Structure", acts_count: 5, description: "Freytag's Pyramid: Exposition to Catastrophe" },
+                  ]).map((opt: any) => {
+                    const isSelected = structureType === opt.structure_type;
+                    const isRecommended = advisoryData?.recommended_structure === opt.structure_type;
+
+                    return (
+                      <button
+                        key={opt.structure_type}
+                        type="button"
+                        onClick={() => setStructureType(opt.structure_type as StructureType)}
+                        className={cn(
+                          "p-2.5 rounded-xl border text-left transition-all relative flex flex-col justify-between",
+                          isSelected
+                            ? "bg-amber-500/15 border-amber-500/70 shadow-sm"
+                            : "bg-canvas border-border hover:bg-elevated/70"
+                        )}
+                      >
+                        <div>
+                          <div className="flex items-center justify-between gap-1">
+                            <span className={cn("text-xs font-bold", isSelected ? "text-amber-400" : "text-obsidian-primary")}>
+                              {opt.label}
+                            </span>
+                            <div className="flex items-center gap-1">
+                              {isRecommended && (
+                                <span className="text-[8px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-bold border border-amber-500/40">
+                                  BEST
+                                </span>
+                              )}
+                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-black/40 text-obsidian-secondary font-mono">
+                                {opt.acts_count} Babak
+                              </span>
+                            </div>
+                          </div>
+                          <p className="text-[10px] text-obsidian-muted mt-1 leading-snug">
+                            {opt.description}
+                          </p>
+                        </div>
+                        {isSelected && (
+                          <div className="mt-2 flex items-center gap-1 text-[9px] text-amber-400 font-bold">
+                            <CheckCircle2 className="w-3 h-3" />
+                            <span>Struktur Terpilih</span>
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
               {/* Story Premise / Concept (for AI Writer) */}
-              {writerMode === "staged_ai" && (
-                <div className="space-y-1.5">
-                  <label className="text-obsidian-primary font-bold uppercase tracking-wider flex items-center justify-between">
-                    <span>Story Premise / Director&apos;s Concept (Optional)</span>
-                    <span className="text-[10px] text-obsidian-muted font-normal">Custom Story Prompt</span>
-                  </label>
-                  <textarea
-                    rows={2}
-                    value={premise}
-                    onChange={(e) => setPremise(e.target.value)}
-                    placeholder="Contoh: Operasi spionase siber di Neo Jakarta di mana Arya berusaha membobol server pusat untuk membebaskan rekannya..."
-                    className="w-full p-2.5 rounded-xl bg-canvas border border-border text-obsidian-primary text-xs focus:border-amber-500 focus:outline-none placeholder:text-obsidian-muted/60"
-                  />
-                </div>
-              )}
+              <div className="space-y-1.5">
+                <label className="text-obsidian-primary font-bold uppercase tracking-wider flex items-center justify-between">
+                  <span>Story Premise / Director&apos;s Concept (Optional)</span>
+                  <span className="text-[10px] text-obsidian-muted font-normal">Custom Story Prompt</span>
+                </label>
+                <textarea
+                  rows={2}
+                  value={premise}
+                  onChange={(e) => setPremise(e.target.value)}
+                  placeholder="Contoh: Operasi spionase siber di Neo Jakarta di mana Arya berusaha membobol server pusat untuk membebaskan rekannya..."
+                  className="w-full p-2.5 rounded-xl bg-canvas border border-border text-obsidian-primary text-xs focus:border-amber-500 focus:outline-none placeholder:text-obsidian-muted/60"
+                />
+              </div>
 
               {/* Section 1: Total Scene Selection */}
               <div className="space-y-1">
@@ -846,8 +906,13 @@ export default function BlueprintModal({
                 </div>
 
                 <div className="text-[10px] text-obsidian-muted pt-1 flex items-center justify-between border-t border-border/50">
-                  <span>Structure: 4 Acts (~{actQuartile} scenes/act)</span>
-                  <span>{writerMode === "staged_ai" ? "Staged Act-by-Act Chaining" : "Fast Single-Tx Bulk Insert"}</span>
+                  <span>
+                    Structure: {structureLabel} ({selectedActsCount} Acts)
+                  </span>
+                  <span className="text-amber-400 font-semibold flex items-center gap-1">
+                    <Sparkles className="w-3 h-3 text-amber-500" />
+                    Strict LLM Mode
+                  </span>
                 </div>
               </div>
 
@@ -866,17 +931,8 @@ export default function BlueprintModal({
                   disabled={isGenerating}
                   className="flex items-center gap-2 px-5 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-canvas text-xs font-bold transition-all shadow-glow disabled:opacity-50"
                 >
-                  {writerMode === "staged_ai" ? (
-                    <>
-                      <Sparkles className="w-3.5 h-3.5" />
-                      <span>Start Staged AI Writer ({selectedScenes} Scenes)</span>
-                    </>
-                  ) : (
-                    <>
-                      <Zap className="w-3.5 h-3.5" />
-                      <span>Generate Instant Blueprint</span>
-                    </>
-                  )}
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Start Polya AI Screenplay Writer ({selectedScenes} Scenes)</span>
                 </button>
               </div>
             </>

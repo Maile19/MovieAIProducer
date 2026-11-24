@@ -53,10 +53,14 @@ logs/
 # Databases and local data
 /data/
 data/movieai.db*
+data/movieai.db.bak_*
+data/test_movieai.db*
 *.sqlite
 *.sqlite3
 *.db
 *.db*
+*.db-wal
+*.db-shm
 instance/
 
 # Media and generated production artifacts

@@ -26,6 +26,9 @@ import {
   Edit,
   Trash2,
   ArrowRight,
+  XCircle,
+  ShieldCheck,
+  ShieldAlert,
 } from "lucide-react";
 import { Character, SheetPromptItem, Project, api, FlowProxyStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -39,6 +42,7 @@ interface CharacterMatrixTabProps {
   onRefresh: (options?: { silent?: boolean }) => void | Promise<void>;
   onSilentRefresh?: () => void | Promise<void>;
   onPatchCharacterAsset?: (characterId: string, slot: string, imageUrl: string, metaPatch?: Record<string, any>) => void;
+  onPatchCharacterStateAsset?: (characterId: string, stateId: string, imageUrl: string) => void;
 }
 
 export default function CharacterMatrixTab({
@@ -49,6 +53,7 @@ export default function CharacterMatrixTab({
   onRefresh,
   onSilentRefresh,
   onPatchCharacterAsset,
+  onPatchCharacterStateAsset,
 }: CharacterMatrixTabProps) {
   const [selectedCharId, setSelectedCharId] = useState<string>(() => {
     if (typeof window !== "undefined") {
@@ -63,7 +68,7 @@ export default function CharacterMatrixTab({
         // Fallback below
       }
     }
-    return characters[0]?.id || "char_1";
+    return characters[0]?.id || "";
   });
 
   const handleSelectCharacter = useCallback(
@@ -138,7 +143,92 @@ export default function CharacterMatrixTab({
   const [isExprOutdated, setIsExprOutdated] = useState(false);
   const [isFrontOutdated, setIsFrontOutdated] = useState(false);
   const [isRegeneratingAllDownstream, setIsRegeneratingAllDownstream] = useState(false);
+  const [isStoppingDownstream, setIsStoppingDownstream] = useState(false);
   const [downstreamProgressText, setDownstreamProgressText] = useState<string | null>(null);
+  const abortDownstreamRef = useRef<boolean>(false);
+
+  // Global Batch Downstream Generation States (Cards 2–8 + Dynamic States for all characters)
+  const [isBatchGenerating, setIsBatchGenerating] = useState(false);
+  const [isStoppingBatch, setIsStoppingBatch] = useState(false);
+  const abortBatchRef = useRef<boolean>(false);
+  const wakeLockRef = useRef<any>(null);
+  const [batchResumeMode, setBatchResumeMode] = useState<boolean>(true);
+  const [batchPreflightModalOpen, setBatchPreflightModalOpen] = useState(false);
+  const [batchProgress, setBatchProgress] = useState<{
+    currentCharIdx: number;
+    totalReady: number;
+    charName: string;
+    currentStep: number;
+    totalSteps: number;
+    stepText: string;
+  } | null>(null);
+  const [batchSummaryModalOpen, setBatchSummaryModalOpen] = useState(false);
+
+  // Batch Active Guard (Generate All Downstream / Regenerate All Downstream)
+  const isBatchActive = isBatchGenerating || isRegeneratingAllDownstream;
+  const [batchLockToast, setBatchLockToast] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+  } | null>(null);
+  const batchLockToastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const showBatchLockNotification = useCallback((actionName: string) => {
+    if (batchLockToastTimeoutRef.current) {
+      clearTimeout(batchLockToastTimeoutRef.current);
+    }
+    const processName = isBatchGenerating
+      ? "Generate All Downstream for All Characters"
+      : isRegeneratingAllDownstream
+      ? "Regenerate All Downstream"
+      : "Batch Downstream";
+    setBatchLockToast({
+      isOpen: true,
+      title: "Aksi Terkunci oleh Proses Batch",
+      message: `Proses '${processName}' sedang berlangsung sekuensial. Tunggu selesai atau hentikan batch (Stop) sebelum melakukan ${actionName}.`,
+    });
+    batchLockToastTimeoutRef.current = setTimeout(() => {
+      setBatchLockToast(null);
+    }, 5000);
+  }, [isBatchGenerating, isRegeneratingAllDownstream]);
+  const [batchSummaryData, setBatchSummaryData] = useState<{
+    total: number;
+    readyCount: number;
+    successCount: number;
+    skippedChars: { name: string; role: string; reason: string }[];
+    failedChars: { name: string; role: string; error: string }[];
+    wasCancelled?: boolean;
+  } | null>(null);
+
+  // Mobile Screen Wake Lock to prevent screen sleep / Chrome background throttling
+  const requestWakeLock = useCallback(async () => {
+    try {
+      if (typeof navigator !== "undefined" && "wakeLock" in navigator && (navigator as any).wakeLock?.request) {
+        wakeLockRef.current = await (navigator as any).wakeLock.request("screen");
+        console.log("Screen Wake Lock active for batch generation.");
+      }
+    } catch (err) {
+      console.warn("Screen Wake Lock could not be acquired:", err);
+    }
+  }, []);
+
+  const releaseWakeLock = useCallback(async () => {
+    try {
+      if (wakeLockRef.current) {
+        await wakeLockRef.current.release();
+        wakeLockRef.current = null;
+        console.log("Screen Wake Lock released.");
+      }
+    } catch (err) {
+      console.warn("Screen Wake Lock release failed:", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      releaseWakeLock();
+    };
+  }, [releaseWakeLock]);
 
   // Real DOM verification states for staged preview images
   const [closeupImgLoaded, setCloseupImgLoaded] = useState(false);
@@ -154,10 +244,12 @@ export default function CharacterMatrixTab({
 
   // Add State form
   const [newStateCode, setNewStateCode] = useState("#State 01");
+  const [newStateLabel, setNewStateLabel] = useState("");
   const [newWardrobe, setNewWardrobe] = useState("");
   const [newInjuries, setNewInjuries] = useState("");
   const [newExpression, setNewExpression] = useState("");
   const [isSubmittingState, setIsSubmittingState] = useState(false);
+  const [isDeletingChar, setIsDeletingChar] = useState(false);
 
   // Dynamic State Progression Matrix UI & AI Auto-Suggestion States
   const [editingStateId, setEditingStateId] = useState<string | null>(null);
@@ -270,85 +362,170 @@ export default function CharacterMatrixTab({
   const [uploadingSlots, setUploadingSlots] = useState<Record<string, boolean>>({});
   const [uploadErrors, setUploadErrors] = useState<Record<string, string | null>>({});
 
-  // Fallback mock characters if database has none
-  const activeCharacters: Character[] =
-    characters.length > 0
-      ? characters
-      : [
-          {
-            id: "char_1",
-            project_id: projectId,
-            name: "Cipher Vance",
-            role: "PROTAGONIST",
-            base_prompt:
-              "Male cybernetic operative, 34 years old, sharp angular jawline, obsidian fiber-optic jacket, amber cybernetic optical lens implant in right eye.",
-            voice_ref_asset_id: "elevenlabs_vance_gravel_noir",
-            states: [
-              {
-                id: "st_1",
-                character_id: "char_1",
-                state_code: "#State 01",
-                wardrobe: "Pristine tailored obsidian trenchcoat, carbon-fiber tactical underlayer.",
-                injuries_and_wear: "Zero defects, immaculate posture, polished cybernetic eye housing.",
-                expression_anchor: "Stoic, guarded, calculating ocular focus.",
-              },
-              {
-                id: "st_2",
-                character_id: "char_1",
-                state_code: "#State 02",
-                wardrobe: "Trenchcoat unbuttoned, water-soaked lapels, fraying ballistic seams.",
-                injuries_and_wear: "Light cheek lacerations, soot smudge across collarbone.",
-                expression_anchor: "Fatigued, hyper-vigilant scanning.",
-              },
-              {
-                id: "st_3",
-                character_id: "char_1",
-                state_code: "#State 03",
-                wardrobe: "Trenchcoat torn at left shoulder, exposed reactive armor plates.",
-                injuries_and_wear: "Singed synthetic skin, leaking amber fluid from optic socket.",
-                expression_anchor: "Adrenaline surge, jaw clenched in defiance.",
-              },
-              {
-                id: "st_4",
-                character_id: "char_1",
-                state_code: "#State 04",
-                wardrobe: "Shredded armor, emergency tourniquet on cybernetic forearm.",
-                injuries_and_wear: "Sparks emitting from damaged ocular servo, bloodied temple.",
-                expression_anchor: "Desperation transitioning to lethal focus.",
-              },
-              {
-                id: "st_5",
-                character_id: "char_1",
-                state_code: "#State 05",
-                wardrobe: "Overcharged neural suit glowing with violet discharge.",
-                injuries_and_wear: "Full cybernetic overload, shattered lens, heroic battle patina.",
-                expression_anchor: "Transcendent catharsis, absolute resolve.",
-              },
-            ],
-          },
-          {
-            id: "char_2",
-            project_id: projectId,
-            name: "Director Mara Thorne",
-            role: "ANTAGONIST",
-            base_prompt:
-              "Female Syndicate Overseer, 45 years old, cold alabaster skin, sharp asymmetrical bob haircut, monochromatic silver velvet power suit.",
-            voice_ref_asset_id: "elevenlabs_thorne_crisp_cold",
-            states: [
-              {
-                id: "st_6",
-                character_id: "char_2",
-                state_code: "#State 01",
-                wardrobe: "Immaculate silver velvet power suit, gold geometric cufflinks.",
-                injuries_and_wear: "Flawless, perfectly symmetrical appearance.",
-                expression_anchor: "Chilled condescension, predatory calm.",
-              },
-            ],
-          },
-        ];
+  // Zero Static Fallback: Active characters derived purely from persistent database
+  const activeCharacters: Character[] = characters;
+  const selectedChar: Character | null =
+    activeCharacters.find((c) => c.id === selectedCharId) || activeCharacters[0] || null;
 
-  const selectedChar =
-    activeCharacters.find((c) => c.id === selectedCharId) || activeCharacters[0];
+  // Polya AI Screenwriter Generation States
+  const [generateCastModalOpen, setGenerateCastModalOpen] = useState(false);
+  const [addOneModalOpen, setAddOneModalOpen] = useState(false);
+  const [regenModalOpen, setRegenModalOpen] = useState(false);
+  const [isGeneratingCast, setIsGeneratingCast] = useState(false);
+  const [isGeneratingOneChar, setIsGeneratingOneChar] = useState(false);
+  const [isRegeneratingChar, setIsRegeneratingChar] = useState(false);
+  const [polyaLoadingText, setPolyaLoadingText] = useState<string | null>(null);
+
+  // Cast Generation Options
+  const [preferredCastCount, setPreferredCastCount] = useState<number | null>(null);
+  const [castAdditionalNotes, setCastAdditionalNotes] = useState("");
+
+  // Add 1 Character Options
+  const [addOnePreferredRole, setAddOnePreferredRole] = useState("DEUTERAGONIST");
+  const [addOneCustomDirective, setAddOneCustomDirective] = useState("");
+
+  // Re-generate Character Options
+  const [regenPreserveRole, setRegenPreserveRole] = useState(true);
+  const [regenCustomDirective, setRegenCustomDirective] = useState("");
+
+  // Inline Edit States for Character Name, Role & Prompt
+  const [isEditingCharIdentity, setIsEditingCharIdentity] = useState(false);
+  const [editCharName, setEditCharName] = useState("");
+  const [editCharRole, setEditCharRole] = useState("PROTAGONIST");
+  const [isSavingCharIdentity, setIsSavingCharIdentity] = useState(false);
+
+  const [isEditingPrompt, setIsEditingPrompt] = useState(false);
+  const [editBasePrompt, setEditBasePrompt] = useState("");
+  const [isSavingPrompt, setIsSavingPrompt] = useState(false);
+
+  const handleGenerateCast = async () => {
+    try {
+      setIsGeneratingCast(true);
+      setPolyaLoadingText("Polya AI (Screenwriter) sedang merancang ensemble 5–8 karakter lengkap...");
+      await api.bible.generateCast(projectId, {
+        preferred_count: preferredCastCount || undefined,
+        additional_notes: castAdditionalNotes.trim() || undefined,
+        replace_existing: true,
+      });
+      setGenerateCastModalOpen(false);
+      setCastAdditionalNotes("");
+      await onRefresh();
+    } catch (err: any) {
+      console.error("Generate cast error:", err);
+      alert(err?.message || "Gagal generate cast ensemble dari Polya AI.");
+    } finally {
+      setIsGeneratingCast(false);
+      setPolyaLoadingText(null);
+    }
+  };
+
+  const handleGenerateOneCharacter = async () => {
+    try {
+      setIsGeneratingOneChar(true);
+      setPolyaLoadingText(`Polya AI (Screenwriter) sedang merancang 1 karakter baru (${addOnePreferredRole})...`);
+      const res = await api.bible.generateOneCharacter(projectId, {
+        preferred_role: addOnePreferredRole,
+        custom_directive: addOneCustomDirective.trim() || undefined,
+      });
+      setAddOneModalOpen(false);
+      setAddOneCustomDirective("");
+      await onRefresh();
+      if (res?.data?.id) {
+        handleSelectCharacter(res.data.id);
+      }
+    } catch (err: any) {
+      console.error("Generate 1 character error:", err);
+      alert(err?.message || "Gagal membuat karakter baru via Polya AI.");
+    } finally {
+      setIsGeneratingOneChar(false);
+      setPolyaLoadingText(null);
+    }
+  };
+
+  const handleRegenerateCharacter = async () => {
+    if (!selectedChar?.id) return;
+    try {
+      setIsRegeneratingChar(true);
+      setPolyaLoadingText(`Polya AI (Screenwriter) sedang meregenerasi identitas & 5 states ${selectedChar.name}...`);
+      await api.bible.regenerateCharacter(projectId, selectedChar.id, {
+        custom_directive: regenCustomDirective.trim() || undefined,
+        preserve_role: regenPreserveRole,
+      });
+      setRegenModalOpen(false);
+      setRegenCustomDirective("");
+      await onRefresh();
+      fetchPrompts(selectedChar.id);
+    } catch (err: any) {
+      console.error("Regenerate character error:", err);
+      alert(err?.message || "Gagal re-generate karakter via Polya AI.");
+    } finally {
+      setIsRegeneratingChar(false);
+      setPolyaLoadingText(null);
+    }
+  };
+
+  const handleStartEditIdentity = () => {
+    if (!selectedChar) return;
+    setEditCharName(selectedChar.name);
+    setEditCharRole(selectedChar.role);
+    setIsEditingCharIdentity(true);
+  };
+
+  const handleSaveCharacterIdentity = async () => {
+    if (!selectedChar || !editCharName.trim()) return;
+    try {
+      setIsSavingCharIdentity(true);
+      await api.bible.updateCharacter(projectId, selectedChar.id, {
+        name: editCharName.trim(),
+        role: editCharRole,
+      });
+      setIsEditingCharIdentity(false);
+      await onRefresh();
+    } catch (err: any) {
+      console.error("Save identity error:", err);
+      alert(err?.message || "Gagal menyimpan identitas karakter.");
+    } finally {
+      setIsSavingCharIdentity(false);
+    }
+  };
+
+  const handleStartEditPrompt = () => {
+    if (!selectedChar) return;
+    setEditBasePrompt(selectedChar.base_prompt);
+    setIsEditingPrompt(true);
+  };
+
+  const handleSaveBasePrompt = async () => {
+    if (!selectedChar || !editBasePrompt.trim()) return;
+    try {
+      setIsSavingPrompt(true);
+      await api.bible.updateCharacter(projectId, selectedChar.id, {
+        base_prompt: editBasePrompt.trim(),
+      });
+      setIsEditingPrompt(false);
+      await onRefresh();
+      fetchPrompts(selectedChar.id);
+    } catch (err: any) {
+      console.error("Save base prompt error:", err);
+      alert(err?.message || "Gagal menyimpan base visual prompt.");
+    } finally {
+      setIsSavingPrompt(false);
+    }
+  };
+
+  const handleDeleteCharacter = async (charId: string, charName: string) => {
+    if (!confirm(`Hapus karakter "${charName}" dan seluruh dynamic state matrix-nya secara permanen?`)) return;
+    try {
+      setIsDeletingChar(true);
+      await api.bible.deleteCharacter(projectId, charId);
+      await onRefresh();
+    } catch (err: any) {
+      console.error("Delete character error:", err);
+      alert(err?.message || "Gagal menghapus karakter.");
+    } finally {
+      setIsDeletingChar(false);
+    }
+  };
 
   // Context-Aware Auto-Generator Handler (pulls NLE Studio context from backend)
   const handleAutoGenerate = async (mode: "all" | "name" | "suggestion" | "visual_prompt") => {
@@ -716,46 +893,9 @@ export default function CharacterMatrixTab({
     }
   };
 
-  // Helper to ensure a character is persisted in the database before generating assets
+  // Helper to return character ID (Zero Static Data: all characters are persisted in database)
   const ensurePersistedCharacter = async (char: Character): Promise<string> => {
-    // If it's already in the persisted characters list from server and not a mock ID
-    const isSaved =
-      characters.some((c) => c.id === char.id) &&
-      char.id !== "char_1" &&
-      char.id !== "char_2" &&
-      !char.id.startsWith("mock_");
-
-    if (isSaved) {
-      return char.id;
-    }
-
-    // Auto-create in database
-    const created = await api.bible.createCharacter(projectId, {
-      name: char.name,
-      role: char.role,
-      base_prompt: char.base_prompt,
-    });
-    const realCharId = created.data.id;
-
-    // Auto-create initial states if template has them
-    if (char.states && char.states.length > 0) {
-      for (const st of char.states) {
-        try {
-          await api.bible.createCharacterState(realCharId, {
-            state_code: st.state_code,
-            wardrobe: st.wardrobe,
-            injuries_and_wear: st.injuries_and_wear,
-            expression_anchor: st.expression_anchor,
-          });
-        } catch {
-          // Non-blocking
-        }
-      }
-    }
-
-    handleSelectCharacter(realCharId);
-    onRefresh();
-    return realCharId;
+    return char.id;
   };
 
   const STATE_OPTIONS = [
@@ -864,6 +1004,7 @@ export default function CharacterMatrixTab({
     setSuggestionError(null);
     const nextCode = getNextUnsavedStateCode(selectedChar?.states || []) || "#State 01";
     setNewStateCode(nextCode);
+    setNewStateLabel("");
     setNewWardrobe("");
     setNewInjuries("");
     setNewExpression("");
@@ -884,6 +1025,7 @@ export default function CharacterMatrixTab({
     setEditingStateId(st.id);
     setSuggestionError(null);
     setNewStateCode(st.state_code);
+    setNewStateLabel(st.state_label || "");
     setNewWardrobe(st.wardrobe || "");
     setNewInjuries(st.injuries_and_wear || "");
     setNewExpression(st.expression_anchor || "");
@@ -915,12 +1057,14 @@ export default function CharacterMatrixTab({
         // Edit mode: update existing state
         await api.bible.updateCharacterState(effectiveCharId, editingStateId, {
           state_code: newStateCode,
+          state_label: newStateLabel.trim() || undefined,
           wardrobe: newWardrobe.trim(),
           injuries_and_wear: newInjuries.trim(),
           expression_anchor: newExpression.trim(),
         });
         setAddStateModalOpen(false);
         setEditingStateId(null);
+        setNewStateLabel("");
         setNewWardrobe("");
         setNewInjuries("");
         setNewExpression("");
@@ -928,6 +1072,7 @@ export default function CharacterMatrixTab({
         // Add mode: create state
         await api.bible.createCharacterState(effectiveCharId, {
           state_code: newStateCode,
+          state_label: newStateLabel.trim() || undefined,
           wardrobe: newWardrobe.trim(),
           injuries_and_wear: newInjuries.trim(),
           expression_anchor: newExpression.trim(),
@@ -935,10 +1080,11 @@ export default function CharacterMatrixTab({
 
         if (advanceNext) {
           // Check if there is another unsaved state after this one
-          const updatedMock = [...(selectedChar.states || []), { state_code: newStateCode }];
+          const updatedMock = [...(selectedChar.states || []), { state_code: newStateCode, state_label: newStateLabel }];
           const nextCode = getNextUnsavedStateCode(updatedMock, newStateCode) || getNextUnsavedStateCode(updatedMock);
           if (nextCode) {
             setNewStateCode(nextCode);
+            setNewStateLabel("");
             setNewWardrobe("");
             setNewInjuries("");
             setNewExpression("");
@@ -953,6 +1099,7 @@ export default function CharacterMatrixTab({
           }
         }
         setAddStateModalOpen(false);
+        setNewStateLabel("");
         setNewWardrobe("");
         setNewInjuries("");
         setNewExpression("");
@@ -991,7 +1138,7 @@ export default function CharacterMatrixTab({
 
   // Fetch ready-to-copy master prompts for all 7 sheets and dynamic states
   const fetchPrompts = useCallback(async (charId: string) => {
-    if (!charId || charId === "char_1" || charId === "char_2" || charId.startsWith("mock_")) return;
+    if (!charId) return;
     try {
       setIsLoadingPrompts(true);
       const res = await api.bible.getSheetPrompts(charId);
@@ -1012,7 +1159,7 @@ export default function CharacterMatrixTab({
   // In-flight active jobs rehydration on mount / character switch
   const rehydrateInFlightJobs = useCallback(
     async (charId: string) => {
-      if (!charId || charId === "char_1" || charId === "char_2" || charId.startsWith("mock_")) return;
+      if (!charId) return;
       try {
         const res = await api.bible.getActiveJobs(charId);
         if (res?.status === "success" && Array.isArray(res.jobs) && res.jobs.length > 0) {
@@ -1202,9 +1349,17 @@ export default function CharacterMatrixTab({
     targetType: "turnaround" | "sheet" | "state" | string,
     angle: "front" | "side" | "three_quarter" | "back" | "tpose" | "action" | "expression" | string = "closeup",
     stateId?: string,
-    options?: { skipRefresh?: boolean }
+    options?: { skipRefresh?: boolean; targetChar?: Character }
   ): Promise<boolean> => {
-    if (!selectedChar?.id) return false;
+    const activeChar = options?.targetChar ?? selectedChar;
+    if (!activeChar?.id) return false;
+
+    // Strict batch guard for user-initiated clicks
+    if (isBatchActive && !options?.targetChar) {
+      showBatchLockNotification(targetType === "state" ? "Render Visual State" : `Render ${angle || "Asset"}`);
+      return false;
+    }
+
     const targetKey = targetType === "state" ? `state_${stateId}` : `${targetType}_${angle}`;
     setRenderingTargets((prev) => ({ ...prev, [targetKey]: true }));
     setTargetErrors((prev) => ({ ...prev, [targetKey]: null }));
@@ -1215,7 +1370,7 @@ export default function CharacterMatrixTab({
         [targetKey]: "Menyiapkan karakter di database...",
       }));
 
-      const effectiveCharId = await ensurePersistedCharacter(selectedChar);
+      const effectiveCharId = await ensurePersistedCharacter(activeChar);
 
       setPollStatus((prev) => ({
         ...prev,
@@ -1243,8 +1398,34 @@ export default function CharacterMatrixTab({
 
       // Synchronous Response (AG/Gemini 3.8 Flash, 9Router, SD 3.5 Large)
       if (res.status === "completed" && res.image_url) {
-        if (onPatchCharacterAsset) {
-          onPatchCharacterAsset(effectiveCharId, angle, res.image_url);
+        if (targetType === "state") {
+          if (stateId && onPatchCharacterStateAsset) {
+            onPatchCharacterStateAsset(effectiveCharId, stateId, res.image_url);
+          }
+        } else {
+          if (onPatchCharacterAsset) {
+            onPatchCharacterAsset(effectiveCharId, angle, res.image_url);
+          }
+        }
+        // Update in-memory workingChar immediately so subsequent cards/states see fresh anchor
+        if (options?.targetChar) {
+          if (targetType === "state" && stateId) {
+            const stObj = options.targetChar.states?.find((s: any) => s.id === stateId);
+            if (stObj) stObj.image_url = res.image_url;
+          } else if (angle) {
+            const keyMap: Record<string, string> = {
+              closeup: "closeup_image_url",
+              expression: "expression_image_url",
+              front: "front_image_url",
+              side: "side_image_url",
+              three_quarter: "three_quarter_image_url",
+              back: "back_image_url",
+              tpose: "tpose_image_url",
+              action: "action_image_url",
+            };
+            const field = keyMap[angle];
+            if (field) (options.targetChar as any)[field] = res.image_url;
+          }
         }
         setRenderingTargets((prev) => ({ ...prev, [targetKey]: false }));
         setPollStatus((prev) => ({ ...prev, [targetKey]: "" }));
@@ -1254,7 +1435,9 @@ export default function CharacterMatrixTab({
           } else {
             await onRefresh({ silent: true });
           }
-          await fetchPrompts(effectiveCharId);
+          if (activeChar.id === selectedChar?.id) {
+            await fetchPrompts(effectiveCharId);
+          }
         }
         return true;
       }
@@ -1285,8 +1468,34 @@ export default function CharacterMatrixTab({
                   angle,
                   state_id: stateId,
                 });
-                if (onPatchCharacterAsset) {
-                  onPatchCharacterAsset(effectiveCharId, angle, job.image_url);
+                if (targetType === "state") {
+                  if (stateId && onPatchCharacterStateAsset) {
+                    onPatchCharacterStateAsset(effectiveCharId, stateId, job.image_url);
+                  }
+                } else {
+                  if (onPatchCharacterAsset) {
+                    onPatchCharacterAsset(effectiveCharId, angle, job.image_url);
+                  }
+                }
+                // Update in-memory workingChar immediately so subsequent cards/states see fresh anchor
+                if (options?.targetChar) {
+                  if (targetType === "state" && stateId) {
+                    const stObj = options.targetChar.states?.find((s: any) => s.id === stateId);
+                    if (stObj) stObj.image_url = job.image_url;
+                  } else if (angle) {
+                    const keyMap: Record<string, string> = {
+                      closeup: "closeup_image_url",
+                      expression: "expression_image_url",
+                      front: "front_image_url",
+                      side: "side_image_url",
+                      three_quarter: "three_quarter_image_url",
+                      back: "back_image_url",
+                      tpose: "tpose_image_url",
+                      action: "action_image_url",
+                    };
+                    const field = keyMap[angle];
+                    if (field) (options.targetChar as any)[field] = job.image_url;
+                  }
                 }
                 setRenderingTargets((prev) => ({ ...prev, [targetKey]: false }));
                 setPollStatus((prev) => ({ ...prev, [targetKey]: "" }));
@@ -1296,7 +1505,9 @@ export default function CharacterMatrixTab({
                   } else {
                     await onRefresh({ silent: true });
                   }
-                  await fetchPrompts(effectiveCharId);
+                  if (activeChar.id === selectedChar?.id) {
+                    await fetchPrompts(effectiveCharId);
+                  }
                 }
                 resolve(true);
               } else if (job.status === "failed") {
@@ -1331,6 +1542,12 @@ export default function CharacterMatrixTab({
                   // 240 seconds maximum timeout threshold
                   clearInterval(pollInterval);
                   activePollersRef.current.delete(jobId);
+                  // Anti-Zombie: Cancel job on backend to release Flow account immediately
+                  try {
+                    await api.flow.cancelJob(jobId);
+                  } catch (cErr) {
+                    console.warn(`[handleRenderAsset] Error cancelling timed out job ${jobId}:`, cErr);
+                  }
                   setRenderingTargets((prev) => ({ ...prev, [targetKey]: false }));
                   setPollStatus((prev) => ({ ...prev, [targetKey]: "" }));
                   setTargetErrors((prev) => ({
@@ -1397,11 +1614,217 @@ export default function CharacterMatrixTab({
     }
   };
 
-  // DAG Wave Regenerate All Downstream Anchors (Slot 2 to 7 / 8)
-  const handleRegenerateAllDownstream = async () => {
-    if (!selectedChar?.closeup_image_url || isLocked || isRegeneratingAllDownstream) return;
+  // Reusable Downstream Pipeline Runner (Strictly Cards 2–8 + Dynamic States)
+  // Strict Card 1 Protection: Card 1 (Master Anchor) is read-only input anchor and NEVER modified.
+  const executeDownstreamForCharacter = async (
+    targetChar: Character,
+    resumeMode: boolean,
+    onStepProgress: (text: string, currentStep: number, totalSteps: number) => void,
+    abortRef: React.MutableRefObject<boolean>
+  ): Promise<{ success: boolean; error?: string }> => {
+    if (!targetChar?.closeup_image_url) {
+      return {
+        success: false,
+        error: "Card 1: Character Close-Up (Master Anchor) belum tersedia.",
+      };
+    }
 
-    // Pre-flight check: batalkan batch langsung jika SOCKS5 proxy sedang offline
+    const workingChar: Character = { ...targetChar };
+    const statesList = workingChar.states || [];
+    const totalSteps = 7 + statesList.length; // 7 Cards (Cards 2-8) + N Dynamic States
+    let currentStep = 0;
+    const failedSlots: string[] = [];
+
+    try {
+      // ==========================================
+      // PHASE 1: Card 2 & Card 3 (Anchored to Card 1)
+      // ==========================================
+      let card2Ok = false;
+      let card3Ok = false;
+
+      // Card 2: Expression Sheet
+      const card2AlreadyDone = resumeMode && !!workingChar.expression_image_url;
+      let card2Promise: Promise<boolean>;
+      if (card2AlreadyDone) {
+        card2Ok = true;
+        currentStep++;
+        onStepProgress(`[Step ${currentStep}/${totalSteps}] Card 2 (Expression Sheet) sudah ada, dilewati (Resume Mode)`, currentStep, totalSteps);
+        card2Promise = Promise.resolve(true);
+      } else {
+        currentStep++;
+        onStepProgress(`[Step ${currentStep}/${totalSteps}] Merender Card 2 (Expression Sheet)...`, currentStep, totalSteps);
+        card2Promise = handleRenderAsset("sheet", "expression", undefined, { skipRefresh: true, targetChar: workingChar });
+      }
+
+      // Card 3: Full Body Front (Anchored to Card 1)
+      const card3AlreadyDone = resumeMode && !!workingChar.front_image_url;
+      let card3Promise: Promise<boolean>;
+      if (card3AlreadyDone) {
+        card3Ok = true;
+        currentStep++;
+        onStepProgress(`[Step ${currentStep}/${totalSteps}] Card 3 (Full Body Front) sudah ada, dilewati (Resume Mode)`, currentStep, totalSteps);
+        card3Promise = Promise.resolve(true);
+      } else {
+        card3Promise = new Promise<boolean>((resolve) => {
+          setTimeout(async () => {
+            if (abortRef.current) {
+              resolve(false);
+              return;
+            }
+            let success = await handleRenderAsset("turnaround", "front", undefined, { skipRefresh: true, targetChar: workingChar });
+            if (!success && !abortRef.current) {
+              // Guardrail: 1 auto-retry on transient failure for Card 3
+              console.warn("Card 3 (Full Body Front) failed on first attempt. Retrying once (auto-retry)...");
+              onStepProgress(`[Step 2/${totalSteps}] Card 3 mencoba ulang (1x auto-retry)...`, 2, totalSteps);
+              await new Promise((r) => setTimeout(r, 1500));
+              if (!abortRef.current) {
+                success = await handleRenderAsset("turnaround", "front", undefined, { skipRefresh: true, targetChar: workingChar });
+              }
+            }
+            resolve(success);
+          }, 500);
+        });
+      }
+
+      const [p1Card2Result, p1Card3Result] = await Promise.all([card2Promise, card3Promise]);
+      card2Ok = card2AlreadyDone || p1Card2Result;
+      card3Ok = card3AlreadyDone || p1Card3Result;
+
+      if (!card2Ok) {
+        failedSlots.push("Card 2: Expression Sheet");
+      }
+
+      if (abortRef.current) {
+        onStepProgress("Pipeline dihentikan oleh pengguna. Aset yang telah selesai tetap tersimpan.", currentStep, totalSteps);
+        return { success: false, error: "Dihentikan oleh pengguna" };
+      }
+
+      if (!card3Ok) {
+        failedSlots.push("Card 3: Full Body Front");
+        console.warn("Phase 1 halted: Card 3 (Full Body Front) failed. Preserving Card 2 and halting Phase 2 & 3.");
+        onStepProgress("Phase 2 & 3 dihentikan karena Card 3 (Full Body Front) gagal. Hasil Card 2 tetap tersimpan.", currentStep, totalSteps);
+        return { success: false, error: "Card 3 (Full Body Front) gagal dirender." };
+      }
+
+      // ==========================================
+      // PHASE 2: Cards 4-8 (Anchors: Card 1 + Card 3)
+      // ==========================================
+      const phase2Cards = [
+        { slot: "side", targetType: "turnaround" as const, name: "Card 4: Side Profile", key: "side_image_url" as const },
+        { slot: "three_quarter", targetType: "turnaround" as const, name: "Card 5: 3/4 Hero Angle", key: "three_quarter_image_url" as const },
+        { slot: "back", targetType: "turnaround" as const, name: "Card 6: Back View", key: "back_image_url" as const },
+        { slot: "tpose", targetType: "sheet" as const, name: "Card 7: T-Pose Sheet", key: "tpose_image_url" as const },
+        { slot: "action", targetType: "sheet" as const, name: "Card 8: Dynamic Action", key: "action_image_url" as const },
+      ];
+
+      for (const item of phase2Cards) {
+        if (abortRef.current) {
+          onStepProgress("Pipeline dihentikan oleh pengguna. Aset yang telah selesai tetap tersimpan.", currentStep, totalSteps);
+          return { success: false, error: "Dihentikan oleh pengguna" };
+        }
+        currentStep++;
+        if (resumeMode && (workingChar as any)[item.key]) {
+          onStepProgress(`[Step ${currentStep}/${totalSteps}] ${item.name} sudah ada, dilewati (Resume Mode)`, currentStep, totalSteps);
+          continue;
+        }
+        onStepProgress(`[Step ${currentStep}/${totalSteps}] Merender ${item.name}...`, currentStep, totalSteps);
+        const ok = await handleRenderAsset(item.targetType, item.slot, undefined, { skipRefresh: true, targetChar: workingChar });
+        if (!ok) {
+          failedSlots.push(item.name);
+        }
+      }
+
+      if (abortRef.current) {
+        return { success: false, error: "Dihentikan oleh pengguna" };
+      }
+
+      // ==========================================
+      // PHASE 3: Dynamic States (Anchors: Card 1 + Card 3)
+      // ==========================================
+      if (card3Ok && statesList.length > 0) {
+        for (const st of statesList) {
+          if (abortRef.current) {
+            onStepProgress("Pipeline dihentikan oleh pengguna. Aset yang telah selesai tetap tersimpan.", currentStep, totalSteps);
+            return { success: false, error: "Dihentikan oleh pengguna" };
+          }
+          currentStep++;
+          const label = st.state_label || st.state_code;
+          if (resumeMode && st.image_url) {
+            onStepProgress(`[Step ${currentStep}/${totalSteps}] State ${st.state_code} (${label}) sudah ada, dilewati (Resume Mode)`, currentStep, totalSteps);
+            continue;
+          }
+          onStepProgress(`[Step ${currentStep}/${totalSteps}] Merender State ${st.state_code} (${label})...`, currentStep, totalSteps);
+          const ok = await handleRenderAsset("state", undefined, st.id, { skipRefresh: true, targetChar: workingChar });
+          if (!ok) {
+            failedSlots.push(`State ${st.state_code} (${label})`);
+          }
+        }
+      } else if (!card3Ok && statesList.length > 0) {
+        onStepProgress("Phase 3 dilewati karena Card 3 (Full Body Front) belum siap.", currentStep, totalSteps);
+      }
+
+      if (failedSlots.length > 0) {
+        return {
+          success: false,
+          error: `Gagal pada ${failedSlots.length} slot: ${failedSlots.join(", ")}`,
+        };
+      }
+
+      return { success: true };
+    } catch (err: any) {
+      console.error(`Downstream error for ${targetChar.name}:`, err);
+      return { success: false, error: err?.message || "Render aset downstream gagal." };
+    }
+  };
+
+  // One-Click Retry Failed / Missing Only for Single Character
+  const handleRetryFailedOnly = async (targetChar?: Character) => {
+    const charToRun = targetChar || selectedChar;
+    if (!charToRun?.closeup_image_url || isLocked || isRegeneratingAllDownstream || isBatchGenerating) return;
+
+    if (selectedProvider === "google_flow") {
+      const pStatus = await handleCheckProxy();
+      if (!pStatus.healthy) {
+        setProxyOfflineAlert({
+          isOpen: true,
+          message: "Retry Failed / Missing Dibatalkan (SOCKS5 Proxy Offline)",
+          detail: pStatus.detail || "Koneksi reverse tunnel HP Android (127.0.0.1:10808) tidak aktif.",
+        });
+        return;
+      }
+    }
+
+    setIsRegeneratingAllDownstream(true);
+    setIsStoppingDownstream(false);
+    abortDownstreamRef.current = false;
+
+    try {
+      await executeDownstreamForCharacter(
+        charToRun,
+        true, // Resume mode: skip completed cards, only process missing/failed!
+        (msg) => setDownstreamProgressText(msg),
+        abortDownstreamRef
+      );
+    } catch (err: any) {
+      console.error("Retry failed downstream error:", err);
+    } finally {
+      setDownstreamProgressText(null);
+      setIsStoppingDownstream(false);
+      setIsRegeneratingAllDownstream(false);
+      if (onSilentRefresh) {
+        await onSilentRefresh();
+      } else {
+        await onRefresh({ silent: true });
+      }
+      if (charToRun?.id) fetchPrompts(charToRun.id);
+    }
+  };
+
+  // One-Click Full Downstream Pipeline for Single Character (Cards 2–8 + Dynamic States)
+  const handleRegenerateAllDownstream = async () => {
+    if (!selectedChar?.closeup_image_url || isLocked || isRegeneratingAllDownstream || isBatchGenerating) return;
+
+    // Pre-flight check: batalkan langsung jika SOCKS5 proxy sedang offline
     if (selectedProvider === "google_flow") {
       const pStatus = await handleCheckProxy();
       if (!pStatus.healthy) {
@@ -1415,68 +1838,21 @@ export default function CharacterMatrixTab({
     }
 
     setIsRegeneratingAllDownstream(true);
+    setIsStoppingDownstream(false);
+    abortDownstreamRef.current = false;
 
     try {
-      // WAVE 1: Run Card 2 (Expression) & Card 3 (Full Body Front) in parallel
-      // Both depend ONLY on Card 1 (closeup master anchor)
-      setDownstreamProgressText("[Gelombang 1/2] Merender Card 2 (Expression) & Card 3 (Full Body) paralel...");
-
-      const card2Promise = handleRenderAsset("sheet", "expression", undefined, { skipRefresh: true });
-      // Stagger second launch slightly (500ms) to ensure distinct queue timestamps
-      const card3Promise = new Promise<boolean>((resolve) => {
-        setTimeout(async () => {
-          let success = await handleRenderAsset("turnaround", "front", undefined, { skipRefresh: true });
-          if (!success) {
-            // Guardrail: 1 auto-retry on transient failure for Card 3
-            console.warn("Card 3 (Full Body Front) failed on first attempt. Retrying once (auto-retry)...");
-            setDownstreamProgressText("[Gelombang 1/2] Card 3 mencoba ulang (1x auto-retry)...");
-            await new Promise((r) => setTimeout(r, 1500));
-            success = await handleRenderAsset("turnaround", "front", undefined, { skipRefresh: true });
-          }
-          resolve(success);
-        }, 500);
-      });
-
-      const [_card2Success, card3Success] = await Promise.all([card2Promise, card3Promise]);
-
-      if (!card3Success) {
-        console.warn("Wave 1 halted: Card 3 (Full Body Front) failed after retry. Preserving Card 2 and halting Wave 2.");
-        setDownstreamProgressText(
-          "Gelombang 2 dihentikan karena Card 3 (Full Body Front) gagal. Hasil Card 2 tetap tersimpan."
-        );
-        setTimeout(() => setDownstreamProgressText(null), 5000);
-        return;
-      }
-
-      // WAVE 2: Cards 4, 5, 6, 7, 8 in parallel (staggered by 800ms)
-      // These all depend on Card 1 (closeup) + Card 3 (front body)
-      setDownstreamProgressText("[Gelombang 2/2] Merender Card 4-8 paralel (anchored ke Card 1 + Card 3)...");
-
-      const wave2Slots: {
-        slot: "side" | "three_quarter" | "back" | "tpose" | "action";
-        targetType: "sheet" | "turnaround";
-        title: string;
-      }[] = [
-        { slot: "side", targetType: "turnaround", title: "Card 4: Side Profile" },
-        { slot: "three_quarter", targetType: "turnaround", title: "Card 5: 3/4 Hero Angle" },
-        { slot: "back", targetType: "turnaround", title: "Card 6: Back View" },
-        { slot: "tpose", targetType: "sheet", title: "Card 7: T-Pose Sheet" },
-        { slot: "action", targetType: "sheet", title: "Card 8: Dynamic Action" },
-      ];
-
-      // Launch Wave 2 with controlled staggering (800ms) to prevent proxy socket bursts
-      const wave2Promises = wave2Slots.map((item, idx) => {
-        return new Promise<boolean>((resolve) => {
-          setTimeout(async () => {
-            const ok = await handleRenderAsset(item.targetType, item.slot, undefined, { skipRefresh: true });
-            resolve(ok);
-          }, idx * 800);
-        });
-      });
-
-      await Promise.all(wave2Promises);
+      await executeDownstreamForCharacter(
+        selectedChar,
+        false, // Explicit single-character button re-renders all downstream
+        (msg) => setDownstreamProgressText(msg),
+        abortDownstreamRef
+      );
+    } catch (err: any) {
+      console.error("Downstream generation error:", err);
     } finally {
       setDownstreamProgressText(null);
+      setIsStoppingDownstream(false);
       setIsRegeneratingAllDownstream(false);
       if (onSilentRefresh) {
         await onSilentRefresh();
@@ -1484,6 +1860,196 @@ export default function CharacterMatrixTab({
         await onRefresh({ silent: true });
       }
       if (selectedChar?.id) fetchPrompts(selectedChar.id);
+    }
+  };
+
+  // Helper to estimate asset count for batch downstream generation
+  const calculateEstimatedAssets = (resume: boolean) => {
+    const readyChars = characters.filter(
+      (c) => c.closeup_image_url && c.closeup_image_url.trim().length > 0
+    );
+    let toRender = 0;
+    let alreadyExists = 0;
+
+    readyChars.forEach((c) => {
+      const slots = [
+        c.expression_image_url,
+        c.front_image_url,
+        c.side_image_url,
+        c.three_quarter_image_url,
+        c.back_image_url,
+        c.tpose_image_url,
+        c.action_image_url,
+      ];
+      slots.forEach((url) => {
+        if (url) alreadyExists++;
+        else toRender++;
+      });
+      const states = c.states || [];
+      if (states.length > 0) {
+        states.forEach((st) => {
+          if (st.image_url) alreadyExists++;
+          else toRender++;
+        });
+      } else {
+        toRender += 5;
+      }
+    });
+
+    if (!resume) {
+      return {
+        toRender: toRender + alreadyExists,
+        alreadyExists: 0,
+      };
+    }
+    return { toRender, alreadyExists };
+  };
+
+  // Open Batch Pre-Flight Check Modal
+  const handleOpenBatchModal = async () => {
+    if (isLocked || isBatchGenerating) return;
+    if (selectedProvider === "google_flow") {
+      await handleCheckProxy();
+    }
+    setBatchPreflightModalOpen(true);
+  };
+
+  // Sequential Batch Orchestrator for All Ready Characters
+  const handleStartBatchDownstream = async () => {
+    if (isLocked || isBatchGenerating) return;
+
+    const readyChars = characters.filter(
+      (c) => c.closeup_image_url && c.closeup_image_url.trim().length > 0
+    );
+    const skippedChars = characters.filter(
+      (c) => !c.closeup_image_url || !c.closeup_image_url.trim().length
+    );
+
+    if (readyChars.length === 0) return;
+
+    if (selectedProvider === "google_flow") {
+      const pStatus = await handleCheckProxy();
+      if (!pStatus.healthy) {
+        setProxyOfflineAlert({
+          isOpen: true,
+          message: "Batch Downstream Dibatalkan (SOCKS5 Proxy Offline)",
+          detail: pStatus.detail || "Koneksi reverse tunnel HP Android (127.0.0.1:10808) tidak aktif.",
+        });
+        return;
+      }
+    }
+
+    setBatchPreflightModalOpen(false);
+    setIsBatchGenerating(true);
+    setIsStoppingBatch(false);
+    abortBatchRef.current = false;
+
+    // Mobile Wake Lock to prevent screen sleep / background throttling
+    await requestWakeLock();
+
+    // Prevent accidental page close or navigation during active batch
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "Batch Downstream Generation sedang berlangsung. Yakin ingin keluar?";
+      return e.returnValue;
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+
+    const successfulChars: string[] = [];
+    const failedChars: { name: string; role: string; error: string }[] = [];
+
+    try {
+      for (let i = 0; i < readyChars.length; i++) {
+        if (abortBatchRef.current) break;
+
+        const char = readyChars[i];
+
+        // Automatically switch view to the character currently being processed
+        handleSelectCharacter(char.id);
+
+        setBatchProgress({
+          currentCharIdx: i + 1,
+          totalReady: readyChars.length,
+          charName: char.name,
+          currentStep: 0,
+          totalSteps: 7 + (char.states?.length || 5),
+          stepText: "Memulai downstream pipeline...",
+        });
+
+        const res = await executeDownstreamForCharacter(
+          char,
+          batchResumeMode,
+          (stepText, currentStep, totalSteps) => {
+            setBatchProgress({
+              currentCharIdx: i + 1,
+              totalReady: readyChars.length,
+              charName: char.name,
+              currentStep,
+              totalSteps,
+              stepText,
+            });
+          },
+          abortBatchRef
+        );
+
+        if (res.success) {
+          successfulChars.push(char.name);
+        } else if (!abortBatchRef.current) {
+          failedChars.push({
+            name: char.name,
+            role: char.role,
+            error: res.error || "Gagal menghasilkan aset downstream.",
+          });
+        }
+
+        // Silent refresh after each character to sync database state
+        if (onSilentRefresh) {
+          await onSilentRefresh();
+        } else {
+          await onRefresh({ silent: true });
+        }
+      }
+    } catch (err: any) {
+      console.error("Batch downstream unexpected error:", err);
+    } finally {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      await releaseWakeLock();
+
+      setIsBatchGenerating(false);
+      setIsStoppingBatch(false);
+      setBatchProgress(null);
+
+      // Open Summary Modal
+      setBatchSummaryData({
+        total: characters.length,
+        readyCount: readyChars.length,
+        successCount: successfulChars.length,
+        skippedChars: skippedChars.map((c) => ({
+          name: c.name,
+          role: c.role,
+          reason: "Belum memiliki Card 1: Character Close-Up (Master Anchor)",
+        })),
+        failedChars,
+        wasCancelled: abortBatchRef.current,
+      });
+      setBatchSummaryModalOpen(true);
+
+      if (onSilentRefresh) {
+        await onSilentRefresh();
+      } else {
+        await onRefresh({ silent: true });
+      }
+      if (selectedChar?.id) fetchPrompts(selectedChar.id);
+    }
+  };
+
+  const handleStopBatch = () => {
+    setIsStoppingBatch(true);
+    abortBatchRef.current = true;
+    if (batchProgress) {
+      setBatchProgress((prev) =>
+        prev ? { ...prev, stepText: "Menghentikan batch setelah aset aktif selesai..." } : null
+      );
     }
   };
 
@@ -1637,19 +2203,35 @@ export default function CharacterMatrixTab({
             {!isLocked && (
               <button
                 type="button"
-                onClick={() => handleRenderAsset(cfg.targetType, cfg.slot)}
+                onClick={() => {
+                  if (isBatchActive) {
+                    showBatchLockNotification(imageUrl ? `Re-render ${cfg.title}` : `Render ${cfg.title}`);
+                    return;
+                  }
+                  if (isRendering || isUploading) return;
+                  handleRenderAsset(cfg.targetType, cfg.slot);
+                }}
                 disabled={isRendering || isUploading}
+                aria-disabled={isBatchActive || isRendering || isUploading}
                 className={cn(
                   "py-1.5 px-2 rounded-lg font-bold flex items-center justify-center gap-1 transition-colors shadow-sm disabled:opacity-50",
-                  imageUrl
+                  isBatchActive
+                    ? "opacity-60 cursor-not-allowed border-amber-500/40 text-amber-300 bg-canvas"
+                    : imageUrl
                     ? "bg-canvas hover:bg-elevated border border-border hover:border-amber-500/50 text-obsidian-primary"
                     : "bg-amber-500 hover:bg-amber-600 text-canvas"
                 )}
-                title={imageUrl ? `Re-render ${cfg.title}` : `Render ${cfg.title}`}
+                title={
+                  isBatchActive
+                    ? "Terkunci: Proses batch sedang berlangsung"
+                    : imageUrl
+                    ? `Re-render ${cfg.title}`
+                    : `Render ${cfg.title}`
+                }
               >
                 {imageUrl ? (
                   <>
-                    <RefreshCw className="w-3 h-3 text-amber-400" />
+                    <RefreshCw className={cn("w-3 h-3 text-amber-400", isBatchActive && "opacity-60")} />
                     <span>Re-render</span>
                   </>
                 ) : (
@@ -1664,10 +2246,29 @@ export default function CharacterMatrixTab({
             {!isLocked && (
               <button
                 type="button"
-                onClick={() => document.getElementById(`upload-sheet-${cfg.slot}`)?.click()}
+                onClick={() => {
+                  if (isBatchActive) {
+                    showBatchLockNotification(`Upload ${cfg.title}`);
+                    return;
+                  }
+                  if (isRendering || isUploading) return;
+                  document.getElementById(`upload-sheet-${cfg.slot}`)?.click();
+                }}
                 disabled={isRendering || isUploading}
-                className="py-1.5 px-2 rounded-lg bg-canvas hover:bg-elevated border border-border hover:border-emerald-500/50 text-obsidian-secondary hover:text-obsidian-primary font-semibold flex items-center justify-center gap-1 transition-colors disabled:opacity-50"
-                title={imageUrl ? `Replace photo for ${cfg.title}` : `Upload photo for ${cfg.title}`}
+                aria-disabled={isBatchActive || isRendering || isUploading}
+                className={cn(
+                  "py-1.5 px-2 rounded-lg border font-semibold flex items-center justify-center gap-1 transition-colors disabled:opacity-50",
+                  isBatchActive
+                    ? "opacity-60 cursor-not-allowed bg-canvas border-border text-obsidian-muted"
+                    : "bg-canvas hover:bg-elevated border border-border hover:border-emerald-500/50 text-obsidian-secondary hover:text-obsidian-primary"
+                )}
+                title={
+                  isBatchActive
+                    ? "Terkunci: Proses batch sedang berlangsung"
+                    : imageUrl
+                    ? `Replace photo for ${cfg.title}`
+                    : `Upload photo for ${cfg.title}`
+                }
               >
                 <Upload className="w-3 h-3 text-emerald-400 shrink-0" />
                 <span>{imageUrl ? "Replace" : "Upload"}</span>
@@ -1719,90 +2320,240 @@ export default function CharacterMatrixTab({
 
   return (
     <div className="space-y-6">
-      {/* Top Section: Character Roster Bar */}
-      <div className="flex items-center justify-between">
+      {/* Top Section: Character Roster Bar & Action Controls */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
-          <h3 className="font-cinzel text-sm font-bold uppercase tracking-wider text-obsidian-primary flex items-center gap-2">
-            <Users className="w-4 h-4 text-amber-500" />
-            <span>Character Cast &amp; Dynamic State Matrix</span>
-          </h3>
+          <div className="flex items-center gap-2">
+            <h3 className="font-cinzel text-sm font-bold uppercase tracking-wider text-obsidian-primary flex items-center gap-2">
+              <Users className="w-4 h-4 text-amber-500" />
+              <span>Character Cast &amp; Dynamic State Matrix</span>
+            </h3>
+            <span className="px-2 py-0.5 rounded-full text-[9px] font-mono bg-amber-500/10 text-amber-400 border border-amber-500/30 font-bold">
+              {characters.length} Characters • Polya AI Screenwriter
+            </span>
+          </div>
           <p className="text-xs font-mono text-obsidian-muted mt-0.5">
             Maintains visual identity anchors, facial geometries, and wear states across all 50 scenes.
           </p>
         </div>
 
         {!isLocked && (
-          <button
-            type="button"
-            onClick={() => setAddCharModalOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-canvas font-mono font-bold text-xs transition-colors shadow-sm"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>Add Character</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setGenerateCastModalOpen(true)}
+              disabled={isBatchGenerating}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-canvas font-mono font-bold text-xs transition-colors shadow-sm"
+              title="Generate ensemble cast (5–8 karakter) via Polya AI Screenwriter"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>✨ Generate Cast (Polya AI)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setAddOneModalOpen(true)}
+              disabled={isBatchGenerating}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-panel hover:bg-elevated disabled:opacity-50 border border-border hover:border-amber-500/40 text-obsidian-primary font-mono font-semibold text-xs transition-colors shadow-sm"
+              title="Tambah 1 karakter baru via Polya AI dengan proteksi anti-duplikasi persona"
+            >
+              <Plus className="w-3.5 h-3.5 text-amber-500" />
+              <span>+ Add 1 Character (Polya AI)</span>
+            </button>
+
+            {/* Global Batch Downstream Generation Button */}
+            <button
+              type="button"
+              onClick={handleOpenBatchModal}
+              disabled={isBatchGenerating || characters.length === 0}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 disabled:opacity-50 text-canvas font-mono font-bold text-xs transition-all shadow-sm"
+              title="Generate Cards 2–8 + 5 Dynamic States untuk seluruh karakter yang sudah memiliki Card 1 (Master Anchor)"
+            >
+              {isBatchGenerating ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="w-3.5 h-3.5" />
+              )}
+              <span>Generate All Downstream for All Characters (Cards 2–8 + 5 States)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setAddCharModalOpen(true)}
+              disabled={isBatchGenerating}
+              className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-canvas hover:bg-elevated disabled:opacity-50 border border-border text-obsidian-muted hover:text-obsidian-primary font-mono text-xs transition-colors"
+              title="Tambah karakter manual"
+            >
+              <span>+ Manual</span>
+            </button>
+          </div>
         )}
       </div>
 
-      {/* Main Character Selector Tabs */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
-        {activeCharacters.map((char) => (
-          <button
-            key={char.id}
-            type="button"
-            onClick={() => handleSelectCharacter(char.id)}
-            className={cn(
-              "px-3.5 py-2 rounded-xl text-xs font-mono transition-all border text-left shrink-0 flex items-center gap-2.5",
-              selectedChar.id === char.id
-                ? "bg-amber-500/10 border-amber-500/50 text-amber-400 font-bold shadow-sm"
-                : "bg-panel border-border text-obsidian-secondary hover:text-obsidian-primary hover:border-border/80"
-            )}
-          >
-            <div
-              className={cn(
-                "w-2 h-2 rounded-full",
-                selectedChar.id === char.id ? "bg-amber-500" : "bg-obsidian-muted/40"
-              )}
-            />
-            <div>
-              <div className="font-medium text-obsidian-primary leading-tight">{char.name}</div>
-              <span className="text-[9px] uppercase text-obsidian-muted font-semibold">
-                {char.role}
-              </span>
+      {/* Live Batch Downstream Progress HUD Banner */}
+      {isBatchGenerating && batchProgress && (
+        <div className="p-4 rounded-xl bg-gradient-to-r from-amber-500/10 via-canvas to-amber-500/5 border border-amber-500/40 space-y-3 shadow-md animate-in fade-in duration-200">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping" />
+                <span className="text-xs font-mono font-bold text-amber-300 uppercase tracking-wider">
+                  Processing Character {batchProgress.currentCharIdx}/{batchProgress.totalReady}: {batchProgress.charName} — Cards 2–8 + 5 States
+                </span>
+              </div>
+              <p className="text-xs font-mono text-obsidian-secondary">
+                {batchProgress.stepText}
+              </p>
             </div>
-          </button>
-        ))}
-      </div>
 
-      {/* Informational banner when operating on template characters */}
-      {characters.length === 0 && (
-        <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-          <div className="flex items-start sm:items-center gap-2.5">
-            <Sparkles className="w-4 h-4 text-amber-400 shrink-0 mt-0.5 sm:mt-0" />
-            <div>
-              <span className="font-semibold text-amber-300">Template Karakter Aktif:</span>
-              <span className="text-obsidian-secondary ml-1.5">
-                Proyek ini belum memiliki karakter tersimpan di database. Anda dapat langsung mengklik <strong>Render</strong> atau <strong>Upload</strong> pada kartu di bawah (akan disimpan otomatis), atau simpan sekarang.
-              </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleStopBatch}
+                disabled={isStoppingBatch}
+                className="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 disabled:opacity-50 border border-rose-500/40 text-rose-300 font-bold text-xs flex items-center gap-1.5 transition-all shadow-sm"
+                title="Hentikan batch downstream setelah aset aktif selesai"
+              >
+                {isStoppingBatch ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Stopping...</span>
+                  </>
+                ) : (
+                  <>
+                    <XCircle className="w-3.5 h-3.5" />
+                    <span>Stop Batch</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={async () => {
-                try {
-                  await ensurePersistedCharacter(selectedChar);
-                } catch (e: any) {
-                  console.error(e);
-                }
+
+          {/* Granular Step Progress Bar */}
+          <div className="w-full bg-black/40 rounded-full h-2 overflow-hidden border border-border/80">
+            <div
+              className="bg-gradient-to-r from-amber-500 to-amber-400 h-full transition-all duration-300"
+              style={{
+                width: `${Math.min(
+                  100,
+                  Math.round(
+                    (((batchProgress.currentCharIdx - 1) * batchProgress.totalSteps +
+                      batchProgress.currentStep) /
+                      (batchProgress.totalReady * batchProgress.totalSteps)) *
+                      100
+                  )
+                )}%`,
               }}
-              className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-canvas font-bold font-mono text-[11px] transition-all shadow-sm flex items-center gap-1.5"
-            >
-              <Users className="w-3.5 h-3.5" />
-              <span>Simpan &quot;{selectedChar.name}&quot; ke Proyek</span>
-            </button>
+            />
+          </div>
+
+          <div className="flex items-center justify-between text-[10px] font-mono text-obsidian-muted">
+            <div className="flex items-center gap-1.5">
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Card 1 Read-Only Protected</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span>Auto-saved to Persistent SQLite Storage</span>
+            </div>
           </div>
         </div>
       )}
+
+      {characters.length === 0 ? (
+        <div className="p-8 sm:p-12 rounded-2xl bg-panel border border-border/80 text-center space-y-6 shadow-sm">
+          <div className="mx-auto w-16 h-16 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 shadow-inner">
+            <Sparkles className="w-8 h-8" />
+          </div>
+          <div className="max-w-xl mx-auto space-y-2">
+            <h3 className="font-cinzel text-xl font-bold text-obsidian-primary">
+              No Characters Created Yet
+            </h3>
+            <p className="text-xs font-mono text-obsidian-secondary leading-relaxed">
+              Proyek <strong className="text-obsidian-primary">{project?.title || "Ini"}</strong> belum memiliki karakter di Master Production Bible.
+              Gunakan <strong>Polya AI (Screenwriter)</strong> untuk men-generate susunan cast ensemble (5–8 karakter) secara otomatis berbasis sinopsis dan aturan dunia cerita.
+            </p>
+          </div>
+
+          <div className="max-w-md mx-auto p-4 rounded-xl bg-canvas border border-border/80 flex items-center justify-between text-xs font-mono text-left shadow-sm">
+            <div className="space-y-0.5">
+              <span className="text-[10px] uppercase text-obsidian-muted font-semibold block">Konteks Cerita Proyek:</span>
+              <span className="text-obsidian-primary font-bold text-xs block">
+                {project?.title || "Project Untitled"} ({String((project?.settings as any)?.genre || project?.target_style_code || "Cinematic")})
+              </span>
+              <div className="text-[11px] text-obsidian-secondary truncate max-w-xs mt-0.5">
+                {String((project?.settings as any)?.synopsis || (project?.settings as any)?.logline || (project?.settings as any)?.description || (project?.settings as any)?.premise || "Sinopsis siap diproses oleh Polya AI Screenwriter.")}
+              </div>
+            </div>
+            <span className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase shrink-0 border bg-emerald-500/10 text-emerald-400 border-emerald-500/30">
+              Ready for Polya AI
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+            <button
+              type="button"
+              onClick={() => setGenerateCastModalOpen(true)}
+              className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-canvas font-bold font-mono text-xs flex items-center gap-2 transition-all shadow-md hover:scale-[1.02]"
+            >
+              <Sparkles className="w-4 h-4" />
+              <span>✨ Generate Cast Ensemble (Polya AI)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setAddOneModalOpen(true)}
+              className="px-4 py-2.5 rounded-xl bg-panel hover:bg-elevated text-obsidian-primary border border-border hover:border-amber-500/40 font-semibold font-mono text-xs flex items-center gap-2 transition-all"
+            >
+              <Plus className="w-4 h-4 text-amber-500" />
+              <span>+ Add 1 Character (Polya AI)</span>
+            </button>
+          </div>
+        </div>
+      ) : selectedChar ? (
+        <>
+          {/* Main Character Selector Tabs */}
+          <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
+            {activeCharacters.map((char) => {
+              const isSelected = selectedChar.id === char.id;
+              const roleBadgeColor =
+                char.role === "PROTAGONIST"
+                  ? "text-amber-400 border-amber-500/30"
+                  : char.role === "ANTAGONIST"
+                  ? "text-rose-400 border-rose-500/30"
+                  : char.role === "DEUTERAGONIST"
+                  ? "text-blue-400 border-blue-500/30"
+                  : char.role === "MENTOR"
+                  ? "text-purple-400 border-purple-500/30"
+                  : "text-emerald-400 border-emerald-500/30";
+
+              return (
+                <button
+                  key={char.id}
+                  type="button"
+                  onClick={() => handleSelectCharacter(char.id)}
+                  className={cn(
+                    "px-3.5 py-2 rounded-xl text-xs font-mono transition-all border text-left shrink-0 flex items-center gap-2.5",
+                    isSelected
+                      ? "bg-amber-500/10 border-amber-500/50 text-amber-400 font-bold shadow-sm"
+                      : "bg-panel border-border text-obsidian-secondary hover:text-obsidian-primary hover:border-border/80"
+                  )}
+                >
+                  <div
+                    className={cn(
+                      "w-2 h-2 rounded-full",
+                      isSelected ? "bg-amber-500" : "bg-obsidian-muted/40"
+                    )}
+                  />
+                  <div>
+                    <div className="font-medium text-obsidian-primary leading-tight">{char.name}</div>
+                    <span className={cn("text-[9px] uppercase font-semibold", roleBadgeColor)}>
+                      {char.role}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
 
       {/* =========================================================================
        * AI Render Model & Provider Selection Toolbar
@@ -1971,18 +2722,26 @@ export default function CharacterMatrixTab({
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div className="lg:col-span-2 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] font-mono text-amber-500 font-bold uppercase px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/30">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className={cn(
+                  "text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded border",
+                  selectedChar.role === "PROTAGONIST"
+                    ? "text-amber-400 bg-amber-500/10 border-amber-500/30"
+                    : selectedChar.role === "ANTAGONIST"
+                    ? "text-rose-400 bg-rose-500/10 border-rose-500/30"
+                    : "text-blue-400 bg-blue-500/10 border-blue-500/30"
+                )}>
                   {selectedChar.role}
                 </span>
+
                 <button
                   type="button"
-                  onClick={() => handleCopySeed(selectedChar.dna_seed || "285358")}
+                  onClick={() => handleCopySeed(selectedChar.dna_seed || "—")}
                   className="flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20 transition-colors"
                   title="Click to copy locked DNA Seed"
                 >
                   <Lock className="w-3 h-3 text-emerald-400" />
-                  <span>SEED: #{selectedChar.dna_seed || "285358"}</span>
+                  <span>SEED: #{selectedChar.dna_seed || "—"}</span>
                   {copiedSeed ? (
                     <Check className="w-3 h-3 text-emerald-300 ml-1" />
                   ) : (
@@ -1993,20 +2752,164 @@ export default function CharacterMatrixTab({
                   DNA SEED LOCKED
                 </span>
               </div>
-              <span className="text-[10px] font-mono text-obsidian-muted">
-                Biometric Identity &bull; Locked Deterministic Truth
-              </span>
+
+              {!isLocked && (
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setRegenModalOpen(true)}
+                    disabled={isBatchGenerating}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 text-[11px] font-mono font-semibold transition-colors disabled:opacity-50"
+                    title="Generate ulang hanya karakter ini via Polya AI Screenwriter"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>🔄 Re-generate Character (Polya AI)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteCharacter(selectedChar.id, selectedChar.name)}
+                    disabled={isDeletingChar || isBatchGenerating}
+                    className="flex items-center gap-1 px-2 py-1 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-[11px] font-mono transition-colors disabled:opacity-50"
+                    title="Hapus karakter ini dari proyek"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    <span>Delete</span>
+                  </button>
+                </div>
+              )}
             </div>
 
-            <h4 className="font-cinzel text-lg font-bold text-obsidian-primary">
-              {selectedChar.name}
-            </h4>
-
-            <div className="space-y-1 text-xs font-mono">
-              <label className="text-[10px] text-obsidian-muted uppercase font-semibold">Base Visual Prompt</label>
-              <div className="p-2.5 rounded-lg bg-canvas border border-border text-obsidian-primary leading-relaxed text-[11px]">
-                {selectedChar.base_prompt}
+            {/* Character Name & Role Inline Edit */}
+            {isEditingCharIdentity ? (
+              <div className="p-3 rounded-xl bg-canvas border border-amber-500/40 space-y-2.5 animate-in fade-in duration-150">
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <div className="flex-1">
+                    <label className="text-[10px] text-obsidian-muted uppercase font-semibold block mb-1">
+                      Nama Karakter
+                    </label>
+                    <input
+                      type="text"
+                      value={editCharName}
+                      onChange={(e) => setEditCharName(e.target.value)}
+                      className="w-full px-3 py-1.5 rounded-lg bg-panel border border-border text-obsidian-primary text-sm font-bold focus:border-amber-500 focus:outline-none"
+                    />
+                  </div>
+                  <div className="sm:w-44">
+                    <label className="text-[10px] text-obsidian-muted uppercase font-semibold block mb-1">
+                      Peran / Role
+                    </label>
+                    <select
+                      value={editCharRole}
+                      onChange={(e) => setEditCharRole(e.target.value)}
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-panel border border-border text-obsidian-primary text-xs font-mono focus:border-amber-500 focus:outline-none"
+                    >
+                      <option value="PROTAGONIST">PROTAGONIST</option>
+                      <option value="ANTAGONIST">ANTAGONIST</option>
+                      <option value="DEUTERAGONIST">DEUTERAGONIST</option>
+                      <option value="MENTOR">MENTOR</option>
+                      <option value="SUPPORTING">SUPPORTING</option>
+                      <option value="EXTRAS">EXTRAS</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="flex items-center justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingCharIdentity(false)}
+                    className="px-2.5 py-1 rounded text-xs font-mono text-obsidian-muted hover:text-obsidian-primary hover:bg-elevated transition-colors"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveCharacterIdentity}
+                    disabled={isSavingCharIdentity || !editCharName.trim()}
+                    className="px-3 py-1 rounded bg-amber-500 hover:bg-amber-600 text-canvas text-xs font-mono font-bold flex items-center gap-1 transition-colors disabled:opacity-50"
+                  >
+                    {isSavingCharIdentity ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                    <span>Simpan</span>
+                  </button>
+                </div>
               </div>
+            ) : (
+              <div className="flex items-center gap-2 group">
+                <h4 className="font-cinzel text-lg font-bold text-obsidian-primary">
+                  {selectedChar.name}
+                </h4>
+                {!isLocked && !isBatchGenerating && (
+                  <button
+                    type="button"
+                    onClick={handleStartEditIdentity}
+                    className="p-1 rounded text-obsidian-muted hover:text-amber-400 hover:bg-elevated transition-colors"
+                    title="Edit nama dan peran karakter"
+                  >
+                    <Edit className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Narrative Summary (from Polya AI Screenwriter) */}
+            {selectedChar.narrative_summary && (
+              <div className="p-2.5 rounded-lg bg-canvas/70 border border-border/80 text-xs font-sans text-obsidian-secondary leading-relaxed">
+                <span className="text-[10px] font-mono text-amber-400 font-bold uppercase tracking-wide block mb-0.5">
+                  Narrative Profile &amp; Dramatic Arc
+                </span>
+                {selectedChar.narrative_summary}
+              </div>
+            )}
+
+            {/* Base Visual Prompt with Inline Edit */}
+            <div className="space-y-1 text-xs font-mono">
+              <div className="flex items-center justify-between">
+                <label className="text-[10px] text-obsidian-muted uppercase font-semibold">
+                  Base Visual Prompt
+                </label>
+                {!isLocked && !isEditingPrompt && !isBatchGenerating && (
+                  <button
+                    type="button"
+                    onClick={handleStartEditPrompt}
+                    className="text-[10px] text-amber-400 hover:text-amber-300 flex items-center gap-1 hover:underline"
+                  >
+                    <Edit className="w-3 h-3" />
+                    <span>Edit Prompt</span>
+                  </button>
+                )}
+              </div>
+
+              {isEditingPrompt ? (
+                <div className="space-y-2">
+                  <textarea
+                    value={editBasePrompt}
+                    onChange={(e) => setEditBasePrompt(e.target.value)}
+                    rows={4}
+                    className="w-full px-3 py-2 rounded-lg bg-canvas border border-amber-500/50 text-obsidian-primary leading-relaxed text-[11px] focus:outline-none focus:border-amber-500"
+                  />
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingPrompt(false)}
+                      className="px-2.5 py-1 rounded text-xs font-mono text-obsidian-muted hover:text-obsidian-primary"
+                    >
+                      Batal
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSaveBasePrompt}
+                      disabled={isSavingPrompt || !editBasePrompt.trim()}
+                      className="px-3 py-1 rounded bg-amber-500 hover:bg-amber-600 text-canvas text-xs font-mono font-bold flex items-center gap-1 transition-colors disabled:opacity-50"
+                    >
+                      {isSavingPrompt ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                      <span>Simpan Prompt</span>
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-2.5 rounded-lg bg-canvas border border-border text-obsidian-primary leading-relaxed text-[11px]">
+                  {selectedChar.base_prompt}
+                </div>
+              )}
             </div>
           </div>
 
@@ -2018,7 +2921,7 @@ export default function CharacterMatrixTab({
               </label>
               <div className="p-2.5 rounded-lg bg-canvas border border-border flex items-center justify-between">
                 <span className="text-obsidian-secondary text-[11px] truncate">
-                  {selectedChar.voice_ref_asset_id || "Acoustic Timbre Default"}
+                  {selectedChar.voice_dna_profile || selectedChar.voice_ref_asset_id || "Acoustic Timbre Default"}
                 </span>
                 <span className="px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 text-[9px] font-bold shrink-0">
                   128kbps HQ
@@ -2060,7 +2963,7 @@ export default function CharacterMatrixTab({
       </div>
 
       {/* =========================================================================
-       * SEVEN-SHEET CHARACTER PRODUCTION MATRIX
+       * EIGHT-SHEET CHARACTER PRODUCTION MATRIX
        * ========================================================================= */}
       <div className="p-4 rounded-xl bg-panel border border-border space-y-5">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-border/80 pb-3">
@@ -2068,10 +2971,10 @@ export default function CharacterMatrixTab({
             <div className="flex items-center gap-2">
               <Camera className="w-4 h-4 text-amber-500" />
               <h4 className="font-cinzel text-sm font-bold uppercase tracking-wider text-obsidian-primary">
-                Seven-Sheet Character Production Matrix
+                Eight-Sheet Character Production Matrix
               </h4>
               <span className="px-2 py-0.5 rounded-full text-[9px] font-mono bg-amber-500/15 text-amber-400 border border-amber-500/30 font-bold">
-                Sequential Visual Anchoring
+                Sequential Visual Anchoring (8 Cards + Dynamic States)
               </span>
             </div>
             <p className="text-[11px] font-mono text-obsidian-muted mt-0.5">
@@ -2080,28 +2983,69 @@ export default function CharacterMatrixTab({
           </div>
           <div className="flex items-center gap-2 flex-wrap">
             {!isLocked && (
-              <button
-                type="button"
-                onClick={handleRegenerateAllDownstream}
-                disabled={isRegeneratingAllDownstream || !selectedChar.closeup_image_url}
-                className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-canvas font-bold text-xs flex items-center gap-1.5 transition-all shadow-sm"
-                title={
-                  !selectedChar.closeup_image_url
-                    ? "Slot 1 Close-Up diperlukan sebagai Master Anchor"
-                    : "Regenerate Card 2 hingga 8 secara sekuensial satu per satu"
-                }
-              >
-                {isRegeneratingAllDownstream ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Sparkles className="w-3.5 h-3.5" />
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleRegenerateAllDownstream}
+                  disabled={isRegeneratingAllDownstream || isBatchGenerating || !selectedChar.closeup_image_url}
+                  className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-canvas font-bold text-xs flex items-center gap-1.5 transition-all shadow-sm"
+                  title={
+                    isBatchGenerating
+                      ? "Batch Downstream sedang berlangsung..."
+                      : !selectedChar.closeup_image_url
+                      ? "Card 1 Close-Up diperlukan sebagai Master Anchor"
+                      : "Jalankan One-Click Full Downstream Pipeline (Card 2–8 + Dynamic States) secara sekuensial berfase"
+                  }
+                >
+                  {isRegeneratingAllDownstream ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Sparkles className="w-3.5 h-3.5" />
+                  )}
+                  <span>
+                    {isRegeneratingAllDownstream
+                      ? downstreamProgressText || "Processing Pipeline..."
+                      : `Regenerate All Downstream (Cards 2–8 + ${selectedChar.states?.length || 5} States)`}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleRetryFailedOnly(selectedChar)}
+                  disabled={isRegeneratingAllDownstream || isBatchGenerating || !selectedChar.closeup_image_url}
+                  className="px-3 py-1.5 rounded-lg bg-panel hover:bg-elevated border border-amber-500/40 text-amber-300 font-bold text-xs flex items-center gap-1.5 transition-all shadow-sm disabled:opacity-50"
+                  title="Hanya render ulang kartu dan state yang belum terisi atau gagal pada karakter ini (Resume Mode)"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Retry Missing / Failed</span>
+                </button>
+
+                {isRegeneratingAllDownstream && (
+                  <button
+                    type="button"
+                    disabled={isStoppingDownstream}
+                    onClick={() => {
+                      setIsStoppingDownstream(true);
+                      abortDownstreamRef.current = true;
+                      setDownstreamProgressText("Menghentikan pipeline downstream...");
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 disabled:opacity-50 border border-rose-500/40 text-rose-300 font-bold text-xs flex items-center gap-1 transition-all"
+                    title="Hentikan pipeline setelah step aktif selesai"
+                  >
+                    {isStoppingDownstream ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Stopping...</span>
+                      </>
+                    ) : (
+                      <>
+                        <XCircle className="w-3.5 h-3.5" />
+                        <span>Stop</span>
+                      </>
+                    )}
+                  </button>
                 )}
-                <span>
-                  {isRegeneratingAllDownstream
-                    ? downstreamProgressText || "Regenerating Downstream..."
-                    : "Regenerate All Downstream (Slot 2 → 7)"}
-                </span>
-              </button>
+              </div>
             )}
             <div className="text-[10px] font-mono text-obsidian-muted flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
@@ -2276,7 +3220,7 @@ export default function CharacterMatrixTab({
                     <div className="flex items-center gap-2">
                       <span className="font-bold text-amber-400 text-xs">{st.state_code}</span>
                       <span className="px-1.5 py-0.2 rounded text-[9px] font-mono bg-blue-500/10 text-blue-400 border border-blue-500/20">
-                        Anchors: [Card 1, 2]
+                        Anchors: [Card 1, 3]
                       </span>
                       <button
                         type="button"
@@ -2286,7 +3230,7 @@ export default function CharacterMatrixTab({
                       >
                         <Eye className="w-3.5 h-3.5" />
                       </button>
-                      {!isLocked && (
+                      {!isLocked && !isBatchGenerating && (
                         <>
                           <button
                             type="button"
@@ -2313,7 +3257,7 @@ export default function CharacterMatrixTab({
                       )}
                     </div>
                     <span className="text-[10px] text-obsidian-muted">
-                      {st.state_code === "#State 01"
+                      {st.state_label || (st.state_code === "#State 01"
                         ? "Normal Baseline"
                         : st.state_code === "#State 02"
                         ? "Fatigue & Wear"
@@ -2321,7 +3265,7 @@ export default function CharacterMatrixTab({
                         ? "Battle Damaged"
                         : st.state_code === "#State 04"
                         ? "Psychological Breakdown"
-                        : "Climax / Metamorphosis"}
+                        : "Climax / Metamorphosis")}
                     </span>
                   </div>
 
@@ -2347,8 +3291,25 @@ export default function CharacterMatrixTab({
                         {!isLocked && (
                           <button
                             type="button"
-                            onClick={() => handleRenderAsset("state", undefined, st.id)}
-                            className="p-1 rounded bg-amber-500 hover:bg-amber-600 text-canvas font-bold text-[10px] flex items-center gap-1 px-2"
+                            onClick={() => {
+                              if (isBatchActive) {
+                                showBatchLockNotification(`Render Ulang State ${st.state_code}`);
+                                return;
+                              }
+                              handleRenderAsset("state", undefined, st.id);
+                            }}
+                            aria-disabled={isBatchActive}
+                            className={cn(
+                              "p-1 rounded text-canvas font-bold text-[10px] flex items-center gap-1 px-2 transition-colors",
+                              isBatchActive
+                                ? "bg-amber-500/50 opacity-60 cursor-not-allowed"
+                                : "bg-amber-500 hover:bg-amber-600"
+                            )}
+                            title={
+                              isBatchActive
+                                ? "Terkunci: Proses batch sedang berlangsung"
+                                : `Render Ulang State ${st.state_code}`
+                            }
                           >
                             <RefreshCw className="w-3 h-3" />
                             <span>Render Ulang</span>
@@ -2399,8 +3360,25 @@ export default function CharacterMatrixTab({
                 {!isLocked && !st.image_url && !isRendering && (
                   <button
                     type="button"
-                    onClick={() => handleRenderAsset("state", undefined, st.id)}
-                    className="w-full mt-2.5 flex items-center justify-center gap-1.5 py-1.5 rounded-lg bg-elevated hover:bg-amber-500 hover:text-canvas border border-border text-obsidian-secondary text-[10px] font-bold transition-all shadow-sm"
+                    onClick={() => {
+                      if (isBatchActive) {
+                        showBatchLockNotification(`Render Visual State ${st.state_code}`);
+                        return;
+                      }
+                      handleRenderAsset("state", undefined, st.id);
+                    }}
+                    aria-disabled={isBatchActive}
+                    className={cn(
+                      "w-full mt-2.5 flex items-center justify-center gap-1.5 py-1.5 rounded-lg border text-[10px] font-bold transition-all shadow-sm",
+                      isBatchActive
+                        ? "bg-elevated opacity-60 cursor-not-allowed border-amber-500/30 text-amber-300"
+                        : "bg-elevated hover:bg-amber-500 hover:text-canvas border-border text-obsidian-secondary"
+                    )}
+                    title={
+                      isBatchActive
+                        ? "Terkunci: Proses batch sedang berlangsung"
+                        : `Render Visual State ${st.state_code}`
+                    }
                   >
                     <Sparkles className="w-3 h-3 text-amber-400" />
                     <span>Render Visual State</span>
@@ -2411,6 +3389,8 @@ export default function CharacterMatrixTab({
           })}
         </div>
       </div>
+        </>
+      ) : null}
 
       {/* Add Character Modal & Pre-Creation Visual Gatekeeper */}
       {addCharModalOpen && (
@@ -2555,7 +3535,7 @@ export default function CharacterMatrixTab({
                     type="text"
                     value={newCharName}
                     onChange={(e) => setNewCharName(e.target.value)}
-                    placeholder="e.g. Elena Rostova / Cipher Vance"
+                    placeholder="e.g. Elena Rostova / Kaito Tanaka"
                     className="w-full px-3 py-2 rounded-lg bg-canvas border border-border text-obsidian-primary focus:border-amber-500 focus:outline-none"
                   />
                 </div>
@@ -3141,6 +4121,18 @@ export default function CharacterMatrixTab({
                   />
                 </div>
 
+                {/* STATE LABEL / DRAMATIC SUBTITLE */}
+                <div className="space-y-1">
+                  <label className="text-obsidian-secondary font-semibold">State Label / Dramatic Subtitle</label>
+                  <input
+                    type="text"
+                    value={newStateLabel}
+                    onChange={(e) => setNewStateLabel(e.target.value)}
+                    placeholder="e.g. Normal Baseline / Wear & Tear / Climax Catharsis"
+                    className="w-full px-3 py-2 rounded-lg bg-canvas border border-border text-obsidian-primary focus:border-amber-500 focus:outline-none"
+                  />
+                </div>
+
                 {/* BOX 1: WARDROBE */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
@@ -3344,7 +4336,7 @@ export default function CharacterMatrixTab({
                 <div className="text-[11px] text-obsidian-muted flex items-center gap-2">
                   <span>Character: <strong className="text-obsidian-primary">{selectedChar.name}</strong></span>
                   <span>&bull;</span>
-                  <span className="text-emerald-400 font-bold">DNA SEED: #{selectedChar.dna_seed || "285358"}</span>
+                  <span className="text-emerald-400 font-bold">DNA SEED: #{selectedChar?.dna_seed || "—"}</span>
                 </div>
               </div>
 
@@ -3459,7 +4451,7 @@ export default function CharacterMatrixTab({
                     <div>
                       <span className="text-obsidian-muted block">DNA Seed:</span>
                       <span className="text-blue-400 font-bold">
-                        #{selectedChar.dna_seed || "285358"}
+                        #{selectedChar?.dna_seed || "—"}
                       </span>
                     </div>
                   </div>
@@ -3512,6 +4504,259 @@ export default function CharacterMatrixTab({
                 <ExternalLink className="w-3 h-3" />
                 <span>Buka di Tab Baru</span>
               </a>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Polya AI Screenwriter: Generate Cast Modal */}
+      {generateCastModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="w-full max-w-lg rounded-2xl bg-panel border border-border shadow-2xl p-5 space-y-4 text-obsidian-primary font-sans animate-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between border-b border-border pb-3">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-amber-500" />
+                <h4 className="font-cinzel text-sm font-bold uppercase text-obsidian-primary">
+                  Generate Cast Ensemble (Polya AI Screenwriter)
+                </h4>
+              </div>
+              <button
+                type="button"
+                onClick={() => setGenerateCastModalOpen(false)}
+                className="text-obsidian-muted hover:text-obsidian-primary p-1 rounded-lg hover:bg-elevated transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs font-mono text-obsidian-secondary leading-relaxed">
+              Polya AI berperan sebagai Master Screenwriter Hollywood, membaca judul &amp; sinopsis proyek{" "}
+              <strong className="text-obsidian-primary">{project?.title || "proyek"}</strong>, lalu menyusun 5–8 karakter ensemble lengkap beserta persona, base visual prompt, voice DNA profile, dan 5 dynamic progression states.
+            </p>
+
+            {characters.length > 0 && (
+              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs font-mono text-amber-300 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <span>
+                  <strong>Perhatian:</strong> Proyek sudah memiliki {characters.length} karakter. Menjalankan Generate Cast akan menggantikan cast yang ada dengan ensemble baru.
+                </span>
+              </div>
+            )}
+
+            <div className="space-y-3 text-xs font-mono">
+              <div className="space-y-1">
+                <label className="text-obsidian-secondary font-semibold">Jumlah Karakter (Cast Size)</label>
+                <select
+                  value={preferredCastCount || ""}
+                  onChange={(e) => setPreferredCastCount(e.target.value ? parseInt(e.target.value) : null)}
+                  className="w-full px-3 py-2 rounded-lg bg-canvas border border-border text-obsidian-primary text-xs focus:border-amber-500 focus:outline-none"
+                >
+                  <option value="">Otomatis (Ditentukan Polya AI, 5–8 Karakter)</option>
+                  <option value="5">5 Karakter (Tight Ensemble)</option>
+                  <option value="6">6 Karakter (Standard Narrative)</option>
+                  <option value="7">7 Karakter (Expanded Universe)</option>
+                  <option value="8">8 Karakter (Epic Ensemble)</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-obsidian-secondary font-semibold">Catatan / Arahan Khusus Penulis (Opsional)</label>
+                <textarea
+                  value={castAdditionalNotes}
+                  onChange={(e) => setCastAdditionalNotes(e.target.value)}
+                  rows={3}
+                  placeholder="Contoh: Tekankan konflik moral antara Protagonist dan Mentor, gunakan setting noir lembab..."
+                  className="w-full px-3 py-2 rounded-lg bg-canvas border border-border text-obsidian-primary focus:border-amber-500 focus:outline-none resize-none text-xs"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-border">
+              <button
+                type="button"
+                onClick={() => setGenerateCastModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-canvas border border-border text-xs font-semibold text-obsidian-secondary hover:text-obsidian-primary transition"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleGenerateCast}
+                disabled={isGeneratingCast}
+                className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 active:scale-95 text-canvas font-bold text-xs flex items-center gap-2 shadow-lg transition disabled:opacity-50"
+              >
+                {isGeneratingCast ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                <span>Generate Cast Sekarang</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Polya AI Screenwriter: Add 1 Character Modal */}
+      {addOneModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="w-full max-w-lg rounded-2xl bg-panel border border-border shadow-2xl p-5 space-y-4 text-obsidian-primary font-sans animate-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between border-b border-border pb-3">
+              <div className="flex items-center gap-2">
+                <Plus className="w-4 h-4 text-amber-500" />
+                <h4 className="font-cinzel text-sm font-bold uppercase text-obsidian-primary">
+                  Add 1 Character (Polya AI Screenwriter)
+                </h4>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAddOneModalOpen(false)}
+                className="text-obsidian-muted hover:text-obsidian-primary p-1 rounded-lg hover:bg-elevated transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs font-mono text-obsidian-secondary leading-relaxed">
+              Menambahkan 1 karakter baru ke dalam ensemble dengan proteksi anti-duplikasi persona &amp; visual terhadap {characters.length} karakter yang sudah ada.
+            </p>
+
+            <div className="space-y-3 text-xs font-mono">
+              <div className="space-y-1">
+                <label className="text-obsidian-secondary font-semibold">Peran / Role yang Diinginkan</label>
+                <select
+                  value={addOnePreferredRole}
+                  onChange={(e) => setAddOnePreferredRole(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-canvas border border-border text-obsidian-primary text-xs focus:border-amber-500 focus:outline-none"
+                >
+                  <option value="DEUTERAGONIST">DEUTERAGONIST (Secondary Lead)</option>
+                  <option value="ANTAGONIST">ANTAGONIST (Opposing Force)</option>
+                  <option value="MENTOR">MENTOR (Guide / Authority)</option>
+                  <option value="SUPPORTING">SUPPORTING (Key Ally / Contact)</option>
+                  <option value="EXTRAS">EXTRAS (Atmospheric / Ensemble)</option>
+                  <option value="PROTAGONIST">PROTAGONIST (Co-lead)</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-obsidian-secondary font-semibold">Arahan Khusus Karakter (Opsional)</label>
+                <textarea
+                  value={addOneCustomDirective}
+                  onChange={(e) => setAddOneCustomDirective(e.target.value)}
+                  rows={3}
+                  placeholder="Contoh: Hacker muda eksentrik berambut perak, spesialis kriptografi bawah tanah..."
+                  className="w-full px-3 py-2 rounded-lg bg-canvas border border-border text-obsidian-primary focus:border-amber-500 focus:outline-none resize-none text-xs"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-border">
+              <button
+                type="button"
+                onClick={() => setAddOneModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-canvas border border-border text-xs font-semibold text-obsidian-secondary hover:text-obsidian-primary transition"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleGenerateOneCharacter}
+                disabled={isGeneratingOneChar}
+                className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 active:scale-95 text-canvas font-bold text-xs flex items-center gap-2 shadow-lg transition disabled:opacity-50"
+              >
+                {isGeneratingOneChar ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                <span>Generate Karakter</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Polya AI Screenwriter: Re-generate Single Character Modal */}
+      {regenModalOpen && selectedChar && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="w-full max-w-lg rounded-2xl bg-panel border border-border shadow-2xl p-5 space-y-4 text-obsidian-primary font-sans animate-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between border-b border-border pb-3">
+              <div className="flex items-center gap-2">
+                <RefreshCw className="w-4 h-4 text-amber-500" />
+                <h4 className="font-cinzel text-sm font-bold uppercase text-obsidian-primary">
+                  Re-generate Character: {selectedChar.name}
+                </h4>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRegenModalOpen(false)}
+                className="text-obsidian-muted hover:text-obsidian-primary p-1 rounded-lg hover:bg-elevated transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs font-mono text-obsidian-secondary leading-relaxed">
+              Polya AI akan men-generate ulang identitas, base visual prompt, voice DNA, dan 5 dynamic states untuk{" "}
+              <strong className="text-obsidian-primary">{selectedChar.name}</strong> ({selectedChar.role}) tanpa memengaruhi karakter lain.
+            </p>
+
+            <div className="space-y-3 text-xs font-mono">
+              <label className="flex items-center gap-2 cursor-pointer p-2.5 rounded-lg bg-canvas border border-border">
+                <input
+                  type="checkbox"
+                  checked={regenPreserveRole}
+                  onChange={(e) => setRegenPreserveRole(e.target.checked)}
+                  className="rounded border-border text-amber-500 focus:ring-amber-500"
+                />
+                <span className="text-obsidian-primary text-xs font-semibold">
+                  Pertahankan Peran ({selectedChar.role})
+                </span>
+              </label>
+
+              <div className="space-y-1">
+                <label className="text-obsidian-secondary font-semibold">Arahan Penulis Baru (Opsional)</label>
+                <textarea
+                  value={regenCustomDirective}
+                  onChange={(e) => setRegenCustomDirective(e.target.value)}
+                  rows={3}
+                  placeholder="Contoh: Ubah usia menjadi 40-an, wajah lebih lelah dan karismatik, mata abu-abu tajam..."
+                  className="w-full px-3 py-2 rounded-lg bg-canvas border border-border text-obsidian-primary focus:border-amber-500 focus:outline-none resize-none text-xs"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-border">
+              <button
+                type="button"
+                onClick={() => setRegenModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-canvas border border-border text-xs font-semibold text-obsidian-secondary hover:text-obsidian-primary transition"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleRegenerateCharacter}
+                disabled={isRegeneratingChar}
+                className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 active:scale-95 text-canvas font-bold text-xs flex items-center gap-2 shadow-lg transition disabled:opacity-50"
+              >
+                {isRegeneratingChar ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                <span>Re-generate Karakter</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Polya AI Screenwriter Loading Overlay */}
+      {polyaLoadingText && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="max-w-md w-full bg-panel rounded-2xl border border-amber-500/50 p-6 flex flex-col items-center text-center space-y-4 shadow-2xl animate-in zoom-in-95 duration-150">
+            <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
+              <Loader2 className="w-7 h-7 animate-spin" />
+            </div>
+            <div className="space-y-1">
+              <span className="text-[10px] font-mono text-amber-400 font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">
+                Polya AI Screenwriter
+              </span>
+              <h4 className="font-cinzel text-base font-bold text-obsidian-primary mt-1">
+                Screenplay &amp; Character Architecture
+              </h4>
+              <p className="text-xs font-mono text-obsidian-secondary leading-relaxed pt-1">
+                {polyaLoadingText}
+              </p>
             </div>
           </div>
         </div>
@@ -3583,6 +4828,340 @@ export default function CharacterMatrixTab({
                 {isCheckingProxy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
                 <span>Check Connection</span>
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Batch Downstream Pre-Flight Check & Confirmation Modal */}
+      {batchPreflightModalOpen && (() => {
+        const readyChars = characters.filter(
+          (c) => c.closeup_image_url && c.closeup_image_url.trim().length > 0
+        );
+        const skippedChars = characters.filter(
+          (c) => !c.closeup_image_url || !c.closeup_image_url.trim().length
+        );
+        const estimates = calculateEstimatedAssets(batchResumeMode);
+        const isFlowOffline = selectedProvider === "google_flow" && proxyStatus?.healthy === false;
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="w-full max-w-xl rounded-2xl bg-panel border border-border shadow-2xl p-5 space-y-4 text-obsidian-primary font-sans animate-in zoom-in-95 duration-150 max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between border-b border-border pb-3">
+                <div className="flex items-center gap-2">
+                  <div className="p-2 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                    <Sparkles className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="font-cinzel text-sm font-bold uppercase text-obsidian-primary">
+                      Generate All Downstream (Cards 2–8 + 5 States)
+                    </h4>
+                    <p className="text-[11px] font-mono text-obsidian-muted">
+                      Pre-flight check &amp; alokasi antrean render berantai untuk seluruh cast
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setBatchPreflightModalOpen(false)}
+                  className="text-obsidian-muted hover:text-obsidian-primary p-1 rounded-lg hover:bg-elevated transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Roster Readiness Summary */}
+              <div className="grid grid-cols-3 gap-2 text-center font-mono text-xs">
+                <div className="p-2.5 rounded-xl bg-canvas border border-border">
+                  <span className="text-[10px] text-obsidian-muted block uppercase">Total Karakter</span>
+                  <span className="text-base font-bold text-obsidian-primary">{characters.length}</span>
+                </div>
+                <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30">
+                  <span className="text-[10px] text-emerald-400 block uppercase">Siap Diproses</span>
+                  <span className="text-base font-bold text-emerald-400">{readyChars.length}</span>
+                </div>
+                <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30">
+                  <span className="text-[10px] text-amber-400 block uppercase">Di-skip (No Card 1)</span>
+                  <span className="text-base font-bold text-amber-400">{skippedChars.length}</span>
+                </div>
+              </div>
+
+              {/* Resume Mode Toggle (Refinement 1) */}
+              <div className="p-3 rounded-xl bg-canvas border border-border space-y-2">
+                <label className="flex items-center justify-between cursor-pointer select-none">
+                  <div className="space-y-0.5 pr-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-obsidian-primary">
+                        Skip kartu &amp; state yang sudah ter-generate (Resume Mode)
+                      </span>
+                      <span className="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                        Recommended
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-obsidian-muted leading-tight">
+                      Hanya me-render kartu dan state yang belum memiliki aset gambar. Aset yang sudah selesai tidak akan ditimpa ulang.
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={batchResumeMode}
+                    onChange={(e) => setBatchResumeMode(e.target.checked)}
+                    className="w-4 h-4 rounded text-amber-500 bg-panel border-border focus:ring-amber-500 cursor-pointer shrink-0"
+                  />
+                </label>
+
+                <div className="pt-2 border-t border-border/60 flex items-center justify-between text-[11px] font-mono">
+                  <span className="text-obsidian-muted">Estimasi Render:</span>
+                  <span className="font-bold text-amber-400">
+                    {batchResumeMode
+                      ? `${estimates.toRender} aset gambar baru (${estimates.alreadyExists} aset sudah ada & dilewati)`
+                      : `${estimates.toRender} aset gambar (seluruh Cards 2–8 + Dynamic States)`}
+                  </span>
+                </div>
+              </div>
+
+              {/* Roster Character List Breakdown */}
+              <div className="space-y-1.5 max-h-44 overflow-y-auto pr-1">
+                <span className="text-[10px] font-mono uppercase text-obsidian-muted block font-semibold">
+                  Daftar Antrean Karakter:
+                </span>
+                {characters.map((c) => {
+                  const hasCard1 = !!c.closeup_image_url && c.closeup_image_url.trim().length > 0;
+                  return (
+                    <div
+                      key={c.id}
+                      className={cn(
+                        "p-2 rounded-lg border text-xs font-mono flex items-center justify-between transition-colors",
+                        hasCard1
+                          ? "bg-canvas border-border/80 text-obsidian-primary"
+                          : "bg-canvas/40 border-dashed border-border/60 text-obsidian-muted"
+                      )}
+                    >
+                      <div className="flex items-center gap-2 truncate">
+                        {hasCard1 ? (
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        ) : (
+                          <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                        )}
+                        <span className="font-bold truncate">{c.name}</span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/40 text-obsidian-muted">
+                          {c.role}
+                        </span>
+                      </div>
+                      <span
+                        className={cn(
+                          "text-[10px] shrink-0 font-semibold",
+                          hasCard1 ? "text-emerald-400" : "text-amber-400/80"
+                        )}
+                      >
+                        {hasCard1 ? "Card 1 Siap ✓" : "Di-skip (Card 1 Kosong)"}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Guardrails Notice */}
+              <div className="p-3 rounded-xl bg-amber-500/5 border border-amber-500/20 text-xs space-y-1.5">
+                <div className="flex items-center gap-1.5 font-bold text-amber-400 text-[11px] font-mono">
+                  <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                  <span>STRICT CARD 1 PROTECTION ACTIVE</span>
+                </div>
+                <p className="text-[11px] text-obsidian-secondary leading-relaxed">
+                  Proses ini <strong>DILARANG KERAS</strong> mengubah atau menimpa Card 1 (Master Anchor).
+                  Card 1 hanya digunakan sebagai read-only visual reference anchor untuk Phase 1, Phase 2, dan Phase 3.
+                </p>
+                <div className="pt-1 flex items-center justify-between text-[10px] font-mono text-obsidian-muted">
+                  <span>Provider: <strong className="text-obsidian-primary">{selectedProvider}</strong></span>
+                  <span>📱 Screen Wake Lock Otomatis Aktif</span>
+                </div>
+              </div>
+
+              {isFlowOffline && (
+                <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs font-mono flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                  <span>SOCKS5 Proxy HP Android Offline. Nyalakan tunnel Android sebelum mulai.</span>
+                </div>
+              )}
+
+              {readyChars.length === 0 && (
+                <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-mono">
+                  Belum ada karakter yang memiliki Card 1 (Master Anchor). Harap verifikasi setidaknya 1 karakter terlebih dahulu.
+                </div>
+              )}
+
+              {/* Modal Actions */}
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-border">
+                <button
+                  type="button"
+                  onClick={() => setBatchPreflightModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-panel border border-border text-xs font-mono text-obsidian-muted hover:text-obsidian-primary transition-colors"
+                >
+                  Batal
+                </button>
+                <button
+                  type="button"
+                  onClick={handleStartBatchDownstream}
+                  disabled={readyChars.length === 0 || isFlowOffline}
+                  className="px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 disabled:opacity-50 text-canvas font-mono font-bold text-xs flex items-center gap-2 shadow-md transition-all"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  <span>Mulai Batch Downstream ({readyChars.length} Karakter)</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Batch Downstream Completion Summary Modal */}
+      {batchSummaryModalOpen && batchSummaryData && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="w-full max-w-lg rounded-2xl bg-panel border border-border shadow-2xl p-5 space-y-4 text-obsidian-primary font-sans animate-in zoom-in-95 duration-150 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-border pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  <CheckCircle2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="font-cinzel text-sm font-bold uppercase text-obsidian-primary">
+                    Ringkasan Batch Downstream Generation
+                  </h4>
+                  <p className="text-[11px] font-mono text-obsidian-muted">
+                    {batchSummaryData.wasCancelled
+                      ? "Batch dihentikan oleh pengguna. Aset yang telah selesai tetap tersimpan."
+                      : "Seluruh antrean karakter yang siap telah selesai diproses."}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBatchSummaryModalOpen(false)}
+                className="text-obsidian-muted hover:text-obsidian-primary p-1 rounded-lg hover:bg-elevated transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Results Counters */}
+            <div className="grid grid-cols-3 gap-2 text-center font-mono text-xs">
+              <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30">
+                <span className="text-[10px] text-emerald-400 block uppercase">Sukses</span>
+                <span className="text-base font-bold text-emerald-400">{batchSummaryData.successCount}</span>
+              </div>
+              <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30">
+                <span className="text-[10px] text-amber-400 block uppercase">Dilewati</span>
+                <span className="text-base font-bold text-amber-400">{batchSummaryData.skippedChars.length}</span>
+              </div>
+              <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30">
+                <span className="text-[10px] text-rose-400 block uppercase">Gagal</span>
+                <span className="text-base font-bold text-rose-400">{batchSummaryData.failedChars.length}</span>
+              </div>
+            </div>
+
+            {/* Detail Skipped Characters */}
+            {batchSummaryData.skippedChars.length > 0 && (
+              <div className="space-y-1.5">
+                <span className="text-[10px] font-mono uppercase text-amber-400 block font-semibold">
+                  Karakter Dilewati ({batchSummaryData.skippedChars.length}):
+                </span>
+                <div className="space-y-1 max-h-32 overflow-y-auto">
+                  {batchSummaryData.skippedChars.map((sc, idx) => (
+                    <div
+                      key={idx}
+                      className="p-2 rounded-lg bg-canvas border border-border/80 text-[11px] font-mono flex items-center justify-between"
+                    >
+                      <span className="font-bold text-obsidian-primary">{sc.name} ({sc.role})</span>
+                      <span className="text-amber-400/90 text-[10px]">{sc.reason}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Detail Failed Characters if any */}
+            {batchSummaryData.failedChars.length > 0 && (
+              <div className="space-y-1.5">
+                <span className="text-[10px] font-mono uppercase text-rose-400 block font-semibold">
+                  Karakter Mengalami Kendala ({batchSummaryData.failedChars.length}):
+                </span>
+                <div className="space-y-1 max-h-32 overflow-y-auto">
+                  {batchSummaryData.failedChars.map((fc, idx) => (
+                    <div
+                      key={idx}
+                      className="p-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-[11px] font-mono space-y-0.5"
+                    >
+                      <span className="font-bold text-rose-300">{fc.name} ({fc.role})</span>
+                      <p className="text-[10px] text-rose-200/80">{fc.error}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="p-3 rounded-xl bg-canvas border border-border text-[11px] font-mono text-obsidian-muted flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                <span>Card 1 Master Anchors Utuh 100%</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                <span>Semua hasil tersimpan di SQLite</span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-border">
+              {batchSummaryData.failedChars.length > 0 && !isBatchGenerating && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBatchSummaryModalOpen(false);
+                    setBatchResumeMode(true);
+                    handleOpenBatchModal();
+                  }}
+                  className="px-4 py-2 rounded-xl bg-panel border border-amber-500/40 text-amber-300 hover:bg-elevated font-mono font-bold text-xs flex items-center gap-1.5 transition-colors shadow-sm"
+                  title="Buka kembali batch pre-flight dengan Resume Mode untuk mengulang hanya karakter dan slot yang gagal"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Retry Failed Only</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setBatchSummaryModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-canvas font-mono font-bold text-xs transition-colors shadow-sm"
+              >
+                Tutup Ringkasan
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Informative Mobile Tap-Friendly Batch Lock Toast Alert */}
+      {batchLockToast?.isOpen && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-11/12 max-w-md animate-in fade-in slide-in-from-bottom-5 duration-200 pointer-events-auto">
+          <div className="p-3.5 rounded-2xl bg-panel/95 backdrop-blur-md border border-amber-500/50 shadow-2xl flex items-start gap-3 text-obsidian-primary font-sans">
+            <div className="p-2 rounded-xl bg-amber-500/20 text-amber-400 border border-amber-500/40 shrink-0 mt-0.5">
+              <ShieldAlert className="w-5 h-5" />
+            </div>
+            <div className="flex-1 min-w-0 space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <h5 className="font-cinzel text-xs font-bold uppercase tracking-wider text-amber-300">
+                  {batchLockToast.title}
+                </h5>
+                <button
+                  type="button"
+                  onClick={() => setBatchLockToast(null)}
+                  className="p-1 rounded text-obsidian-muted hover:text-obsidian-primary transition-colors -mr-1 -mt-1"
+                  title="Tutup notifikasi"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <p className="text-[11px] text-obsidian-secondary leading-relaxed font-mono">
+                {batchLockToast.message}
+              </p>
             </div>
           </div>
         </div>

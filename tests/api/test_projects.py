@@ -110,3 +110,45 @@ def test_delete_project(client: TestClient, auth_headers: dict[str, str]):
     # Ensure not found
     get_resp = client.get(f"/api/v1/projects/{project_id}", headers=auth_headers)
     assert get_resp.status_code == 404
+
+
+def test_user_isolation_between_accounts(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    secondary_auth_headers: dict[str, str],
+):
+    """Verify strict multi-tenant isolation: User B cannot see, access, or delete User A's projects."""
+    # 1. User A creates a production
+    create_resp = client.post(
+        "/api/v1/projects",
+        json={"title": "User A Top Secret Film", "aspect_ratio": "16:9"},
+        headers=auth_headers,
+    )
+    assert create_resp.status_code == 201
+    user_a_proj_id = create_resp.json()["data"]["id"]
+
+    # 2. User B lists projects — User A's project must NOT appear in User B's slate
+    list_b_resp = client.get("/api/v1/projects", headers=secondary_auth_headers)
+    assert list_b_resp.status_code == 200
+    user_b_projects = list_b_resp.json()["data"]
+    user_b_ids = [p["id"] for p in user_b_projects]
+    assert user_a_proj_id not in user_b_ids
+
+    # 3. User B attempts GET on User A's project -> must be rejected (404)
+    get_b_resp = client.get(f"/api/v1/projects/{user_a_proj_id}", headers=secondary_auth_headers)
+    assert get_b_resp.status_code == 404
+
+    # 4. User B attempts DELETE on User A's project -> must be rejected (404 or 403)
+    del_b_resp = client.delete(f"/api/v1/projects/{user_a_proj_id}", headers=secondary_auth_headers)
+    assert del_b_resp.status_code in (403, 404)
+
+    # 5. User B attempts advance-stage on User A's project -> must be rejected
+    adv_b_resp = client.post(
+        f"/api/v1/projects/{user_a_proj_id}/advance-stage",
+        headers=secondary_auth_headers,
+    )
+    assert adv_b_resp.status_code in (403, 404)
+
+    # 6. User A can still successfully access and delete their own project
+    del_a_resp = client.delete(f"/api/v1/projects/{user_a_proj_id}", headers=auth_headers)
+    assert del_a_resp.status_code == 200

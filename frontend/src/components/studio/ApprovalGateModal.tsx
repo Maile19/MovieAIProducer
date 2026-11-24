@@ -1,6 +1,9 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
+import { useRouter } from "next/navigation";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle,
   AlertTriangle,
@@ -10,12 +13,15 @@ import {
   ShieldAlert,
   Send,
   Loader2,
+  Trash2,
+  AlertCircle,
 } from "lucide-react";
 import { api, GateActionInput } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 interface ApprovalGateModalProps {
   projectId: string;
+  projectTitle?: string;
   currentStage: number;
   projectStatus?: string;
   gateHistory?: Array<{
@@ -30,17 +36,61 @@ interface ApprovalGateModalProps {
 
 export default function ApprovalGateModal({
   projectId,
+  projectTitle,
   currentStage,
   projectStatus: _projectStatus,
   gateHistory = [],
   onGateProcessed,
 }: ApprovalGateModalProps) {
+  const router = useRouter();
+  const queryClient = useQueryClient();
+
   const [modalOpen, setModalOpen] = useState(false);
   const [selectedAction, setSelectedAction] = useState<"APPROVE" | "REVISE" | "LOCK">("APPROVE");
   const [notes, setNotes] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
+
+  // Delete project state
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  // Lock body scroll when delete modal is open
+  useEffect(() => {
+    if (isDeleteModalOpen) {
+      const originalOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      return () => {
+        document.body.style.overflow = originalOverflow;
+      };
+    }
+  }, [isDeleteModalOpen]);
+
+  // Delete Project Mutation with full cache invalidation and redirect
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => api.projects.delete(id),
+    onSuccess: async () => {
+      // 1. Remove project-specific queries from cache to prevent 404 refetch
+      queryClient.removeQueries({ queryKey: ["project", projectId] });
+      queryClient.removeQueries({ queryKey: ["pipeline-status", projectId] });
+      queryClient.removeQueries({ queryKey: ["scenes", projectId] });
+      queryClient.removeQueries({ queryKey: ["characters", projectId] });
+      // 2. Invalidate projects list cache so dashboard, metrics, and drawer sync immediately
+      await queryClient.invalidateQueries({ queryKey: ["projects"] });
+      // 3. Automatically redirect user to dashboard
+      router.replace("/dashboard");
+    },
+    onError: (err: unknown) => {
+      const msg = err instanceof Error ? err.message : "Failed to delete production";
+      setDeleteError(msg);
+    },
+  });
 
   // Quick feedback tags for rapid showrunner direction
   const quickTags = [
@@ -83,6 +133,7 @@ export default function ApprovalGateModal({
       };
 
       await api.projects.gateAction(projectId, payload);
+      await queryClient.invalidateQueries({ queryKey: ["projects"] });
       setModalOpen(false);
       onGateProcessed();
     } catch (err: any) {
@@ -145,6 +196,21 @@ export default function ApprovalGateModal({
         >
           <Lock className="w-4 h-4 text-amber-400 group-hover:scale-110 transition-transform" />
           <span>FREEZE &amp; LOCK DNA</span>
+        </button>
+      </div>
+
+      {/* Danger Zone: Delete Project (Placed directly below FREEZE & LOCK DNA with thin divider) */}
+      <div className="pt-2.5 border-t border-border/40 flex justify-end">
+        <button
+          type="button"
+          onClick={() => {
+            setDeleteError(null);
+            setIsDeleteModalOpen(true);
+          }}
+          className="w-full sm:w-auto flex items-center justify-center gap-2 px-3.5 py-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 hover:text-rose-300 border border-rose-500/30 hover:border-rose-500/60 font-semibold text-xs transition-all shadow-sm group cursor-pointer"
+        >
+          <Trash2 className="w-3.5 h-3.5 text-rose-400 group-hover:scale-110 transition-transform" />
+          <span>DELETE PROJECT</span>
         </button>
       </div>
 
@@ -315,6 +381,97 @@ export default function ApprovalGateModal({
             </div>
           </div>
         </div>
+      )}
+
+      {/* =========================================================================
+       * Delete Production Project Confirmation Modal (Portal to document.body)
+       * ========================================================================= */}
+      {isDeleteModalOpen && mounted && createPortal(
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
+          onClick={() => {
+            // Block closing backdrop click when delete mutation is in flight
+            if (!deleteMutation.isPending) {
+              setIsDeleteModalOpen(false);
+              setDeleteError(null);
+            }
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-xl bg-panel border border-border shadow-studio overflow-hidden flex flex-col p-6 space-y-4 animate-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
+                <AlertCircle className="w-5 h-5" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3 className="font-cinzel font-bold text-base text-obsidian-primary">
+                  Delete Production Project?
+                </h3>
+                <p className="text-xs text-obsidian-secondary font-mono mt-1">
+                  This action is permanent and cannot be undone.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-lg bg-canvas border border-border/80 text-xs font-mono space-y-1">
+              <div className="text-obsidian-muted uppercase text-[10px]">Target Production:</div>
+              <div className="text-amber-400 font-semibold truncate text-sm">
+                {projectTitle || "Production"}
+              </div>
+              <div className="text-obsidian-secondary text-[11px]">
+                Stage {currentStage}/16
+              </div>
+            </div>
+
+            <p className="text-xs text-obsidian-secondary leading-relaxed">
+              Deleting this project will permanently remove its 50-Scene Storyboard, Master Production Bible, character matrices, shots, and any generated media assets.
+            </p>
+
+            {deleteError && (
+              <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 flex items-center gap-2 text-rose-400 text-xs font-mono">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span className="truncate">{deleteError}</span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-border">
+              <button
+                type="button"
+                disabled={deleteMutation.isPending}
+                onClick={() => {
+                  if (!deleteMutation.isPending) {
+                    setIsDeleteModalOpen(false);
+                    setDeleteError(null);
+                  }
+                }}
+                className="px-4 py-2 rounded-lg bg-canvas hover:bg-elevated border border-border text-obsidian-secondary hover:text-obsidian-primary text-xs font-medium transition-colors disabled:opacity-50 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={deleteMutation.isPending}
+                onClick={() => deleteMutation.mutate(projectId)}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-semibold text-xs transition-colors shadow-sm disabled:opacity-50 cursor-pointer"
+              >
+                {deleteMutation.isPending ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Hapus Proyek...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Hapus Proyek</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
       )}
     </div>
   );

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   X,
   Save,
@@ -28,7 +28,7 @@ import ObsidianDropdown from "@/components/ui/ObsidianDropdown";
 interface SceneDetailDrawerProps {
   scene: Scene | null;
   onClose: () => void;
-  onSceneUpdated: () => void;
+  onSceneUpdated: (options?: { silent?: boolean }) => void;
   styleCode?: string;
   isNonVerbal?: boolean;
 }
@@ -50,13 +50,55 @@ export default function SceneDetailDrawer({
 
   // Visual preview state (Dynamic Provider Switching: Google Flow Free / 9Router / SD 3.5 Large)
   const [previewUrl, setPreviewUrl] = useState<string | null>(scene?.preview_url || null);
-  const [previewProvider, setPreviewProvider] = useState<string>("google_flow");
+  const [previewProvider, setPreviewProvider] = useState<string>(scene?.preview_provider || "google_flow");
   const [selectedProvider, setSelectedProvider] = useState<"google_flow" | "9router" | "sd35_large_hf" | "mock">("google_flow");
   const [selectedModel, setSelectedModel] = useState<string>("gemini-3.1-flash-image");
   const [isGeneratingPreview, setIsGeneratingPreview] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewPromptOverride, setPreviewPromptOverride] = useState("");
   const [showPromptOverride, setShowPromptOverride] = useState(false);
+
+  // Polling guard and live progress
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const elapsedIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const [elapsedSec, setElapsedSec] = useState<number>(0);
+  const [activeJob, setActiveJob] = useState<{
+    id: string;
+    status: string;
+    account_id?: number | null;
+  } | null>(null);
+  const [toast, setToast] = useState<{
+    type: "queued" | "completed" | "error";
+    message: string;
+  } | null>(null);
+
+  const showToast = (type: "queued" | "completed" | "error", message: string) => {
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    setToast({ type, message });
+    toastTimeoutRef.current = setTimeout(() => {
+      setToast(null);
+    }, 5000);
+  };
+
+  const stopPolling = () => {
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+    if (elapsedIntervalRef.current) {
+      clearInterval(elapsedIntervalRef.current);
+      elapsedIntervalRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      stopPolling();
+      if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    };
+  }, [scene?.id]);
 
   // SOCKS5 Android Proxy Live Status
   const [proxyStatus, setProxyStatus] = useState<FlowProxyStatus | null>(null);
@@ -108,6 +150,9 @@ export default function SceneDetailDrawer({
       setDurationTarget(scene.duration_target || 5.0);
       setSceneStatus(scene.status || "PLANNED");
       setPreviewUrl(scene.preview_url || null);
+      if (scene.preview_provider) {
+        setPreviewProvider(scene.preview_provider);
+      }
       setPreviewError(null);
     }
   }, [scene]);
@@ -148,6 +193,7 @@ export default function SceneDetailDrawer({
 
   const handleGeneratePreview = async () => {
     try {
+      stopPolling();
       setIsGeneratingPreview(true);
       setPreviewError(null);
 
@@ -155,6 +201,12 @@ export default function SceneDetailDrawer({
         const prompt =
           previewPromptOverride.trim() ||
           `${slugline}. ${narrativeGoal}. ${styleCode}. 8k cinematic photorealistic keyframe.`;
+
+        const startTime = Date.now();
+        setElapsedSec(0);
+        elapsedIntervalRef.current = setInterval(() => {
+          setElapsedSec(Math.floor((Date.now() - startTime) / 1000));
+        }, 1000);
 
         try {
           const res = await api.flow.generateImage({
@@ -165,65 +217,97 @@ export default function SceneDetailDrawer({
           });
 
           const jobId = res.job_id;
-          let pollCount = 0;
-          const interval = setInterval(async () => {
-            pollCount++;
+          setActiveJob({ id: jobId, status: "queued" });
+          showToast("queued", `Job preview #${jobId.slice(0, 8)} berhasil masuk ke antrean Google Flow pool.`);
+
+          let consecutiveErrors = 0;
+          pollingIntervalRef.current = setInterval(async () => {
+            const currentSec = Math.floor((Date.now() - startTime) / 1000);
+            if (currentSec >= 180) {
+              stopPolling();
+              setIsGeneratingPreview(false);
+              setActiveJob(null);
+              const timeoutMsg = "Timeout menunggu antrean Google Flow (180 detik).";
+              setPreviewError(timeoutMsg);
+              showToast("error", timeoutMsg);
+              return;
+            }
+
             try {
               const job = await api.flow.getJob(jobId);
+              consecutiveErrors = 0;
+              setActiveJob({
+                id: jobId,
+                status: job.status,
+                account_id: job.assigned_account_id,
+              });
+
               if (job.status === "completed" && job.image_url) {
-                clearInterval(interval);
+                stopPolling();
+                try {
+                  await api.scenes.attachPreview(scene.id, {
+                    preview_url: job.image_url,
+                    preview_provider: "google_flow",
+                    job_id: jobId,
+                  });
+                } catch (attachErr) {
+                  console.warn("attachPreview warning:", attachErr);
+                }
                 setPreviewUrl(job.image_url);
                 setPreviewProvider("google_flow");
                 setIsGeneratingPreview(false);
-                onSceneUpdated();
+                setActiveJob(null);
+                showToast("completed", "Preview visual scene berhasil di-render dan di-attach!");
+                onSceneUpdated({ silent: true });
               } else if (job.status === "failed") {
-                clearInterval(interval);
+                stopPolling();
                 setIsGeneratingPreview(false);
+                setActiveJob(null);
                 const errMsg = job.error_message || "Generasi Google Flow gagal.";
                 if (errMsg.includes("SOCKS5_PROXY_OFFLINE") || errMsg.includes("ERR_PROXY_")) {
                   setProxyOfflineAlert(true);
                   setPreviewError("Proxy SOCKS5 Android Offline. Pastikan reverse tunnel di HP Android sudah aktif.");
+                  showToast("error", "Proxy SOCKS5 Android Offline. Periksa koneksi HP.");
                 } else {
                   setPreviewError(errMsg);
+                  showToast("error", `Flow render failed: ${errMsg}`);
                 }
-              } else if (pollCount > 60) {
-                clearInterval(interval);
-                setIsGeneratingPreview(false);
-                setPreviewError("Timeout menunggu antrean Google Flow (180 detik).");
               }
-            } catch (err: any) {
-              clearInterval(interval);
-              setIsGeneratingPreview(false);
-              setPreviewError(err?.message || "Gagal memeriksa status job Flow.");
+            } catch (pollErr: any) {
+              consecutiveErrors++;
+              console.warn(`Polling error (${consecutiveErrors}/5):`, pollErr);
+              if (consecutiveErrors >= 5) {
+                stopPolling();
+                setIsGeneratingPreview(false);
+                setActiveJob(null);
+                const netMsg = pollErr?.message || "Koneksi terputus saat memeriksa status render Google Flow.";
+                setPreviewError(netMsg);
+                showToast("error", netMsg);
+              }
             }
           }, 3000);
           return;
         } catch (postErr: any) {
+          stopPolling();
           setIsGeneratingPreview(false);
-          const msgStr = typeof postErr?.message === "string" ? postErr.message : JSON.stringify(postErr?.message || "");
-          const errStr = `${postErr?.code || ""} ${postErr?.error_code || ""} ${msgStr} ${JSON.stringify(postErr || {})}`;
+          setActiveJob(null);
+          const rawErr =
+            postErr?.response?.data?.detail ||
+            postErr?.response?.data?.error?.message ||
+            postErr?.message ||
+            postErr;
+          const errDetailStr = typeof rawErr === "object" ? (rawErr.message || rawErr.detail || JSON.stringify(rawErr)) : String(rawErr);
           if (
-            errStr.includes("SOCKS5_PROXY_OFFLINE") ||
-            errStr.includes("ERR_PROXY_") ||
-            errStr.includes("Proxy SOCKS5 Android")
+            errDetailStr.includes("SOCKS5_PROXY_OFFLINE") ||
+            errDetailStr.includes("ERR_PROXY_") ||
+            errDetailStr.includes("Proxy SOCKS5 Android")
           ) {
             setProxyOfflineAlert(true);
             setPreviewError("Proxy SOCKS5 Android Offline. Pastikan reverse tunnel di HP Android sudah aktif.");
+            showToast("error", "Proxy SOCKS5 Android Offline.");
           } else {
-            const rawErr =
-              postErr?.response?.data?.detail ||
-              postErr?.response?.data?.error?.message ||
-              postErr?.message ||
-              postErr;
-            const fallbackMsg =
-              typeof rawErr === "string" && rawErr !== "[object Object]"
-                ? rawErr
-                : (typeof rawErr?.message === "string" && rawErr.message !== "[object Object]"
-                    ? rawErr.message
-                    : (typeof rawErr?.detail === "string"
-                        ? rawErr.detail
-                        : "Gagal membuat job Google Flow."));
-            setPreviewError(fallbackMsg);
+            setPreviewError(errDetailStr || "Gagal membuat job Google Flow.");
+            showToast("error", errDetailStr || "Gagal membuat job Google Flow.");
           }
           return;
         }
@@ -239,16 +323,19 @@ export default function SceneDetailDrawer({
       if (res?.data?.preview_url) {
         setPreviewUrl(res.data.preview_url);
         if (res.data.provider) setPreviewProvider(res.data.provider);
-        onSceneUpdated();
+        showToast("completed", `Preview visual berhasil di-generate via ${res.data.provider || selectedProvider}.`);
+        onSceneUpdated({ silent: true });
       }
       setIsGeneratingPreview(false);
     } catch (err: any) {
+      stopPolling();
       console.error("Preview generation error:", err);
       const msg =
         (typeof err?.message === "string" && err.message !== "[object Object]" ? err.message : null) ||
         (typeof err?.detail === "string" ? err.detail : null) ||
         "Failed to generate visual preview";
       setPreviewError(msg);
+      showToast("error", msg);
       setIsGeneratingPreview(false);
     }
   };
@@ -558,6 +645,105 @@ export default function SceneDetailDrawer({
                   </div>
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* Toast Notification for Google Flow / Preview status */}
+          {toast && (
+            <div
+              className={cn(
+                "p-3 rounded-lg border text-xs font-mono flex items-center justify-between gap-2 transition-all",
+                toast.type === "completed"
+                  ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                  : toast.type === "error"
+                  ? "bg-rose-500/15 border-rose-500/40 text-rose-300"
+                  : "bg-amber-500/15 border-amber-500/40 text-amber-300"
+              )}
+            >
+              <div className="flex items-center gap-2">
+                {toast.type === "completed" ? (
+                  <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                ) : toast.type === "error" ? (
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                ) : (
+                  <Sparkles className="w-4 h-4 text-amber-400 shrink-0 animate-pulse" />
+                )}
+                <span>{toast.message}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setToast(null)}
+                className="text-[10px] opacity-70 hover:opacity-100 p-0.5 text-obsidian-muted hover:text-obsidian-primary"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
+          {/* Active Flow Progress Box */}
+          {isGeneratingPreview && (
+            <div className="p-3.5 rounded-xl bg-panel/90 border-2 border-amber-500/60 shadow-[0_0_15px_rgba(245,158,11,0.2)] animate-pulse space-y-3 font-mono">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Loader2 className="w-4 h-4 text-amber-400 animate-spin" />
+                  <span className="text-xs font-bold text-amber-300 uppercase tracking-wide">
+                    Active Flow Generation
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      "px-2 py-0.5 rounded text-[10px] font-bold border",
+                      proxyStatus?.healthy
+                        ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30"
+                        : "bg-rose-500/20 text-rose-400 border-rose-500/30"
+                    )}
+                  >
+                    SOCKS5: {proxyStatus?.healthy ? "ONLINE" : "OFFLINE"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      stopPolling();
+                      setIsGeneratingPreview(false);
+                      setActiveJob(null);
+                      showToast("error", "Generasi Flow dibatalkan oleh pengguna.");
+                    }}
+                    className="text-[10px] text-obsidian-muted hover:text-rose-400 px-1.5 py-0.5 rounded bg-canvas border border-border transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+
+              {/* Status Pool */}
+              <div className="text-[11px] text-obsidian-secondary flex items-center justify-between">
+                <span>
+                  Status Pool:{" "}
+                  <strong className="text-obsidian-primary">
+                    {activeJob?.status === "processing"
+                      ? `Sedang Render di Playwright (Akun #${activeJob.account_id || 1})`
+                      : "Menunggu Antrean Worker Pool (Round-Robin 6 Akun)..."}
+                  </strong>
+                </span>
+                <span className="text-[10px] text-amber-400 font-bold">
+                  ⏱️ {elapsedSec}s / 180s
+                </span>
+              </div>
+
+              {/* Live Elapsed Progress Bar */}
+              <div className="w-full h-1.5 bg-canvas rounded-full overflow-hidden border border-border">
+                <div
+                  className="h-full bg-gradient-to-r from-amber-500 to-amber-300 transition-all duration-1000 ease-linear rounded-full"
+                  style={{ width: `${Math.min(100, Math.max(5, (elapsedSec / 180) * 100))}%` }}
+                />
+              </div>
+
+              {activeJob?.id && (
+                <div className="text-[9px] text-obsidian-muted truncate">
+                  Job ID: <span className="font-mono text-obsidian-secondary">{activeJob.id}</span>
+                </div>
+              )}
             </div>
           )}
 

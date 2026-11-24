@@ -123,9 +123,20 @@ async def create_flow_job(
         created_at=datetime.now(timezone.utc),
     )
 
-    session.add(job)
-    await session.commit()
-    await session.refresh(job)
+    try:
+        session.add(job)
+        await session.commit()
+        await session.refresh(job)
+    except Exception as exc:
+        await session.rollback()
+        logger.error("flow_job_enqueue_failed", error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error_code": "ENQUEUE_FAILED",
+                "message": f"Gagal memasukkan job ke antrean Flow: {str(exc)}",
+            },
+        )
 
     logger.info(
         "flow_job_enqueued",
@@ -176,6 +187,47 @@ async def get_flow_job(
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+    }
+
+
+@router.post("/images/jobs/{job_id}/cancel", status_code=status.HTTP_200_OK)
+async def cancel_flow_job(
+    job_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    current_user: UserModel = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Cancel a flow job in queue or processing state to prevent zombie jobs."""
+    stmt = select(FlowImageJobModel).where(FlowImageJobModel.id == job_id)
+    result = await session.execute(stmt)
+    job = result.scalar_one_or_none()
+
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job {job_id} not found.",
+        )
+
+    if job.status in ("completed", "failed", "cancelled"):
+        return {
+            "status": job.status,
+            "message": f"Job {job_id} is already in terminal state '{job.status}'.",
+        }
+
+    job.status = "cancelled"
+    job.error_message = "Cancelled by client timeout or user abort"
+    job.completed_at = datetime.now(timezone.utc)
+    await session.commit()
+
+    logger.info(
+        "flow_job_cancelled",
+        job_id=str(job.id),
+        user_id=str(current_user.id),
+    )
+
+    return {
+        "status": "cancelled",
+        "job_id": str(job.id),
+        "message": "Job successfully cancelled.",
     }
 
 
@@ -389,9 +441,20 @@ async def test_account_generate(
         created_at=datetime.now(timezone.utc),
     )
 
-    session.add(job)
-    await session.commit()
-    await session.refresh(job)
+    try:
+        session.add(job)
+        await session.commit()
+        await session.refresh(job)
+    except Exception as exc:
+        await session.rollback()
+        logger.error("flow_job_enqueue_failed", error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error_code": "ENQUEUE_FAILED",
+                "message": f"Gagal memasukkan job ke antrean Flow: {str(exc)}",
+            },
+        )
 
     return {
         "status": "success",

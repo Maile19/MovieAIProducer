@@ -13,6 +13,52 @@ export interface User {
   created_at: string;
 }
 
+export interface PipelineHeaderMetrics {
+  current_working_stage: number;
+  completed_stages_count: number;
+  total_stages: number;
+  current_working_step: number;
+  completed_steps_count: number;
+  total_steps: number;
+  progress_percentage: number;
+}
+
+export interface StageStatusDetail {
+  stage: number;
+  name: string;
+  phase: string;
+  gate: string;
+  step_ref?: number | null;
+  status: "completed" | "in_progress" | "awaiting_gate" | "not_started";
+  is_current: boolean;
+  metrics?: Record<string, unknown>;
+  gate_signoff?: {
+    action: string;
+    stage: number;
+    notes?: string;
+    signed_by?: string;
+    revoked_by?: string;
+    timestamp: string;
+  } | null;
+}
+
+export interface StepStatusDetail {
+  step: number;
+  code: string;
+  name: string;
+  desc: string;
+  status: "completed" | "in_progress" | "not_started";
+  mapped_stages: string[];
+  is_current: boolean;
+}
+
+export interface PipelineStatusResponse {
+  project_id: string;
+  header_metrics: PipelineHeaderMetrics;
+  stages: Record<string, StageStatusDetail>;
+  steps: Record<string, StepStatusDetail>;
+}
+
 export interface Project {
   id: string;
   title: string;
@@ -21,11 +67,13 @@ export interface Project {
   aspect_ratio: string;
   target_style_code: string;
   operational_stage: number;
+  derived_stage?: number;
   stage_name: string;
   owner_id?: string | null;
   created_at: string;
   updated_at: string;
   settings?: Record<string, unknown>;
+  pipeline_status?: PipelineStatusResponse;
   stats?: {
     scenes_count: number;
     bible_version: number;
@@ -113,6 +161,7 @@ export interface ProjectUpdateInput {
   target_style_code?: string;
   status?: string;
   settings?: Record<string, unknown>;
+  operational_stage?: number;
 }
 
 export interface GateActionInput {
@@ -130,6 +179,7 @@ export interface Scene {
   duration_target: number;
   status: string;
   preview_url?: string | null;
+  preview_provider?: string | null;
   act_number: number;
   shots_count?: number;
   // Compatibility fields
@@ -168,6 +218,7 @@ export interface CharacterState {
   character_id: string;
   scene_id?: string | null;
   state_code: string;
+  state_label?: string | null;
   wardrobe: string;
   injuries_and_wear?: string;
   expression_anchor?: string;
@@ -233,6 +284,8 @@ export interface Character {
   project_id: string;
   name: string;
   role: string;
+  narrative_summary?: string | null;
+  voice_dna_profile?: string | null;
   base_prompt: string;
   face_ref_asset_id?: string | null;
   voice_ref_asset_id?: string | null;
@@ -496,6 +549,16 @@ export function getErrorMessage(err: unknown, fallback: string = "Terjadi kesala
   return fallback;
 }
 
+export function resolveMediaUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith("http://127.0.0.1:8090") || trimmed.startsWith("http://localhost:8090")) {
+    return trimmed.replace(/^https?:\/\/(?:127\.0\.0\.1|localhost):8090/, "");
+  }
+  return trimmed;
+}
+
 const getApiBaseUrl = (): string => {
   if (typeof window !== "undefined") {
     return "/api/v1";
@@ -610,13 +673,21 @@ export const api = {
 
   // Projects
   projects: {
-    list: async (params?: { search?: string; limit?: number; offset?: number }): Promise<{ data: Project[]; pagination: { limit?: number; offset?: number; count?: number; [key: string]: unknown } }> => {
+    list: async (params?: { search?: string; limit?: number; offset?: number }): Promise<{
+      data: Project[];
+      pagination: { limit?: number; offset?: number; count?: number; total?: number; [key: string]: unknown };
+      metrics?: { total: number; pre_production: number; generation: number; post_master: number };
+    }> => {
       const query = new URLSearchParams();
       if (params?.search) query.set("search", params.search);
       if (params?.limit) query.set("limit", params.limit.toString());
       if (params?.offset) query.set("offset", params.offset.toString());
       const qs = query.toString();
-      return apiRequest<{ data: Project[]; pagination: { limit?: number; offset?: number; count?: number; [key: string]: unknown } }>(`/projects${qs ? `?${qs}` : ""}`);
+      return apiRequest<{
+        data: Project[];
+        pagination: { limit?: number; offset?: number; count?: number; total?: number; [key: string]: unknown };
+        metrics?: { total: number; pre_production: number; generation: number; post_master: number };
+      }>(`/projects${qs ? `?${qs}` : ""}`);
     },
     get: async (id: string): Promise<{ data: Project }> => {
       return apiRequest<{ data: Project }>(`/projects/${id}`);
@@ -633,6 +704,11 @@ export const api = {
         body: JSON.stringify(payload),
       });
     },
+    delete: async (id: string): Promise<{ data: { id: string; title: string; message: string } }> => {
+      return apiRequest<{ data: { id: string; title: string; message: string } }>(`/projects/${id}`, {
+        method: "DELETE",
+      });
+    },
     advanceStage: async (id: string, notes?: string): Promise<{ data: Project }> => {
       return apiRequest<{ data: Project }>(`/projects/${id}/advance-stage`, {
         method: "POST",
@@ -641,6 +717,18 @@ export const api = {
     },
     gateAction: async (id: string, payload: GateActionInput): Promise<{ data: Project }> => {
       return apiRequest<{ data: Project }>(`/projects/${id}/gate`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    getPipelineStatus: async (id: string): Promise<{ data: PipelineStatusResponse }> => {
+      return apiRequest<{ data: PipelineStatusResponse }>(`/projects/${id}/pipeline-status`);
+    },
+    gateSignoff: async (
+      id: string,
+      payload: { stage: number; action: "APPROVE" | "REVOKE"; notes?: string }
+    ): Promise<{ data: PipelineStatusResponse }> => {
+      return apiRequest<{ data: PipelineStatusResponse }>(`/projects/${id}/gate-signoff`, {
         method: "POST",
         body: JSON.stringify(payload),
       });
@@ -666,6 +754,83 @@ export const api = {
     },
     listCharacters: async (projectId: string): Promise<{ data: Character[] }> => {
       return apiRequest<{ data: Character[] }>(`/projects/${projectId}/characters`);
+    },
+    generateCast: async (
+      projectId: string,
+      payload?: {
+        replace_existing?: boolean;
+        preferred_count?: number | null;
+        additional_notes?: string | null;
+      }
+    ): Promise<{
+      status: string;
+      cast_rationale: string;
+      count: number;
+      data: Character[];
+    }> => {
+      return apiRequest(`/projects/${projectId}/characters/generate-cast`, {
+        method: "POST",
+        body: JSON.stringify(payload || { replace_existing: true }),
+      });
+    },
+    generateOneCharacter: async (
+      projectId: string,
+      payload?: {
+        preferred_role?: string | null;
+        custom_directive?: string | null;
+      }
+    ): Promise<{
+      status: string;
+      data: Character;
+    }> => {
+      return apiRequest(`/projects/${projectId}/characters/generate-one`, {
+        method: "POST",
+        body: JSON.stringify(payload || {}),
+      });
+    },
+    regenerateCharacter: async (
+      projectId: string,
+      characterId: string,
+      payload?: {
+        preserve_role?: boolean;
+        custom_directive?: string | null;
+      }
+    ): Promise<{
+      status: string;
+      data: Character;
+    }> => {
+      return apiRequest(`/projects/${projectId}/characters/${characterId}/regenerate`, {
+        method: "POST",
+        body: JSON.stringify(payload || { preserve_role: true }),
+      });
+    },
+    updateCharacter: async (
+      projectId: string,
+      characterId: string,
+      payload: {
+        name?: string;
+        role?: string;
+        base_prompt?: string;
+        voice_dna_profile?: string;
+        narrative_summary?: string;
+        dna_seed?: number;
+      }
+    ): Promise<{
+      status: string;
+      data: Character;
+    }> => {
+      return apiRequest(`/projects/${projectId}/characters/${characterId}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+    },
+    deleteCharacter: async (
+      projectId: string,
+      characterId: string
+    ): Promise<{ status: string; message: string }> => {
+      return apiRequest(`/projects/${projectId}/characters/${characterId}`, {
+        method: "DELETE",
+      });
     },
     createCharacter: async (
       projectId: string,
@@ -768,7 +933,7 @@ export const api = {
     },
     createCharacterState: async (
       characterId: string,
-      payload: { scene_id?: string; state_code: string; wardrobe: string; injuries_and_wear?: string; expression_anchor?: string }
+      payload: { scene_id?: string; state_code: string; state_label?: string | null; wardrobe: string; injuries_and_wear?: string; expression_anchor?: string }
     ): Promise<{ data: CharacterState }> => {
       return apiRequest<{ data: CharacterState }>(`/characters/${characterId}/states`, {
         method: "POST",
@@ -812,6 +977,7 @@ export const api = {
       payload: {
         scene_id?: string;
         state_code?: string;
+        state_label?: string | null;
         wardrobe?: string;
         injuries_and_wear?: string;
         expression_anchor?: string;
@@ -1079,6 +1245,26 @@ export const api = {
         body: JSON.stringify(payload || {}),
       });
     },
+    attachPreview: async (
+      sceneId: string,
+      payload: {
+        preview_url: string;
+        preview_provider?: string;
+        job_id?: string | null;
+      }
+    ): Promise<{
+      status: string;
+      scene_id: string;
+      shot_id: string;
+      preview_url: string;
+      preview_provider: string;
+      fg_bg_layers: Record<string, unknown>;
+    }> => {
+      return apiRequest(`/scenes/${sceneId}/attach-preview`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
     generateShotPreview: async (
       shotId: string,
       payload?: {
@@ -1162,8 +1348,29 @@ export const api = {
     },
   },
 
-  // Staged / Batching Hollywood Blueprint Writer API
+  // Staged / Batching Hollywood Blueprint Writer API (Polya AI)
   blueprint: {
+    recommendStructure: async (
+      projectId: string,
+      payload?: { total_scenes?: number }
+    ): Promise<{
+      data: {
+        recommended_structure: "3_act" | "4_act" | "youtube_viral" | "5_act";
+        strategic_rationale: string;
+        options: Array<{
+          structure_type: "3_act" | "4_act" | "youtube_viral" | "5_act";
+          label: string;
+          acts_count: number;
+          description: string;
+          act_labels: Array<{ act_number: number; title: string; percentage: string }>;
+        }>;
+      };
+    }> => {
+      return apiRequest(`/projects/${projectId}/blueprint/recommend-structure`, {
+        method: "POST",
+        body: JSON.stringify(payload || {}),
+      });
+    },
     generateTreatment: async (
       projectId: string,
       payload: {
@@ -1171,6 +1378,7 @@ export const api = {
         duration_mode?: string;
         premise?: string;
         clear_existing?: boolean;
+        structure_type?: string;
       }
     ): Promise<{ data: any }> => {
       return apiRequest<{ data: any }>(`/projects/${projectId}/blueprint/treatment`, {
@@ -1185,6 +1393,7 @@ export const api = {
         total_scenes: number;
         duration_mode?: string;
         auto_split_shots?: boolean;
+        structure_type?: string;
       }
     ): Promise<{
       data: {
@@ -1252,6 +1461,7 @@ export const api = {
         premise?: string;
         auto_split_shots?: boolean;
         clear_existing?: boolean;
+        structure_type?: string;
       }
     ): Promise<{ data: any }> => {
       return apiRequest<{ data: any }>(`/projects/${projectId}/blueprint/batch-write`, {
@@ -1447,6 +1657,11 @@ export const api = {
     getJob: async (jobId: string): Promise<FlowJob> => {
       return apiRequest(`/api/flow/images/jobs/${jobId}`);
     },
+    cancelJob: async (jobId: string): Promise<{ status: string; message?: string }> => {
+      return apiRequest(`/api/flow/images/jobs/${jobId}/cancel`, {
+        method: "POST",
+      });
+    },
     listJobs: async (limit: number = 30): Promise<{ jobs: FlowJob[] }> => {
       return apiRequest(`/api/flow/images/jobs?limit=${limit}`);
     },
@@ -1490,11 +1705,40 @@ export const api = {
     generateProjectPreview: async (
       projectId: string,
       payload?: { aspect_ratio?: string; provider?: string; model?: string; prompt?: string }
-    ): Promise<{ status: string; preview_url: string; width: number; height: number; provider: string; model?: string }> => {
-      return apiRequest(`/previews/projects/${projectId}/generate-preview`, {
+    ): Promise<{
+      status: string;
+      preview_url: string;
+      width: number;
+      height: number;
+      provider: string;
+      model?: string;
+      seed?: number;
+      data?: any;
+    }> => {
+      const res = await apiRequest<{
+        status?: string;
+        preview_url?: string;
+        width?: number;
+        height?: number;
+        provider?: string;
+        model?: string;
+        seed?: number;
+        data?: any;
+      }>(`/projects/${projectId}/generate-preview`, {
         method: "POST",
         body: JSON.stringify(payload || {}),
       });
+      const data = res?.data || res || {};
+      return {
+        status: res?.status || "success",
+        preview_url: data.preview_url || res?.preview_url || "",
+        width: data.width || res?.width || 640,
+        height: data.height || res?.height || 360,
+        provider: data.provider || res?.provider || "9router",
+        model: data.model || res?.model,
+        seed: data.seed ?? res?.seed,
+        data: res?.data || data,
+      };
     },
     generateScenePreview: async (
       projectId: string,

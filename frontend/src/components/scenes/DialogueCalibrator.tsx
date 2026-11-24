@@ -22,7 +22,7 @@ interface DialogueCalibratorProps {
 
 export default function DialogueCalibrator({
   sceneId,
-  initialDialogue = "Cipher, the Syndicate perimeter has collapsed. We have less than forty seconds before neural purge.",
+  initialDialogue = "",
   durationTarget = 5.0,
   onCalibrationComplete,
   isNonVerbal = false,

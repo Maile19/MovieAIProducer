@@ -71,7 +71,7 @@ YOUTUBE_TREND_CATALOG: list[dict[str, Any]] = [
         "target_style_name": "Epic High Fantasy",
         "aspect_ratio": "16:9",
         "avg_retention_pacing": "4.8s",
-        "suggested_premise_seed": "A disgraced inquisitor escorting an immortal frost child across the scorched ash wastes realizes the child is the seal holding back an elder wyrm.",
+        "suggested_premise_seed": "A wandering rune-weaver and an exiled sun-knight escort a dormant celestial titan through shifting obsidian valleys before eclipse dawn.",
         "seo_keywords": ["Dark Fantasy Lore", "Nordic Myth", "Dragon Curse", "Cinematic Epic"],
     },
     {
