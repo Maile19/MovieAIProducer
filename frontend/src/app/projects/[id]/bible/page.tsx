@@ -349,6 +349,7 @@ export default function ProductionBiblePage() {
             <WorldPropsTab
               projectId={projectId}
               project={project}
+              characters={characters}
               worldRules={bible?.world_rules || {}}
               isLocked={isLocked}
               onSave={handleSaveWorldRules}

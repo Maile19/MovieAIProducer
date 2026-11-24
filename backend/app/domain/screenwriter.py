@@ -21,7 +21,7 @@ import httpx
 from pydantic import BaseModel, Field, field_validator
 
 from backend.app.core.config import get_settings
-from backend.app.domain.catalog import STYLE_CATALOG
+from backend.app.domain.catalog import LIGHTING_MATRIX, STYLE_CATALOG
 
 logger = logging.getLogger("polya.screenwriter")
 
@@ -195,6 +195,12 @@ class ProjectNarrativeContext(BaseModel):
     visual_dna_parameters: dict[str, Any] = Field(default_factory=dict)
     environments_summary: str = ""
     props_summary: str = ""
+    # Deep Ingestion Extensions
+    aspect_ratio: str = "16:9"
+    operational_stage: int = 1
+    cast_characters: list[dict[str, Any]] = Field(default_factory=list)
+    storyboard_scenes: list[dict[str, Any]] = Field(default_factory=list)
+    ranked_locations: list[tuple[str, int]] = Field(default_factory=list)
 
 
 class CharacterStateData(BaseModel):
@@ -246,11 +252,13 @@ class CastEnsembleData(BaseModel):
 def extract_project_narrative_context(
     project: Any,
     bible: Any = None,
+    characters: list[Any] | None = None,
+    scenes: list[Any] | None = None,
 ) -> ProjectNarrativeContext:
     """Extract complete narrative context from SQLite models with key-resilient fallbacks."""
-    title = (project.title or "").strip()
+    title = (getattr(project, "title", None) or "").strip()
 
-    settings = project.settings if isinstance(project.settings, dict) else {}
+    settings = project.settings if isinstance(getattr(project, "settings", None), dict) else {}
     treatment = settings.get("treatment") if isinstance(settings.get("treatment"), dict) else {}
 
     # Resilient synopsis extraction: check all known keys
@@ -281,7 +289,7 @@ def extract_project_narrative_context(
     )
 
     # Visual DNA parameters from MPB
-    mpb_styles = bible.style_parameters if bible and isinstance(bible.style_parameters, dict) else {}
+    mpb_styles = bible.style_parameters if bible and isinstance(getattr(bible, "style_parameters", None), dict) else {}
     visual_dna_params = {
         k: v for k, v in mpb_styles.items()
         if k in ("render_pipeline", "film_stock", "anamorphic_squeeze", "aspect_ratio", "halation_level", "color_palette", "lighting_preset", "lens_code")
@@ -289,7 +297,7 @@ def extract_project_narrative_context(
     }
     style_code = (
         mpb_styles.get("master_style_code")
-        or project.target_style_code
+        or getattr(project, "target_style_code", None)
         or "#Style 01"
     )
 
@@ -300,7 +308,7 @@ def extract_project_narrative_context(
     color_grade_emulation = catalog_entry.get("color_grade_emulation", "")
 
     # World rules lookup
-    mpb_rules = bible.world_rules if bible and isinstance(bible.world_rules, dict) else {}
+    mpb_rules = bible.world_rules if bible and isinstance(getattr(bible, "world_rules", None), dict) else {}
     world_setting = (
         mpb_rules.get("setting")
         or mpb_rules.get("world_name")
@@ -327,8 +335,84 @@ def extract_project_narrative_context(
             f"{p.get('name', 'Prop')}" for p in props_list[:5] if isinstance(p, dict) and p.get("name")
         )
 
+    # Ingest Characters Cast
+    cast_characters: list[dict[str, Any]] = []
+    if characters:
+        for c in characters:
+            if isinstance(c, dict):
+                c_name = c.get("name")
+                c_role = c.get("role", "PROTAGONIST")
+                c_prof = c.get("narrative_profile") or c.get("narrative_summary") or ""
+                c_prompt = c.get("base_visual_prompt") or c.get("base_prompt") or ""
+                c_states = c.get("states") or []
+            else:
+                c_name = getattr(c, "name", "")
+                c_role = getattr(c, "role", "PROTAGONIST")
+                meta = getattr(c, "sheet_metadata", {}) or {}
+                c_prof = getattr(c, "narrative_summary", None) or meta.get("narrative_summary") or ""
+                c_prompt = getattr(c, "base_prompt", "")
+                c_states = getattr(c, "states", [])
+
+            formatted_states = []
+            if isinstance(c_states, list):
+                for s in c_states:
+                    if isinstance(s, dict):
+                        formatted_states.append({
+                            "code": s.get("state_code") or s.get("code") or "#State 01",
+                            "label": s.get("state_label") or s.get("label") or "",
+                            "wardrobe": s.get("wardrobe") or "",
+                            "wear": s.get("injuries_and_wear") or s.get("wear") or "",
+                        })
+                    else:
+                        formatted_states.append({
+                            "code": getattr(s, "state_code", "#State 01"),
+                            "label": getattr(s, "state_label", "") or getattr(s, "state_code", ""),
+                            "wardrobe": getattr(s, "wardrobe", ""),
+                            "wear": getattr(s, "injuries_and_wear", ""),
+                        })
+
+            if c_name:
+                cast_characters.append({
+                    "name": c_name,
+                    "role": c_role,
+                    "narrative_profile": c_prof,
+                    "base_visual_prompt": c_prompt,
+                    "states": formatted_states,
+                })
+
+    # Ingest Storyboard Scenes & Sluglines
+    storyboard_scenes: list[dict[str, Any]] = []
+    slug_counts: dict[str, int] = {}
+    if scenes:
+        for sc in scenes:
+            if isinstance(sc, dict):
+                s_num = sc.get("scene_number", 1)
+                a_num = sc.get("act_number", 1)
+                slug = sc.get("slugline", "")
+                goal = sc.get("narrative_goal", "")
+            else:
+                s_num = getattr(sc, "scene_number", 1)
+                a_num = getattr(sc, "act_number", 1)
+                slug = getattr(sc, "slugline", "")
+                goal = getattr(sc, "narrative_goal", "")
+
+            storyboard_scenes.append({
+                "scene_number": s_num,
+                "act_number": a_num,
+                "slugline": slug,
+                "narrative_goal": goal,
+            })
+            if slug:
+                clean_slug = slug.strip().upper()
+                slug_counts[clean_slug] = slug_counts.get(clean_slug, 0) + 1
+
+    ranked_locations = sorted(slug_counts.items(), key=lambda x: x[1], reverse=True)
+
+    aspect_ratio = getattr(project, "aspect_ratio", None) or "16:9"
+    operational_stage = getattr(project, "operational_stage", 1) or 1
+
     return ProjectNarrativeContext(
-        project_id=str(project.id),
+        project_id=str(getattr(project, "id", "")),
         title=title,
         synopsis=synopsis,
         genre_tone=str(genre_tone),
@@ -341,6 +425,11 @@ def extract_project_narrative_context(
         visual_dna_parameters=visual_dna_params,
         environments_summary=envs_summary,
         props_summary=props_summary,
+        aspect_ratio=aspect_ratio,
+        operational_stage=operational_stage,
+        cast_characters=cast_characters,
+        storyboard_scenes=storyboard_scenes,
+        ranked_locations=ranked_locations,
     )
 
 
@@ -395,6 +484,18 @@ Your principles:
 6. Studio Neutral Backdrop: Always end character base_visual_prompts with studio gray background framing: 'isolated on a flat seamless Neutral Matte Light-Medium Studio Gray (#D4D4D4) studio background, neutral studio illumination, zero environment props or color cast'.
 7. Strict JSON Only: Output strictly valid JSON conforming to the requested schema. No commentary, markdown prose, or preamble outside the JSON.
 8. Authentic & Contextual Naming: Character names, personas, and costumes MUST be 100% unique, freshly conceived, and culturally and aesthetically authentic to the specific universe and synopsis. Strictly avoid repeating generic stock names such as 'Kaelen', 'Thorne', 'Vane', 'Vance', 'Lyra', or 'Cipher'."""
+
+
+POLYA_AI_DIRECTOR_SYSTEM_PROMPT = """You are Polya AI Director — Chief AI Film Producer & Hollywood Production Designer.
+You possess world-class expertise in physical set architecture, cinematic lighting design (Kelvin, contrast ratios, volumetric physics), hero prop craftsmanship, and narrative tactile continuity.
+
+Your core directives:
+1. Strict Genre & Aesthetic Lock: You must adhere 100% to the project's Master Visual Style (#Style Code) and Color Grade/Film Emulation directives. Zero cross-genre contamination (e.g. zero sci-fi/cyberpunk artifacts in an Epic High Fantasy or Historical project).
+2. DaVinci Obsidian Lighting Matrix Mandate: Every key environment (#Env 01 through #Env 05) MUST explicitly specify an official lighting code (#Light 01 through #Light 14) from the DaVinci Obsidian catalog, incorporating exact Kelvin color temperature, key-to-fill ratio, and volumetric light sources.
+3. Audio Bed & Acoustic Bridge Readiness: Every environment MUST define concrete Room Tone & Acoustic Foley (supporting clean SNR >= 32 dB audio bed planning, J-Cut/L-Cut acoustic transitions, and ambient spatial reverbs).
+4. Signature Hero Props Anchored to Cast: Every signature hero prop (#Prop 01 through #Prop 05) MUST be anchored to a specific character from the cast (or marked 'Ensemble / World Artifact' if plot-wide). Define concrete physical materials, dimensions, weathering/patina, battle scars, and specular/roughness cues for cross-shot visual continuity (CLIP >= 0.80, LAION >= 8.0/10).
+5. Storyboard Slugline Binding: If storyboard scenes/sluglines are provided, environments MUST align with and canonize the primary recurring locations from the storyboard rather than inventing disconnected settings.
+6. Strict Valid JSON: Output STRICT valid JSON conforming exactly to the requested schema. No commentary, markdown prose, or preamble outside the JSON."""
 
 
 class PolyaScreenwriterEngine:
@@ -916,7 +1017,8 @@ OUTPUT SCHEMA (Return strictly this JSON object):
         )
 
     # ==========================================================================
-    # Dynamic World & Signature Props Generator
+    # ==========================================================================
+    # Dynamic World & Signature Props Generator (Polya AI Director Engine)
     # ==========================================================================
 
     async def generate_world_and_props(
@@ -925,140 +1027,181 @@ OUTPUT SCHEMA (Return strictly this JSON object):
         additional_notes: str | None = None,
     ) -> dict[str, Any]:
         """Generate 5 Key Environments (#Env 01 - 05) and 5 Signature Hero Props (#Prop 01 - 05)
-        strictly tailored to the project narrative context and visual world rules.
+        strictly tailored to the project narrative context, cast characters, and storyboard locations
+        adhering to Hollywood Production Design & DaVinci Obsidian Matrix standards.
         """
+        dna_items = []
+        if context.visual_dna_parameters:
+            for k, v in context.visual_dna_parameters.items():
+                dna_items.append(f"{k.replace('_', ' ').title()}: {v}")
+        dna_str = f"- Master Visual DNA Settings: {', '.join(dna_items)}" if dna_items else ""
+
+        # Format cast characters
+        cast_lines = []
+        for idx, c in enumerate(context.cast_characters):
+            states_preview = ""
+            if c.get("states"):
+                s01 = c["states"][0]
+                states_preview = f" | Baseline Wardrobe: {s01.get('wardrobe', '')[:60]}"
+            cast_lines.append(
+                f"- Character #{idx + 1}: {c.get('name')} (Role: {c.get('role', 'SUPPORTING')}{states_preview}) — Arc: {c.get('narrative_profile', '')[:90]}"
+            )
+        cast_str = "\n".join(cast_lines) if cast_lines else "No registered cast yet. Anchor props to dramatic roles (PROTAGONIST, ANTAGONIST, ENSEMBLE)."
+
+        # Format storyboard scenes and recurring sluglines
+        locations_lines = []
+        if context.ranked_locations:
+            locations_lines.append(
+                "- Storyboard Top Recurring Sluglines: "
+                + ", ".join(f"{loc} ({cnt}x)" for loc, cnt in context.ranked_locations[:6])
+            )
+        if context.storyboard_scenes:
+            locations_lines.append(
+                "- Storyboard Narrative Progression: "
+                + "; ".join(f"Act {sc.get('act_number')} Sc {sc.get('scene_number')} [{sc.get('slugline')}]: {sc.get('narrative_goal', '')[:50]}" for sc in context.storyboard_scenes[:6])
+            )
+        scenes_str = "\n".join(locations_lines) if locations_lines else "No storyboard scenes created yet. Synthesize 5 core dramatic locations based on premise and genre."
+
+        # Canonical Lighting Matrix from catalog SSOT
+        lighting_catalog_summary = "\n".join(
+            f"- {l['code']} {l['name']}: {l['technical_specifications']} (Mood: {l['mood_application']})"
+            for l in LIGHTING_MATRIX
+        )
+
         user_prompt = f"""PROJECT PRODUCTION BIBLE & NARRATIVE CONTEXT:
 - Film Title: {context.title}
 - Core Synopsis & Premise:
 {context.synopsis}
 - Master Genre & Tone: {context.genre_tone}
+- Aspect Ratio: {context.aspect_ratio}
+- Active Operational Stage: Stage {context.operational_stage}
 - Master Visual Style Code: {context.master_style_code} ({context.style_name})
 - Visual Style Directives: {context.aesthetic_directives}
 - Color Palette & Lighting Emulation: {context.color_grade_emulation}
+{dna_str}
 - World Setting: {context.world_setting}
 - Production Continuity Rules: {', '.join(context.continuity_rules) if context.continuity_rules else 'Standard Cinematic Rules'}
 - Additional Showrunner Notes: {additional_notes or 'None'}
 
-WORLD & PROPS DESIGN MANDATE:
-1. Generate exactly 5 Key Environments (#Env 01 through #Env 05) that represent the core narrative locations of this story:
-   - code: "#Env 01" to "#Env 05"
-   - name: Distinct, culturally authentic, and evocative location name matching '{context.title}'.
-   - architecture: Spatial architecture, construction materials, structural scale, and dominant shapes.
-   - atmosphere: Micro-climate, weather conditions, airborne particles (steam/fog/smoke/dust), and spatial texture.
-   - lighting: Detailed lighting directive (e.g., '#Light 01 Volumetric Amber Rim...', key/fill/practical sources, color temperature).
-   - audio: Ambient soundscape, acoustic reverb, environmental Foley cues.
+REGISTERED CHARACTER CAST ({len(context.cast_characters)} Characters):
+{cast_str}
 
-2. Generate exactly 5 Signature Hero Props (#Prop 01 through #Prop 05) that carry narrative weight and tactile continuity:
-   - code: "#Prop 01" to "#Prop 05"
+50-SCENE STORYBOARD & RECURRING SLUGLINES ({len(context.storyboard_scenes)} Scenes):
+{scenes_str}
+
+CANONICAL DAVINCI OBSIDIAN LIGHTING MATRIX (#Light 01 to #Light 14):
+{lighting_catalog_summary}
+
+POLYA AI DIRECTOR MANDATE:
+1. Synthesize exactly 5 Key Environments (#Env 01 through #Env 05) that represent the core narrative locations:
+   - code: '#Env 01' to '#Env 05'
+   - name: Distinct, culturally authentic, and evocative location name (aligned with Storyboard sluglines when present).
+   - architecture: Spatial scale, structural silhouettes, construction materials, tactile surface textures consistent with active #Style.
+   - atmosphere: Weather physics, airborne particulates (steam/fog/ash/snow/dust), humidity, and atmospheric perspective.
+   - lighting_code: Official lighting code ('#Light 01' to '#Light 14' from catalog).
+   - lighting_and_audio: Detailed combined directive: '#Light XX [Name] (Kelvin, contrast ratio) • Room Tone: [SNR >= 32 dB acoustic cues, spatial reverb, Foley bed]'.
+   - linked_scenes: Associated story arc / acts / sluglines (e.g. 'Act I–II (EXT. ASH WASTES, EXT. RUINED OUTPOST)').
+   - lighting: Detailed standalone lighting directive.
+   - audio: Detailed standalone room tone and acoustic Foley cues.
+
+2. Synthesize exactly 5 Signature Hero Props (#Prop 01 through #Prop 05) that carry narrative weight and tactile continuity:
+   - code: '#Prop 01' to '#Prop 05'
    - name: Unique, story-critical hero prop name matching the film's world.
-   - material: Specific physical materiality, texture, engineering/craftsmanship, and wear/patina.
-   - weight: Narrative function, thematic significance, or story arc importance.
-   - action: Exact physical tactile interaction (how characters grip, manipulate, ignite, wear, or activate it).
+   - owner_character: Exact character name from the cast above (or 'Ensemble / World Artifact').
+   - material_and_wear: Specific physical materiality, dimensions, craftsmanship, weathering, battle scars, specular/roughness cues for cross-shot visual continuity (CLIP >= 0.80, LAION >= 8.0/10).
+   - narrative_utility: Exact dramatic function and plot significance across the story arc.
+   - description: Concise backward-compatible summary string.
+   - material: Backward-compatible material string.
+   - weight: Backward-compatible narrative weight string.
+   - action: Exact physical tactile manipulation (how characters grip, manipulate, ignite, wear, or activate it).
 
 OUTPUT SCHEMA (Return STRICT valid JSON only):
 {{
   "environments": [
     {{
       "code": "#Env 01",
-      "name": "Location Name",
-      "architecture": "Architectural styling and spatial dimensions",
-      "atmosphere": "Atmospheric conditions, weather, environmental texture",
-      "lighting": "Specific lighting setup, color temps, volumetric rays",
-      "audio": "Detailed ambient soundscape, acoustics, spatial Foley"
+      "name": "Location Name (aligned with Storyboard slugline)",
+      "architecture": "Spatial scale and tactile materials",
+      "atmosphere": "Atmospheric conditions and airborne particles",
+      "lighting_code": "#Light 07",
+      "lighting_and_audio": "#Light 07 Overcast Soft (6000K diffused northern sky...) • Room Tone: howling wind, leather footsteps",
+      "linked_scenes": "Act I–II (EXT. ASH WASTES, EXT. RUINED OUTPOST)",
+      "lighting": "Detailed lighting directive",
+      "audio": "Detailed ambient soundscape & Foley"
     }},
-    {{
-      "code": "#Env 02",
-      "name": "Location Name",
-      "architecture": "...",
-      "atmosphere": "...",
-      "lighting": "...",
-      "audio": "..."
-    }},
-    {{
-      "code": "#Env 03",
-      "name": "Location Name",
-      "architecture": "...",
-      "atmosphere": "...",
-      "lighting": "...",
-      "audio": "..."
-    }},
-    {{
-      "code": "#Env 04",
-      "name": "Location Name",
-      "architecture": "...",
-      "atmosphere": "...",
-      "lighting": "...",
-      "audio": "..."
-    }},
-    {{
-      "code": "#Env 05",
-      "name": "Location Name",
-      "architecture": "...",
-      "atmosphere": "...",
-      "lighting": "...",
-      "audio": "..."
-    }}
+    {{ "code": "#Env 02", "name": "...", "architecture": "...", "atmosphere": "...", "lighting_code": "#Light 04", "lighting_and_audio": "...", "linked_scenes": "...", "lighting": "...", "audio": "..." }},
+    {{ "code": "#Env 03", "name": "...", "architecture": "...", "atmosphere": "...", "lighting_code": "#Light 01", "lighting_and_audio": "...", "linked_scenes": "...", "lighting": "...", "audio": "..." }},
+    {{ "code": "#Env 04", "name": "...", "architecture": "...", "atmosphere": "...", "lighting_code": "#Light 06", "lighting_and_audio": "...", "linked_scenes": "...", "lighting": "...", "audio": "..." }},
+    {{ "code": "#Env 05", "name": "...", "architecture": "...", "atmosphere": "...", "lighting_code": "#Light 05", "lighting_and_audio": "...", "linked_scenes": "...", "lighting": "...", "audio": "..." }}
   ],
   "props": [
     {{
       "code": "#Prop 01",
-      "name": "Hero Prop Name",
-      "material": "Material composition, craftsmanship, wear and patina",
-      "weight": "Core emotional or narrative function",
+      "name": "Signature Hero Prop Name",
+      "owner_character": "Exact Character Name from Cast",
+      "material_and_wear": "Concrete physical materials, wear and patina",
+      "narrative_utility": "Exact dramatic function across story arc",
+      "description": "Concise summary string",
+      "material": "Material and wear",
+      "weight": "Narrative utility",
       "action": "Tactile manipulation and interaction during pivotal scenes"
     }},
-    {{
-      "code": "#Prop 02",
-      "name": "Hero Prop Name",
-      "material": "...",
-      "weight": "...",
-      "action": "..."
-    }},
-    {{
-      "code": "#Prop 03",
-      "name": "Hero Prop Name",
-      "material": "...",
-      "weight": "...",
-      "action": "..."
-    }},
-    {{
-      "code": "#Prop 04",
-      "name": "Hero Prop Name",
-      "material": "...",
-      "weight": "...",
-      "action": "..."
-    }},
-    {{
-      "code": "#Prop 05",
-      "name": "Hero Prop Name",
-      "material": "...",
-      "weight": "...",
-      "action": "..."
-    }}
+    {{ "code": "#Prop 02", "name": "...", "owner_character": "...", "material_and_wear": "...", "narrative_utility": "...", "description": "...", "material": "...", "weight": "...", "action": "..." }},
+    {{ "code": "#Prop 03", "name": "...", "owner_character": "...", "material_and_wear": "...", "narrative_utility": "...", "description": "...", "material": "...", "weight": "...", "action": "..." }},
+    {{ "code": "#Prop 04", "name": "...", "owner_character": "...", "material_and_wear": "...", "narrative_utility": "...", "description": "...", "material": "...", "weight": "...", "action": "..." }},
+    {{ "code": "#Prop 05", "name": "...", "owner_character": "...", "material_and_wear": "...", "narrative_utility": "...", "description": "...", "material": "...", "weight": "...", "action": "..." }}
   ]
 }}"""
 
         messages = [
-            {"role": "system", "content": POLYA_SCREENWRITER_SYSTEM_PROMPT},
+            {"role": "system", "content": POLYA_AI_DIRECTOR_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
 
         try:
             raw_json = await self._call_llm(messages)
-            return self._normalize_world_and_props(raw_json, context)
+            normalized = self._normalize_world_and_props(raw_json, context)
+            normalized["generation_meta"] = {
+                "engine": "polya_ai_director_llm",
+                "model": self.model,
+                "director_persona": "Polya AI Director",
+                "context_ingested": {
+                    "style_code": context.master_style_code,
+                    "characters_count": len(context.cast_characters),
+                    "scenes_count": len(context.storyboard_scenes),
+                    "has_synopsis": bool(context.synopsis),
+                },
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "fallback_reason": None,
+            }
+            return normalized
         except Exception as exc:
             logger.warning(
-                "Polya AI LLM call for world & props failed (%s). Generating contextual procedural world & props.",
+                "Polya AI Director LLM call failed (%s). Activating contextual procedural fallback.",
                 exc,
             )
-            return self._generate_procedural_world_and_props(context)
+            fallback_data = self._generate_procedural_world_and_props(context)
+            fallback_data["generation_meta"] = {
+                "engine": "procedural_fallback",
+                "model": None,
+                "director_persona": "Polya AI Director (Procedural Fallback)",
+                "context_ingested": {
+                    "style_code": context.master_style_code,
+                    "characters_count": len(context.cast_characters),
+                    "scenes_count": len(context.storyboard_scenes),
+                    "has_synopsis": bool(context.synopsis),
+                },
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "fallback_reason": f"LLM execution failed ({type(exc).__name__}: {str(exc)[:150]})",
+            }
+            return fallback_data
 
     def _normalize_world_and_props(
         self,
         raw_json: dict[str, Any],
         context: ProjectNarrativeContext,
     ) -> dict[str, Any]:
-        """Normalize and enforce 5 environments and 5 props schema."""
+        """Normalize and enforce 5 environments and 5 props schema with both enriched and backward-compatible fields."""
         procedural_fallback = self._generate_procedural_world_and_props(context)
 
         raw_envs = raw_json.get("environments", []) if isinstance(raw_json, dict) else []
@@ -1070,13 +1213,30 @@ OUTPUT SCHEMA (Return STRICT valid JSON only):
             item = raw_envs[i] if i < len(raw_envs) and isinstance(raw_envs[i], dict) else {}
             fallback_item = procedural_fallback["environments"][i]
 
+            lighting_code = str(item.get("lighting_code") or fallback_item.get("lighting_code") or f"#Light {((i * 2 + 1) % 14) + 1:02d}").strip()
+            lighting = str(item.get("lighting") or fallback_item.get("lighting") or lighting_code).strip()
+            audio = str(item.get("audio") or fallback_item.get("audio") or "Balanced ambient room tone with natural foley texture.").strip()
+            lighting_and_audio = str(
+                item.get("lighting_and_audio")
+                or fallback_item.get("lighting_and_audio")
+                or f"{lighting} • Room Tone: {audio}"
+            ).strip()
+            linked_scenes = str(
+                item.get("linked_scenes")
+                or fallback_item.get("linked_scenes")
+                or f"Act {min(i + 1, 4)}"
+            ).strip()
+
             normalized_envs.append({
                 "code": code,
                 "name": str(item.get("name") or fallback_item["name"]).strip(),
                 "architecture": str(item.get("architecture") or fallback_item["architecture"]).strip(),
                 "atmosphere": str(item.get("atmosphere") or fallback_item["atmosphere"]).strip(),
-                "lighting": str(item.get("lighting") or fallback_item["lighting"]).strip(),
-                "audio": str(item.get("audio") or fallback_item["audio"]).strip(),
+                "lighting_code": lighting_code,
+                "lighting_and_audio": lighting_and_audio,
+                "linked_scenes": linked_scenes,
+                "lighting": lighting,
+                "audio": audio,
             })
 
         normalized_props = []
@@ -1085,12 +1245,50 @@ OUTPUT SCHEMA (Return STRICT valid JSON only):
             item = raw_props[i] if i < len(raw_props) and isinstance(raw_props[i], dict) else {}
             fallback_item = procedural_fallback["props"][i]
 
+            owner_character = str(
+                item.get("owner_character")
+                or fallback_item.get("owner_character")
+                or (context.cast_characters[i]["name"] if i < len(context.cast_characters) else "Ensemble / World Artifact")
+            ).strip()
+
+            material_and_wear = str(
+                item.get("material_and_wear")
+                or item.get("material")
+                or fallback_item.get("material_and_wear")
+                or fallback_item.get("material")
+                or "Hardened alloy with authentic field wear"
+            ).strip()
+
+            narrative_utility = str(
+                item.get("narrative_utility")
+                or item.get("weight")
+                or fallback_item.get("narrative_utility")
+                or fallback_item.get("weight")
+                or "Narrative anchor in critical story moments"
+            ).strip()
+
+            action = str(
+                item.get("action")
+                or fallback_item.get("action")
+                or "Handled firmly during pivotal scenes"
+            ).strip()
+
+            desc = str(
+                item.get("description")
+                or fallback_item.get("description")
+                or f"{material_and_wear} - {narrative_utility}"
+            ).strip()
+
             normalized_props.append({
                 "code": code,
                 "name": str(item.get("name") or fallback_item["name"]).strip(),
-                "material": str(item.get("material") or fallback_item["material"]).strip(),
-                "weight": str(item.get("weight") or fallback_item["weight"]).strip(),
-                "action": str(item.get("action") or fallback_item["action"]).strip(),
+                "owner_character": owner_character,
+                "material_and_wear": material_and_wear,
+                "narrative_utility": narrative_utility,
+                "description": desc,
+                "material": material_and_wear,
+                "weight": narrative_utility,
+                "action": action,
             })
 
         return {
@@ -1102,54 +1300,86 @@ OUTPUT SCHEMA (Return STRICT valid JSON only):
         self,
         context: ProjectNarrativeContext,
     ) -> dict[str, Any]:
-        """Generate high-fidelity contextual environments and props based on project narrative context."""
+        """Generate high-fidelity contextual environments and props dynamically synthesized from active project context."""
         title = context.title or "Cinematic Production"
         genre = (context.genre_tone or "Cinematic Drama").split("/")[0].strip()
         setting = context.world_setting or "Epic Universe"
 
-        # Contextual templates based on genre keywords
-        is_fantasy = any(w in (genre + " " + title).lower() for w in ["fantasy", "nordic", "myth", "awakening", "ancient", "magic", "realm", "legend", "disgraced"])
-        is_sci_fi = any(w in (genre + " " + title).lower() for w in ["cyber", "sci-fi", "space", "quantum", "machine", "orbit", "future", "stellar"])
+        # Determine cast anchor names
+        cast = context.cast_characters
+        owner_0 = cast[0]["name"] if len(cast) > 0 else "Protagonist"
+        owner_1 = cast[1]["name"] if len(cast) > 1 else (cast[0]["name"] if len(cast) > 0 else "Protagonist")
+        owner_2 = cast[2]["name"] if len(cast) > 2 else (cast[1]["name"] if len(cast) > 1 else "Antagonist")
+        owner_3 = cast[3]["name"] if len(cast) > 3 else "Supporting Ally"
+        owner_4 = "Ensemble / World Artifact"
+
+        # Check if storyboard locations exist
+        ranked = [loc for loc, _ in context.ranked_locations] if context.ranked_locations else []
+        env_name_0 = ranked[0] if len(ranked) > 0 else None
+        env_name_1 = ranked[1] if len(ranked) > 1 else None
+        env_name_2 = ranked[2] if len(ranked) > 2 else None
+        env_name_3 = ranked[3] if len(ranked) > 3 else None
+        env_name_4 = ranked[4] if len(ranked) > 4 else None
+
+        # Contextual templates based on genre keywords & active #Style
+        full_text = f"{genre} {title} {context.master_style_code} {context.style_name}".lower()
+        is_fantasy = any(w in full_text for w in ["fantasy", "nordic", "myth", "ancient", "magic", "realm", "legend", "disgraced", "#style 04", "#style 07"])
+        is_sci_fi = any(w in full_text for w in ["cyber", "sci-fi", "space", "quantum", "machine", "orbit", "future", "stellar", "#style 01", "#style 11"])
 
         if is_fantasy:
             envs = [
                 {
                     "code": "#Env 01",
-                    "name": f"Ancient Stone Sanctuary of {title}",
-                    "architecture": "Massive monolithic basalt arches, ancient Norse-inspired runic pillars, weathered flagstone floors.",
+                    "name": env_name_0 or f"Ancient Stone Sanctuary of {title}",
+                    "architecture": "Massive monolithic basalt arches, ancient runic pillars, weathered flagstone floors.",
                     "atmosphere": "Sub-zero mountain mist, drifting woodsmoke, falling snowflakes catching torchlight.",
+                    "lighting_code": "#Light 02",
+                    "lighting_and_audio": "#Light 02 Volumetric God Rays (4500K beam contrast against 3000K ambient shadows) • Room Tone: howling glacial winds, crackling pine embers, distant thunder echoing through fjords.",
+                    "linked_scenes": f"Act I ({env_name_0 or 'EXT. SANCTUARY'})",
                     "lighting": "#Light 02 High-Contrast Chiaroscuro & flickering hearth embers.",
                     "audio": "Howling glacial winds, crackling pine embers, distant thunder echoing through fjords.",
                 },
                 {
                     "code": "#Env 02",
-                    "name": f"Whispering Pines of {setting}",
+                    "name": env_name_1 or f"Whispering Pines of {setting}",
                     "architecture": "Dense ancient boreal forest canopy, moss-draped boulders, winding frozen riverbanks.",
                     "atmosphere": "Deep frost, breath condensation vapor, shafts of pale morning sun piercing mist.",
+                    "lighting_code": "#Light 04",
+                    "lighting_and_audio": "#Light 04 Silvery Blue Moonlight (6500K cool diffused overhead key, soft 2:1 fill) • Room Tone: branches groaning under heavy snowpack, crunching frozen pine needles.",
+                    "linked_scenes": f"Act II-A ({env_name_1 or 'EXT. WHISPERING PINES'})",
                     "lighting": "#Light 04 Dawn Softbox with diffuse pale cyan rim illumination.",
                     "audio": "Branches groaning under heavy snowpack, crunching frozen pine needles, distant wolf call.",
                 },
                 {
                     "code": "#Env 03",
-                    "name": "High Keep Obsidian Throne Room",
+                    "name": env_name_2 or "High Keep Obsidian Throne Room",
                     "architecture": "Vast vaulted timber hall lined with blackened iron shields, towering hearth brazier, frost-rimed glass.",
                     "atmosphere": "Oppressive heavy air, bitter chill battling radiating furnace heat, suspended dust motes.",
+                    "lighting_code": "#Light 01",
+                    "lighting_and_audio": "#Light 01 Golden Hour Backlit (2800K golden warmth, rim light enveloping subject silhouette) • Room Tone: heavy footsteps on flagstone, low murmur of war council.",
+                    "linked_scenes": f"Act II-B ({env_name_2 or 'INT. OBSIDIAN THRONE'})",
                     "lighting": "#Light 01 Volumetric Amber Rim & deep iron shadows.",
                     "audio": "Heavy footsteps on flagstone, low murmur of war council, clatter of forged steel.",
                 },
                 {
                     "code": "#Env 04",
-                    "name": "Subterranean Runic Crypts",
+                    "name": env_name_3 or "Subterranean Runic Crypts",
                     "architecture": "Deep cavernous underground tomb, carved ancestor sarcophagi, subterranean glacial seep.",
                     "atmosphere": "Permafrost condensation, eerie stillness, faint blue luminescence from vein crystals.",
+                    "lighting_code": "#Light 06",
+                    "lighting_and_audio": "#Light 06 Neon Cyberpunk / Bioluminescent Glow (cyan 480nm specular reflections) • Room Tone: rhythmic glacial water dripping, hollow acoustic resonance.",
+                    "linked_scenes": f"Act III ({env_name_3 or 'INT. RUNIC CRYPTS'})",
                     "lighting": "#Light 06 Bioluminescent Cyan Glow reflecting off wet ice walls.",
                     "audio": "Rhythmic glacial water dripping, hollow acoustic resonance, low cavern wind hiss.",
                 },
                 {
                     "code": "#Env 05",
-                    "name": "The Shattered Ridge / Climax Arena",
+                    "name": env_name_4 or "The Shattered Ridge / Climax Arena",
                     "architecture": "Exposed mountain pinnacle, jagged slate crags overlooking stormy fjord expanse.",
                     "atmosphere": "Violent blizzard gales, swirling ice crystals, dramatic tempest storm clouds.",
+                    "lighting_code": "#Light 05",
+                    "lighting_and_audio": "#Light 05 Flickering Torch / Silhouette Against Tempest (1800K dynamic flame luminance, stark lightning bursts) • Room Tone: deafening storm roar, gale-force wind whistling against stone cliffs.",
+                    "linked_scenes": f"Act IV ({env_name_4 or 'EXT. SHATTERED RIDGE'})",
                     "lighting": "#Light 05 Dramatic Backlit Silhouette & stark lightning flashes.",
                     "audio": "Deafening storm roar, gale-force wind whistling against stone cliffs, thunder crashes.",
                 },
@@ -1158,34 +1388,54 @@ OUTPUT SCHEMA (Return STRICT valid JSON only):
                 {
                     "code": "#Prop 01",
                     "name": f"Rune-Etched War Seal of {title}",
+                    "owner_character": owner_0,
+                    "material_and_wear": "Hand-forged bog iron inlaid with beaten silver runes, worn leather lanyard, specular highlights along battle-notched edges.",
+                    "narrative_utility": f"Hero ancestral heirloom carried by {owner_0}; anchors sacred vow of redemption.",
+                    "description": f"Ancestral war seal belonging to {owner_0}.",
                     "material": "Hand-forged bog iron inlaid with beaten silver runes and braided leather lanyard.",
-                    "weight": "Hero ancestral heirloom carried by protagonist; anchors vow of redemption.",
+                    "weight": f"Hero ancestral heirloom carried by {owner_0}; anchors vow of redemption.",
                     "action": "Held firmly in clenched fist, traced with thumb before entering battle.",
                 },
                 {
                     "code": "#Prop 02",
                     "name": "Meteoric Steel Broadsword",
+                    "owner_character": owner_1,
+                    "material_and_wear": "Pattern-welded Damascus steel blade with deep fuller, bronze crossguard, and deer-antler hilt showing sweat stains.",
+                    "narrative_utility": f"Signature weapon wielded by {owner_1} across a dozen campaigns.",
+                    "description": f"Damascus steel broadsword wielded by {owner_1}.",
                     "material": "Pattern-welded Damascus steel blade with deep fuller, bronze crossguard, and deer-antler hilt.",
-                    "weight": "Signature weapon carrying battle notches from a dozen campaigns.",
+                    "weight": f"Signature weapon wielded by {owner_1} carrying battle notches from a dozen campaigns.",
                     "action": "Drawn smoothly from worn leather scabbard with metallic resonance.",
                 },
                 {
                     "code": "#Prop 03",
                     "name": "Chiseled Obsidian Oath-Stone",
+                    "owner_character": owner_2,
+                    "material_and_wear": "Fractured volcanic glass inscribed with bloodline covenant vows and gold leaf filler, razor-sharp bevels.",
+                    "narrative_utility": f"Binding covenant token used by {owner_2} as a symbol of unyielding authority.",
+                    "description": f"Volcanic glass oath-stone carried by {owner_2}.",
                     "material": "Fractured volcanic glass inscribed with ancient bloodline vows and gold leaf filler.",
-                    "weight": "Antagonist's binding covenant token and symbol of tyrannical authority.",
+                    "weight": f"Binding covenant token used by {owner_2} as symbol of tyrannical authority.",
                     "action": "Slammed onto treaty table; pulses with faint thermal shimmer.",
                 },
                 {
                     "code": "#Prop 04",
                     "name": "Carved Bone Navigation Astrolabe",
+                    "owner_character": owner_3,
+                    "material_and_wear": "Mammoth ivory rings with brass astronomical dials, cracked quartz lens, weathered tallow wax sealant.",
+                    "narrative_utility": f"Guide instrument relied upon by {owner_3} to navigate forbidden northern ice shelves.",
+                    "description": f"Navigation astrolabe preserved by {owner_3}.",
                     "material": "Mammoth ivory rings with brass astronomical dials and cracked quartz lens.",
-                    "weight": "Guide instrument used to navigate the forbidden northern ice shelves.",
+                    "weight": f"Guide instrument relied upon by {owner_3} to navigate the forbidden northern ice shelves.",
                     "action": "Held up against night sky to align constellations through quartz sight.",
                 },
                 {
                     "code": "#Prop 05",
                     "name": "Ancestral Horn of Awakening",
+                    "owner_character": owner_4,
+                    "material_and_wear": "Polished Aurochs horn banded in embossed silver and wrapped in dyed crimson sinew, weathered mouthpiece.",
+                    "narrative_utility": "Climactic rallying instrument capable of echoing across mountain passes to summon allied factions.",
+                    "description": "Rallying horn capable of awakening allied factions.",
                     "material": "Polished Aurochs horn banded in embossed silver and wrapped in dyed crimson sinew.",
                     "weight": "Climactic rallying instrument capable of echoing across mountain passes.",
                     "action": "Raised to lips with deep breath, sounded with low vibrating war blast.",
@@ -1195,41 +1445,56 @@ OUTPUT SCHEMA (Return STRICT valid JSON only):
             envs = [
                 {
                     "code": "#Env 01",
-                    "name": f"Metropolitan Core & Command Deck of {title}",
+                    "name": env_name_0 or f"Metropolitan Core & Command Deck of {title}",
                     "architecture": "Brutalist composite steel-and-aerogel architecture, towering data displays, modular consoles.",
                     "atmosphere": "Air-scrubbed climate-controlled atmosphere, soft ventilation hum, zero ambient humidity.",
+                    "lighting_code": "#Light 01",
+                    "lighting_and_audio": "#Light 01 Volumetric Amber Rim (2800K golden warmth, cool console wash) • Room Tone: continuous electronics hum, soft synthesized alerts, muffled magnetic lifts.",
+                    "linked_scenes": f"Act I ({env_name_0 or 'INT. COMMAND DECK'})",
                     "lighting": "#Light 01 Volumetric Amber Rim & cool console glow.",
                     "audio": "Continuous electronics hum, soft synthesized alerts, muffled magnetic lifts.",
                 },
                 {
                     "code": "#Env 02",
-                    "name": f"Perimeter Docking Sector ({setting})",
+                    "name": env_name_1 or f"Perimeter Docking Sector ({setting})",
                     "architecture": "Exposed titanium truss gantries, pressurized magnetic airlocks, reinforced blast doors.",
                     "atmosphere": "Vented nitrogen steam, ozone scent, oil-streaked industrial floor plates.",
+                    "lighting_code": "#Light 03",
+                    "lighting_and_audio": "#Light 03 Low-Key Chiaroscuro (8:1 Key-to-fill ratio, 3200K single hard key) • Room Tone: pneumatic hiss of depressurization, heavy servo whining, distant industrial klaxon.",
+                    "linked_scenes": f"Act II-A ({env_name_1 or 'EXT. DOCKING GANTRIES'})",
                     "lighting": "#Light 03 Neon Sodium Vapor & warning strobe pulses.",
                     "audio": "Pneumatic hiss of depressurization, heavy servo whining, distant industrial klaxon.",
                 },
                 {
                     "code": "#Env 03",
-                    "name": "Subterranean Reactor Catacombs",
+                    "name": env_name_2 or "Subterranean Reactor Catacombs",
                     "architecture": "Cavernous magnetic containment vaults, supercooled piping arrays, steel catwalks.",
                     "atmosphere": "Cryogenic frost lining conduit joints, thermal haze above vent grates.",
+                    "lighting_code": "#Light 06",
+                    "lighting_and_audio": "#Light 06 Neon Cyberpunk (cyan 480nm & magenta 650nm) • Room Tone: low-frequency sub-bass generator vibration, periodic liquid-gas discharge.",
+                    "linked_scenes": f"Act II-B ({env_name_2 or 'INT. REACTOR CATACOMBS'})",
                     "lighting": "#Light 06 Bioluminescent Cyan Glow & pulsing warning halos.",
                     "audio": "Low-frequency sub-bass generator vibration, periodic liquid-gas discharge.",
                 },
                 {
                     "code": "#Env 04",
-                    "name": "Abandoned Sensor Observatory",
+                    "name": env_name_3 or "Abandoned Sensor Observatory",
                     "architecture": "Retro-fitted geodesic dome with peeling electromagnetic shielding, shattered viewport panels.",
                     "atmosphere": "Static charge in the air, swirling airborne dust motes catching celestial light.",
+                    "lighting_code": "#Light 02",
+                    "lighting_and_audio": "#Light 02 Volumetric God Rays (4500K collimated beam contrast against 3000K shadows) • Room Tone: wind buffeting exterior antenna array, erratic spark discharges.",
+                    "linked_scenes": f"Act III ({env_name_3 or 'INT. SENSOR OBSERVATORY'})",
                     "lighting": "#Light 02 High-Contrast Chiaroscuro & starfield wash.",
                     "audio": "Wind buffeting exterior antenna array, erratic spark discharges, hollow echoes.",
                 },
                 {
                     "code": "#Env 05",
-                    "name": "Orbital Spire Climax Platform",
+                    "name": env_name_4 or "Orbital Spire Climax Platform",
                     "architecture": "Narrow cantilevered titanium observation spur suspended above planetary cloud deck.",
                     "atmosphere": "Thin stratospheric crosswinds, high-altitude vacuum chill, lightning dancing below.",
+                    "lighting_code": "#Light 05",
+                    "lighting_and_audio": "#Light 05 Silhouette Against Planetary Curvature (1500K inferno horizon exposure, total silhouette) • Room Tone: screaming wind shear, resonant structural strain, howling slipstream.",
+                    "linked_scenes": f"Act IV ({env_name_4 or 'EXT. ORBITAL SPIRE'})",
                     "lighting": "#Light 05 Dramatic Backlit Silhouette against planetary curvature.",
                     "audio": "Screaming wind shear, resonant structural strain, howling slipstream.",
                 },
@@ -1238,34 +1503,54 @@ OUTPUT SCHEMA (Return STRICT valid JSON only):
                 {
                     "code": "#Prop 01",
                     "name": f"Neural Link Interface Key of {title}",
+                    "owner_character": owner_0,
+                    "material_and_wear": "Matte carbon-fiber casing with gold-plated micro-pins, hairline scuffs, and status LED diode.",
+                    "narrative_utility": f"Protagonist identity authenticator owned by {owner_0}; stores encrypted memories and clearance codes.",
+                    "description": f"Neural link authenticator key owned by {owner_0}.",
                     "material": "Matte carbon-fiber casing with gold-plated micro-pins and status LED diode.",
-                    "weight": "Protagonist's identity authenticator; stores encrypted memories and clearance codes.",
+                    "weight": f"Protagonist identity authenticator owned by {owner_0}; stores encrypted memories and clearance codes.",
                     "action": "Inserted into neuro-port with distinct tactile dual-click.",
                 },
                 {
                     "code": "#Prop 02",
                     "name": "Overcharged Pulse Disruptor",
+                    "owner_character": owner_1,
+                    "material_and_wear": "Machined tungsten alloy with ceramic heat shield and exposed energy coil showing heat discoloration.",
+                    "narrative_utility": f"Compact lethal sidearm calibrated by {owner_1} for close-quarters breach encounters.",
+                    "description": f"Pulse disruptor sidearm wielded by {owner_1}.",
                     "material": "Machined tungsten alloy with ceramic heat shield and exposed energy coil.",
-                    "weight": "Compact lethal sidearm calibrated for close-quarters breach encounters.",
+                    "weight": f"Compact lethal sidearm calibrated by {owner_1} for close-quarters breach encounters.",
                     "action": "Racked back to arm coil with rising acoustic pitch.",
                 },
                 {
                     "code": "#Prop 03",
                     "name": "Encrypted Syndicate Core Token",
+                    "owner_character": owner_2,
+                    "material_and_wear": "Monolithic synthetic black diamond etched with optical quantum lattices, cold to the touch.",
+                    "narrative_utility": f"Crucial narrative MacGuffin held by {owner_2} containing decrypted master override.",
+                    "description": f"Synthetic diamond core token held by {owner_2}.",
                     "material": "Monolithic synthetic black diamond etched with optical quantum lattices.",
-                    "weight": "Crucial narrative MacGuffin containing decrypted master system override.",
+                    "weight": f"Crucial narrative MacGuffin held by {owner_2} containing decrypted master system override.",
                     "action": "Handled with protective thermal gloves; pulses with erratic amber glow.",
                 },
                 {
                     "code": "#Prop 04",
                     "name": "Atmospheric Scanner Unit",
+                    "owner_character": owner_3,
+                    "material_and_wear": "Impact-resistant polycarbonate shell with analog dial gauges and sensor probe, silicone grip.",
+                    "narrative_utility": f"Field survival tool used by {owner_3} to test toxicity and electromagnetic interference.",
+                    "description": f"Atmospheric scanner unit operated by {owner_3}.",
                     "material": "Impact-resistant polycarbonate shell with analog dial gauges and sensor probe.",
-                    "weight": "Field survival tool used to test toxicity and electromagnetic interference.",
+                    "weight": f"Field survival tool used by {owner_3} to test toxicity and electromagnetic interference.",
                     "action": "Toggled on with switch click, sweeping across environment to read spikes.",
                 },
                 {
                     "code": "#Prop 05",
                     "name": "Zero-Point Catalyst Module",
+                    "owner_character": owner_4,
+                    "material_and_wear": "Stabilized magnetic torus housing a glowing plasma singularity, heavy ceramic seals.",
+                    "narrative_utility": "Climax operational key required to overload or restore main station power.",
+                    "description": "Magnetic torus catalyst module required for station power.",
                     "material": "Stabilized magnetic torus housing a glowing plasma singularity.",
                     "weight": "Climax operational key required to overload or restore main station power.",
                     "action": "Twisted and locked into primary coupling with hydraulic clamp sound.",
@@ -1275,41 +1560,56 @@ OUTPUT SCHEMA (Return STRICT valid JSON only):
             envs = [
                 {
                     "code": "#Env 01",
-                    "name": f"Primary Domain & Quarters of {title}",
-                    "architecture": "Grounded architectural styling reflecting the protagonist's origins and world.",
+                    "name": env_name_0 or f"Primary Domain & Quarters of {title}",
+                    "architecture": "Grounded architectural styling reflecting origins and physical world.",
                     "atmosphere": "Naturalistic atmospheric texture, balanced humidity, organic airborne particles.",
+                    "lighting_code": "#Light 01",
+                    "lighting_and_audio": "#Light 01 Golden Hour Backlit (2800K golden warmth, rim light enveloping subject silhouette) • Room Tone: grounded environmental room tone, subtle Foley texture, distant external ambience.",
+                    "linked_scenes": f"Act I ({env_name_0 or 'EXT. PRIMARY DOMAIN'})",
                     "lighting": "#Light 01 Warm Volumetric Key & natural practical lights.",
                     "audio": "Grounded environmental room tone, subtle Foley texture, distant external ambience.",
                 },
                 {
                     "code": "#Env 02",
-                    "name": f"Threshold Crossing ({setting})",
+                    "name": env_name_1 or f"Threshold Crossing ({setting})",
                     "architecture": "Expansive transitional terrain marking the shift from safety to conflict.",
                     "atmosphere": "Gathering weather front, shifting crosswinds, changing environmental texture.",
+                    "lighting_code": "#Light 04",
+                    "lighting_and_audio": "#Light 04 Silvery Blue Moonlight (6500K cool diffused overhead key, soft 2:1 fill) • Room Tone: ambient wind movement, shifting ground debris, atmospheric tension.",
+                    "linked_scenes": f"Act II-A ({env_name_1 or 'EXT. THRESHOLD'})",
                     "lighting": "#Light 04 Natural Golden Hour & long dramatic cast shadows.",
                     "audio": "Ambient wind movement, shifting ground debris, atmospheric tension.",
                 },
                 {
                     "code": "#Env 03",
-                    "name": "The Opposing Citadel / Sector",
+                    "name": env_name_2 or "The Opposing Citadel / Hostile Sector",
                     "architecture": "Imposing hostile architecture designed to overwhelm scale and establish stakes.",
                     "atmosphere": "Stale oppressive air, dim ambient illumination, cold thermal balance.",
+                    "lighting_code": "#Light 03",
+                    "lighting_and_audio": "#Light 03 Low-Key Chiaroscuro (8:1 Key-to-fill ratio, 3200K single hard key) • Room Tone: echoing footsteps, mechanical or industrial resonance, heavy silence.",
+                    "linked_scenes": f"Act II-B ({env_name_2 or 'INT. CITADEL'})",
                     "lighting": "#Light 02 High-Contrast Chiaroscuro & harsh downward spot illumination.",
                     "audio": "Echoing footsteps, mechanical or industrial resonance, heavy silence.",
                 },
                 {
                     "code": "#Env 04",
-                    "name": "The Hidden Sanctuary / Lore Vault",
+                    "name": env_name_3 or "The Hidden Sanctuary / Lore Vault",
                     "architecture": "Secluded sanctuary preserving history, memories, and forgotten truths.",
                     "atmosphere": "Still, tranquil air with suspended dust particles drifting in light rays.",
+                    "lighting_code": "#Light 07",
+                    "lighting_and_audio": "#Light 07 Overcast Soft (Fully diffused 6000K skylight through cloud deck) • Room Tone: soft acoustic hush, faint natural breeze, peaceful resonance.",
+                    "linked_scenes": f"Act III ({env_name_3 or 'INT. HIDDEN SANCTUARY'})",
                     "lighting": "#Light 06 Gentle Bioluminescent or Diffuse Shafts of natural light.",
                     "audio": "Soft acoustic hush, faint natural breeze, peaceful resonance.",
                 },
                 {
                     "code": "#Env 05",
-                    "name": "The Climax Crucible / Final Arena",
+                    "name": env_name_4 or "The Climax Crucible / Final Arena",
                     "architecture": "High-stakes confrontation arena where all conflicts culminate.",
                     "atmosphere": "Volatile weather, dramatic environmental shifts, high emotional energy.",
+                    "lighting_code": "#Light 05",
+                    "lighting_and_audio": "#Light 05 Silhouette Against Climax Fire (1800K dynamic flame luminance, stark lightning flashes) • Room Tone: deafening sonic clash, resonant environmental Foley, peak climactic roar.",
+                    "linked_scenes": f"Act IV ({env_name_4 or 'EXT. CLIMAX ARENA'})",
                     "lighting": "#Light 05 Dramatic Backlit Silhouette & tempest lightning.",
                     "audio": "Deafening sonic clash, resonant environmental Foley, peak climactic roar.",
                 },
@@ -1318,34 +1618,54 @@ OUTPUT SCHEMA (Return STRICT valid JSON only):
                 {
                     "code": "#Prop 01",
                     "name": f"Signature Keepsake of {title}",
+                    "owner_character": owner_0,
+                    "material_and_wear": "Handcrafted personal artifact bearing tactile scratches, aged patina, and engraved crest.",
+                    "narrative_utility": f"Emotional anchor connecting {owner_0} to core dramatic objective.",
+                    "description": f"Personal keepsake belonging to {owner_0}.",
                     "material": "Handcrafted personal artifact bearing tactile scratches and aged patina.",
-                    "weight": "Emotional anchor connecting the protagonist to their core objective.",
+                    "weight": f"Emotional anchor connecting {owner_0} to their core objective.",
                     "action": "Turned over in fingers during moments of doubt or contemplation.",
                 },
                 {
                     "code": "#Prop 02",
                     "name": "Tactical Master Instrument",
+                    "owner_character": owner_1,
+                    "material_and_wear": "Hardened alloy craftsmanship with ergonomic grip, functional wear, and matte anti-reflective finish.",
+                    "narrative_utility": f"Primary operational tool or weapon relied upon by {owner_1} throughout the story.",
+                    "description": f"Tactical instrument wielded by {owner_1}.",
                     "material": "Hardened alloy craftsmanship with ergonomic grip and functional wear.",
-                    "weight": "Primary operational tool or weapon relied upon throughout the story.",
+                    "weight": f"Primary operational tool or weapon relied upon by {owner_1} throughout the story.",
                     "action": "Gripped firmly and wielded with trained precision.",
                 },
                 {
                     "code": "#Prop 03",
                     "name": "Antagonist's Emissary Token",
+                    "owner_character": owner_2,
+                    "material_and_wear": "Distinctive insignia made of cold cast bronze or polished stone with sharp bevels.",
+                    "narrative_utility": f"Physical reminder of the antagonistic force and looming deadline carried by {owner_2}.",
+                    "description": f"Antagonist insignia token carried by {owner_2}.",
                     "material": "Distinctive insignia made of cold metal or polished stone.",
-                    "weight": "Physical reminder of the antagonistic force and looming deadline.",
+                    "weight": f"Physical reminder of the antagonistic force and looming deadline carried by {owner_2}.",
                     "action": "Discovered at a critical crime or breach scene.",
                 },
                 {
                     "code": "#Prop 04",
                     "name": "Decrypted Story Codex",
+                    "owner_character": owner_3,
+                    "material_and_wear": "Weathered bound parchment or encrypted storage drive with faded markings and thermal tape.",
+                    "narrative_utility": f"Reveals the crucial hidden revelation at the narrative midpoint to {owner_3}.",
+                    "description": f"Midpoint story codex deciphered by {owner_3}.",
                     "material": "Weathered bound material or encrypted storage drive with faded markings.",
-                    "weight": "Reveals the crucial hidden revelation at the narrative midpoint.",
+                    "weight": f"Reveals the crucial hidden revelation at the narrative midpoint to {owner_3}.",
                     "action": "Unfolded or accessed with trembling hands to reveal truth.",
                 },
                 {
                     "code": "#Prop 05",
                     "name": "The Climactic Keystone",
+                    "owner_character": owner_4,
+                    "material_and_wear": "Pristine or volatile core artifact embodying the story's resolution, pulsing with internal energy.",
+                    "narrative_utility": "Decisive object whose destruction or activation resolves the central conflict.",
+                    "description": "Climactic resolution keystone artifact.",
                     "material": "Pristine or volatile core artifact embodying the story's resolution.",
                     "weight": "Decisive object whose destruction or activation resolves the central conflict.",
                     "action": "Activated or shattered during the final climax confrontation.",

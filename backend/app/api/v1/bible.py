@@ -539,7 +539,7 @@ async def generate_world_props_endpoint(
     current_user: UserModel = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """Generate 5 Key Environments (#Env 01 - 05) and 5 Signature Hero Props (#Prop 01 - 05) using Polya AI Screenwriter."""
+    """Generate 5 Key Environments (#Env 01 - 05) and 5 Signature Hero Props (#Prop 01 - 05) using Polya AI Director."""
     project = await _resolve_project(project_id, session)
 
     stmt = (
@@ -570,8 +570,51 @@ async def generate_world_props_endpoint(
             detail="Master Production Bible is locked (DNA Frozen). Create a new revision to modify world and props.",
         )
 
+    # 1. Ingest Character Cast & Dynamic States from DB
+    char_stmt = select(CharacterModel).where(CharacterModel.project_id == project.id).order_by(CharacterModel.created_at.asc())
+    char_rows = (await session.execute(char_stmt)).scalars().all()
+    characters_list = []
+    for c in char_rows:
+        state_stmt = select(CharacterStateModel).where(CharacterStateModel.character_id == c.id).order_by(CharacterStateModel.state_code.asc())
+        st_rows = (await session.execute(state_stmt)).scalars().all()
+        meta = c.sheet_metadata or {}
+        characters_list.append({
+            "id": str(c.id),
+            "name": c.name,
+            "role": c.role,
+            "narrative_profile": getattr(c, "narrative_summary", None) or meta.get("narrative_summary") or "",
+            "base_visual_prompt": c.base_prompt,
+            "states": [
+                {
+                    "state_code": s.state_code,
+                    "state_label": s.state_label or s.state_code,
+                    "wardrobe": s.wardrobe,
+                    "injuries_and_wear": s.injuries_and_wear,
+                    "expression_anchor": s.expression_anchor,
+                }
+                for s in st_rows
+            ],
+        })
+
+    # 2. Ingest 50-Scene Storyboard & Sluglines from DB
+    scene_stmt = (
+        select(SceneModel)
+        .where(SceneModel.project_id == project.id)
+        .order_by(SceneModel.act_number.asc(), SceneModel.scene_number.asc())
+    )
+    scene_rows = (await session.execute(scene_stmt)).scalars().all()
+    scenes_list = [
+        {
+            "scene_number": sc.scene_number,
+            "act_number": sc.act_number,
+            "slugline": sc.slugline,
+            "narrative_goal": sc.narrative_goal,
+        }
+        for sc in scene_rows
+    ]
+
     try:
-        context = extract_project_narrative_context(project, bible)
+        context = extract_project_narrative_context(project, bible, characters=characters_list, scenes=scenes_list)
     except ValueError as exc:
         title = (project.title or "").strip()
         if not title:
@@ -592,6 +635,10 @@ async def generate_world_props_endpoint(
             visual_dna_parameters={},
             environments_summary="",
             props_summary="",
+            aspect_ratio=project.aspect_ratio or "16:9",
+            operational_stage=project.operational_stage or 1,
+            cast_characters=characters_list,
+            storyboard_scenes=scenes_list,
         )
 
     notes = payload.additional_notes if payload else None
@@ -599,15 +646,17 @@ async def generate_world_props_endpoint(
     try:
         gen_data = await engine.generate_world_and_props(context=context, additional_notes=notes)
     except Exception as exc:
-        logger.error("Polya AI generate_world_and_props failed: %s", exc)
+        logger.error("Polya AI Director generate_world_and_props failed: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Polya AI Screenwriter failed to generate world and props: {exc}",
+            detail=f"Polya AI Director failed to generate world and props: {exc}",
         )
 
     updated_rules = dict(bible.world_rules or {})
     updated_rules["environments"] = gen_data.get("environments", [])
     updated_rules["props"] = gen_data.get("props", [])
+    if "generation_meta" in gen_data:
+        updated_rules["generation_meta"] = gen_data["generation_meta"]
 
     bible.world_rules = updated_rules
     flag_modified(bible, "world_rules")
@@ -621,6 +670,7 @@ async def generate_world_props_endpoint(
         "project_id": str(project.id),
         "environments": bible.world_rules.get("environments", []),
         "props": bible.world_rules.get("props", []),
+        "generation_meta": bible.world_rules.get("generation_meta"),
         "data": {
             "id": str(bible.id),
             "project_id": str(project.id),

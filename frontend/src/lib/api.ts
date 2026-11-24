@@ -81,6 +81,44 @@ export interface Project {
   };
 }
 
+export interface EnvironmentItem {
+  code: string;
+  name: string;
+  architecture: string;
+  atmosphere: string;
+  lighting_code?: string;
+  lighting_and_audio?: string;
+  linked_scenes?: string;
+  lighting?: string;
+  audio?: string;
+}
+
+export interface PropItem {
+  code: string;
+  name: string;
+  owner_character?: string;
+  material_and_wear?: string;
+  narrative_utility?: string;
+  description?: string;
+  material?: string;
+  weight?: string;
+  action?: string;
+}
+
+export interface GenerationMeta {
+  engine: "polya_ai_director_llm" | "procedural_fallback";
+  model?: string | null;
+  director_persona?: string;
+  context_ingested?: {
+    style_code?: string;
+    characters_count?: number;
+    scenes_count?: number;
+    has_synopsis?: boolean;
+  };
+  generated_at?: string;
+  fallback_reason?: string | null;
+}
+
 export interface ProjectCreateInput {
   title: string;
   slug?: string;
@@ -758,8 +796,9 @@ export const api = {
     ): Promise<{
       status: string;
       project_id: string;
-      environments: any[];
-      props: any[];
+      environments: EnvironmentItem[];
+      props: PropItem[];
+      generation_meta?: GenerationMeta;
       data: {
         id: string;
         project_id: string;
