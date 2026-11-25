@@ -337,7 +337,7 @@ export const DEFAULT_STYLES: StyleItem[] = [
   },
   {
     code: "#Style 09",
-    name: "Pixar / Disney 3D",
+    name: "Pixar / Disney 3D Animation",
     desc: "Emotive facial shapes, subsurface scattering, warm primaries, squash-and-stretch",
     aesthetic_directives: "Exaggerated emotive facial shapes, subsurface scattering on skin, rich whimsical lighting, charming physical squash-and-stretch.",
     color_grade_emulation: "Warm primary color harmonies, velvety shadows, clean ray-traced global illumination.",
@@ -539,10 +539,10 @@ export interface CompositionItem {
 export const DEFAULT_COMPOSITIONS: CompositionItem[] = [
   { code: "#Comp 01", name: "Rule of Thirds", framing: "Classic balanced intersections", description: "Key facial features and horizons aligned along 1/3 and 2/3 coordinate intersections." },
   { code: "#Comp 02", name: "Golden Spiral (Fibonacci)", framing: "Curved visual focus flow", description: "Dynamic logarithmic curve leading eye from environmental periphery to micro-detail." },
-  { code: "#Comp 03", name: "Central Kubrick Symmetry", framing: "One-point vanishing corridor", description: "Exact geometric centering of subject; Kubrick-style one-point linear perspective." },
+  { code: "#Comp 03", name: "Central Symmetry", framing: "One-point vanishing corridor", description: "Exact geometric centering of subject; Kubrick-style one-point linear perspective." },
   { code: "#Comp 04", name: "Leading Lines", framing: "Architectural vector focus", description: "Structural architecture (railways, corridors, bridges) forcing eye vector to vanishing point." },
   { code: "#Comp 05", name: "180-Degree Action Line", framing: "Spatial screen direction preservation", description: "Rigid spatial camera positioning preserving screen direction between shots." },
-  { code: "#Comp 06", name: "Frame Within A Frame", framing: "Doorway / Window geometry", description: "Subject framed inside doorways, broken arches, windows, or rear-view mirrors." },
+  { code: "#Comp 06", name: "Frame Within a Frame", framing: "Doorway / Window geometry", description: "Subject framed inside doorways, broken arches, windows, or rear-view mirrors." },
   { code: "#Comp 07", name: "Dutch Angle (Canted)", framing: "Psychological disorder 15°-30°", description: "15° to 30° roll on camera axis, creating psychological vertigo and systemic disorder." },
   { code: "#Comp 08", name: "Deep Focus Mise-en-Scène", framing: "f/11 Hyperfocal multi-plane sharpness", description: "f/11 hyperfocal aperture keeping foreground, midground, and background tack sharp." },
 ];
@@ -556,9 +556,9 @@ export interface SpeedItem {
 }
 
 export const DEFAULT_SPEEDS: SpeedItem[] = [
-  { code: "#Speed 01", name: "24fps Cinematic Standard", fps: 24, timing: "Standard cinema cadence", description: "Zero camera movement. Micro-movements strictly limited to blinking, smoke, and breathing." },
+  { code: "#Speed 01", name: "Static / Locked-Off", fps: 24, timing: "Standard cinema cadence", description: "Zero camera movement. Micro-movements strictly limited to blinking, smoke, and breathing." },
   { code: "#Speed 02", name: "Subtle Organic Drift", fps: 24, timing: "0.2 m/s breathing drift", description: "Micro-Steadicam breathing drift (0.2 m/s). Soft naturalistic character repositioning." },
   { code: "#Speed 03", name: "Cinematic Paced", fps: 24, timing: "1.0 m/s purposeful dolly", description: "Deliberate smooth dolly movement (1.0 m/s). Purposeful narrative pacing." },
-  { code: "#Speed 04", name: "High-Octane Action Track", fps: 24, timing: "3.5 m/s fast dynamic sweep", description: "Rapid camera pan and tracking (3.5 m/s). Fast combat choreography and chase dynamics." },
-  { code: "#Speed 05", name: "120fps Ultra Slow-Motion", fps: 120, timing: "5.0x fluid bullet-time capture", description: "Time acceleration or high-speed slow-motion (120 fps burst capture)." },
+  { code: "#Speed 04", name: "High-Octane Action", fps: 24, timing: "3.5 m/s fast dynamic sweep", description: "Rapid camera pan and tracking (3.5 m/s). Fast combat choreography and chase dynamics." },
+  { code: "#Speed 05", name: "Hyper-Speed / Time-Lapse", fps: 120, timing: "5.0x fluid bullet-time capture", description: "Time acceleration or high-speed slow-motion (120 fps burst capture)." },
 ];

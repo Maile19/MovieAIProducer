@@ -6,13 +6,15 @@ from typing import Any
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from backend.app.api.deps import get_current_user, get_session
+from backend.app.domain.catalog import validate_matrix_code
 from backend.app.domain.screenwriter import (
+    _STYLE_FAMILY_OPTICS_DEFAULTS,
     PolyaScreenwriterEngine,
     extract_project_narrative_context,
     get_act_bounds,
@@ -70,6 +72,11 @@ class DirectorPolishRequest(BaseModel):
     style_code: str = "#Style 01"
     camera_code: str | None = None
     lighting_code: str | None = None
+
+    @field_validator("style_code", "camera_code", "lighting_code")
+    @classmethod
+    def _validate_polish_matrix_codes(cls, value: str | None, info: ValidationInfo) -> str | None:
+        return validate_matrix_code(info.field_name or "", value)
 
 
 class SceneAutoSplitRequest(BaseModel):
@@ -905,6 +912,9 @@ async def generate_blueprint_act(
                     )
                 else:
                     template = SHOT_CAMERA_TEMPLATES[min(i, len(SHOT_CAMERA_TEMPLATES) - 1)]
+                    family_optics = _STYLE_FAMILY_OPTICS_DEFAULTS.get(
+                        active_style_family, _STYLE_FAMILY_OPTICS_DEFAULTS["photorealistic"]
+                    )
                     dlg = primary_dialogue if i == 0 else None
                     transition = "J_CUT" if i == 0 and dlg else "NONE"
 
@@ -916,9 +926,9 @@ async def generate_blueprint_act(
                         camera_code=template["camera_code"],
                         lens_code=template["lens_code"],
                         comp_code=template["comp_code"],
-                        light_code=template["light_code"],
-                        act_code=template["act_code"],
-                        speed_code=template["speed_code"],
+                        light_code=family_optics["light_code"],
+                        act_code=family_optics["act_code"],
+                        speed_code=family_optics["speed_code"],
                         dialogue=dlg,
                         transition_type=transition,
                         status="PLANNED",
@@ -1239,6 +1249,27 @@ async def update_scene(
                 flag_modified(prim, "fg_bg_layers")
         else:
             tmpl = SHOT_CAMERA_TEMPLATES[0]
+            proj_row = (
+                await session.execute(select(ProjectModel).where(ProjectModel.id == scene.project_id))
+            ).scalar_one_or_none()
+            bible_row = (
+                await session.execute(
+                    select(MasterProductionBibleModel)
+                    .where(MasterProductionBibleModel.project_id == scene.project_id)
+                    .order_by(MasterProductionBibleModel.version.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            bible_styles = bible_row.style_parameters if (bible_row and isinstance(bible_row.style_parameters, dict)) else {}
+            eff_style = (
+                bible_styles.get("master_style_code")
+                or (proj_row.target_style_code if proj_row else None)
+                or "#Style 01"
+            )
+            eff_family = get_style_family(eff_style)
+            family_optics = _STYLE_FAMILY_OPTICS_DEFAULTS.get(
+                eff_family, _STYLE_FAMILY_OPTICS_DEFAULTS["photorealistic"]
+            )
             layers: dict[str, Any] = {}
             if payload.audio_lead_seconds is not None:
                 layers["audio_lead_seconds"] = float(payload.audio_lead_seconds)
@@ -1252,9 +1283,9 @@ async def update_scene(
                     camera_code=payload.camera_code or tmpl["camera_code"],
                     lens_code=tmpl["lens_code"],
                     comp_code=tmpl["comp_code"],
-                    light_code=payload.lighting_code or tmpl["light_code"],
-                    act_code=tmpl["act_code"],
-                    speed_code=tmpl["speed_code"],
+                    light_code=payload.lighting_code or family_optics["light_code"],
+                    act_code=family_optics["act_code"],
+                    speed_code=family_optics["speed_code"],
                     fg_bg_layers=layers,
                     dialogue=payload.dialogue,
                     transition_type=payload.transition_type or ("J_CUT" if dlg_val.strip() else "NONE"),

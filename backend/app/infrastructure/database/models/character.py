@@ -94,6 +94,11 @@ class CharacterModel(Base):
         default=dict,
         nullable=False,
     )
+    sheet_overrides: Mapped[dict] = mapped_column(
+        JSON,
+        default=dict,
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime,
         default=lambda: datetime.now(timezone.utc),

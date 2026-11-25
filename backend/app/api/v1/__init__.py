@@ -14,6 +14,7 @@ from backend.app.api.v1.scenes import router as scenes_router
 from backend.app.api.v1.shots import router as shots_router
 from backend.app.api.v1.transpile import router as transpile_router
 from backend.app.api.v1.hermes_nova import router as hermes_nova_router
+from backend.app.api.v1.look_dev import router as look_dev_router
 from backend.app.api.v1.render_settings import router as render_settings_router
 
 v1_router = APIRouter(prefix="/api/v1")
@@ -23,6 +24,7 @@ v1_router.include_router(projects_router)
 v1_router.include_router(render_settings_router)
 v1_router.include_router(presets_router)
 v1_router.include_router(bible_router)
+v1_router.include_router(look_dev_router)
 v1_router.include_router(scenes_router)
 v1_router.include_router(shots_router)
 v1_router.include_router(catalog_router)

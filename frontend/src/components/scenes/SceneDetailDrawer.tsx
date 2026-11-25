@@ -149,7 +149,7 @@ export default function SceneDetailDrawer({
 
   // Multi-engine live Dual-RAG prompt compiler inside drawer
   const [compilerEngine, setCompilerEngine] = useState<
-    "google_flow" | "veo" | "kling" | "seedance" | "runway" | "sora" | "comfyui"
+    "9router" | "flux" | "sd35" | "google_flow" | "veo" | "kling" | "seedance" | "runway" | "sora" | "comfyui"
   >("veo");
   const [compilerAccordionOpen, setCompilerAccordionOpen] = useState(true);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
@@ -1253,6 +1253,9 @@ export default function SceneDetailDrawer({
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
                   {[
+                    { id: "9router", label: "9Router AI" },
+                    { id: "flux", label: "FLUX.1 Dev" },
+                    { id: "sd35", label: "SD 3.5 Large" },
                     { id: "google_flow", label: "Google Flow" },
                     { id: "veo", label: "Google Veo" },
                     { id: "kling", label: "Kling 1.5" },

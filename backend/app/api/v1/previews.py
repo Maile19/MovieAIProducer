@@ -15,7 +15,7 @@ import structlog
 
 from backend.app.api.deps import get_current_user, get_session
 from backend.app.core.config import get_settings
-from backend.app.domain.screenwriter import PolyaScreenwriterEngine
+from backend.app.domain.screenwriter import PolyaScreenwriterEngine, sanitize_negative_prompts_for_style
 from backend.app.domain.transpiler import LivePromptTranspiler
 from backend.app.infrastructure.database.models.auth import UserModel
 from backend.app.infrastructure.database.models.character import CharacterModel, CharacterStateModel
@@ -40,6 +40,31 @@ from backend.app.infrastructure.universal_image_adapter import (
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["Visual Previews & Storyboard"])
+
+
+def _resolve_effective_negative_prompt(
+    payload_negative: str | None,
+    transpiled_negative: str | None,
+    style_code: str,
+) -> str:
+    """Merge engine negative prompt with caller guidance and strip style-contradicting bans."""
+    seen: set[str] = set()
+    merged_tokens: list[str] = []
+    for source in (transpiled_negative, payload_negative):
+        if not source or not isinstance(source, str):
+            continue
+        for tok in source.split(","):
+            t = tok.strip()
+            if not t:
+                continue
+            low = t.lower()
+            if low not in seen:
+                seen.add(low)
+                merged_tokens.append(t)
+    if not merged_tokens:
+        return ""
+    sanitized = sanitize_negative_prompts_for_style([", ".join(merged_tokens)], style_code)
+    return sanitized[0] if sanitized else ""
 
 
 class GeneratePreviewRequest(BaseModel):
@@ -242,6 +267,7 @@ async def generate_scene_preview(
 
     # Build prompt if not overridden using LivePromptTranspiler + full Character/State DNA
     prompt = payload.prompt
+    transpiled_negative: str | None = None
     if not prompt or not prompt.strip():
         proj_settings = project.settings if (project and isinstance(project.settings, dict)) else {}
         proj_genre = proj_settings.get("genre") or proj_settings.get("genre_tone")
@@ -272,6 +298,19 @@ async def generate_scene_preview(
             act_number=scene.act_number,
         )
         prompt = transpile_res["positive_prompt"]
+        transpiled_negative = transpile_res.get("negative_prompt")
+    else:
+        transpiled_negative = LivePromptTranspiler.transpile(
+            provider_target=effective_provider,
+            style_code=style_code,
+            model=payload.model,
+        ).get("negative_prompt")
+
+    effective_negative = _resolve_effective_negative_prompt(
+        payload.negative_prompt,
+        transpiled_negative,
+        style_code,
+    )
 
     width, height = _resolve_resolution(payload.aspect_ratio)
     steps = payload.steps or settings.sd35_default_steps
@@ -331,7 +370,7 @@ async def generate_scene_preview(
             provider_id=effective_provider,
             model_id=model_to_use,
             prompt=prompt,
-            negative_prompt=payload.negative_prompt,
+            negative_prompt=effective_negative,
             aspect_ratio=payload.aspect_ratio,
             width=width,
             height=height,
@@ -360,7 +399,7 @@ async def generate_scene_preview(
     else:
         req = ImageGenerationRequest(
             prompt=prompt,
-            negative_prompt=payload.negative_prompt,
+            negative_prompt=effective_negative,
             seed=payload.seed,
             randomize_seed=payload.randomize_seed,
             width=width,
@@ -535,18 +574,33 @@ async def generate_project_concept_preview(
 
     # Build prompt if not overridden
     prompt = payload.prompt
+    concept_style_code = project.target_style_code or "#Style 01"
+    transpiled_negative: str | None = None
     if not prompt or not prompt.strip():
         proj_settings = project.settings if isinstance(project.settings, dict) else {}
         proj_genre = proj_settings.get("genre") or proj_settings.get("genre_tone")
         transpile_res = await LivePromptTranspiler.transpile_with_rag(
             provider_target=effective_provider,
-            style_code=project.target_style_code or "#Style 01",
+            style_code=concept_style_code,
             action_description=f"Opening concept keyframe still for {project.title}",
             aspect_ratio=payload.aspect_ratio,
             model=payload.model,
             genre=proj_genre,
         )
         prompt = transpile_res["positive_prompt"]
+        transpiled_negative = transpile_res.get("negative_prompt")
+    else:
+        transpiled_negative = LivePromptTranspiler.transpile(
+            provider_target=effective_provider,
+            style_code=concept_style_code,
+            model=payload.model,
+        ).get("negative_prompt")
+
+    effective_negative = _resolve_effective_negative_prompt(
+        payload.negative_prompt,
+        transpiled_negative,
+        concept_style_code,
+    )
 
     width, height = _resolve_preview_resolution(payload.aspect_ratio)
     steps = payload.steps or settings.sd35_default_steps
@@ -557,7 +611,7 @@ async def generate_project_concept_preview(
             provider_id=effective_provider,
             model_id=model_to_use,
             prompt=prompt,
-            negative_prompt=payload.negative_prompt,
+            negative_prompt=effective_negative,
             aspect_ratio=payload.aspect_ratio,
             width=width,
             height=height,
@@ -580,7 +634,7 @@ async def generate_project_concept_preview(
     else:
         req = ImageGenerationRequest(
             prompt=prompt,
-            negative_prompt=payload.negative_prompt,
+            negative_prompt=effective_negative,
             seed=payload.seed,
             randomize_seed=payload.randomize_seed,
             width=width,
@@ -742,24 +796,27 @@ async def generate_shot_preview(
                 t_code = f"#State 0{t_num}"
                 lead_state = next((s for s in st_rows if (s.state_code or "").upper() == t_code.upper()), st_rows[0])
 
+    # Resolve active project/bible style for both positive transpilation and style-safe negative guidance
+    project = None
+    bible = None
+    if scene:
+        proj_stmt = select(ProjectModel).where(ProjectModel.id == scene.project_id)
+        project = (await session.execute(proj_stmt)).scalar_one_or_none()
+        bible = (
+            await session.execute(
+                select(MasterProductionBibleModel)
+                .where(MasterProductionBibleModel.project_id == scene.project_id)
+                .order_by(MasterProductionBibleModel.version.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    bible_styles = bible.style_parameters if (bible and isinstance(bible.style_parameters, dict)) else {}
+    shot_style_code = bible_styles.get("master_style_code") or (project.target_style_code if project else None) or "#Style 01"
+
     # Build prompt if not provided using LivePromptTranspiler + full Character/State DNA
     prompt = payload.prompt
+    transpiled_negative: str | None = None
     if not prompt or not prompt.strip():
-        project = None
-        bible = None
-        if scene:
-            proj_stmt = select(ProjectModel).where(ProjectModel.id == scene.project_id)
-            project = (await session.execute(proj_stmt)).scalar_one_or_none()
-            bible = (
-                await session.execute(
-                    select(MasterProductionBibleModel)
-                    .where(MasterProductionBibleModel.project_id == scene.project_id)
-                    .order_by(MasterProductionBibleModel.version.desc())
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-        bible_styles = bible.style_parameters if (bible and isinstance(bible.style_parameters, dict)) else {}
-        shot_style_code = bible_styles.get("master_style_code") or (project.target_style_code if project else None) or "#Style 01"
         proj_settings = project.settings if (project and isinstance(project.settings, dict)) else {}
         proj_genre = proj_settings.get("genre") or proj_settings.get("genre_tone")
         shot_layers_in = shot.fg_bg_layers if isinstance(shot.fg_bg_layers, dict) else {}
@@ -789,6 +846,19 @@ async def generate_shot_preview(
             act_number=scene.act_number if scene else None,
         )
         prompt = transpile_res["positive_prompt"]
+        transpiled_negative = transpile_res.get("negative_prompt")
+    else:
+        transpiled_negative = LivePromptTranspiler.transpile(
+            provider_target=effective_provider,
+            style_code=shot_style_code,
+            model=payload.model,
+        ).get("negative_prompt")
+
+    effective_negative = _resolve_effective_negative_prompt(
+        payload.negative_prompt,
+        transpiled_negative,
+        shot_style_code,
+    )
 
     width, height = _resolve_resolution(payload.aspect_ratio)
     steps = payload.steps or settings.sd35_default_steps
@@ -857,7 +927,7 @@ async def generate_shot_preview(
             provider_id=effective_provider,
             model_id=model_to_use,
             prompt=prompt,
-            negative_prompt=payload.negative_prompt,
+            negative_prompt=effective_negative,
             aspect_ratio=payload.aspect_ratio,
             width=width,
             height=height,
@@ -886,7 +956,7 @@ async def generate_shot_preview(
     else:
         req = ImageGenerationRequest(
             prompt=prompt,
-            negative_prompt=payload.negative_prompt,
+            negative_prompt=effective_negative,
             seed=payload.seed,
             randomize_seed=payload.randomize_seed,
             width=width,

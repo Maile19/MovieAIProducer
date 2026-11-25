@@ -11,7 +11,7 @@ import time
 from typing import Any, Literal
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 import httpx
 from PIL import Image, ImageOps
@@ -29,6 +29,7 @@ except Exception:
 from backend.app.api.deps import get_current_user, get_session
 from backend.app.core.config import get_settings
 from backend.app.domain.catalog import STYLE_CATALOG
+from backend.app.domain.director_rag import DirectorRAGClient
 from backend.app.infrastructure.database.models.auth import UserModel
 from backend.app.infrastructure.database.models.character import (
     CharacterModel,
@@ -39,6 +40,8 @@ from backend.app.domain.screenwriter import (
     ProjectNarrativeContext,
     extract_project_narrative_context,
     generate_unique_deterministic_seed,
+    get_style_family,
+    sanitize_negative_prompts_for_style,
 )
 from backend.app.core.proxy_health import DEFAULT_SOCKS5_URL, check_socks5_health, get_cached_socks5_health
 from backend.app.infrastructure.database.models.flow import FlowImageJobModel, FlowSettingModel
@@ -95,6 +98,22 @@ class BibleLockRequest(BaseModel):
 
 class WorldPropsGenerateRequest(BaseModel):
     additional_notes: str | None = Field(default=None, description="Optional extra directives for Polya AI Screenwriter")
+
+
+class WorldPropVariationRequest(BaseModel):
+    item_type: Literal["environment", "prop"] = Field(description="Single item type to vary")
+    code: str = Field(description="Exact item code, e.g. '#Env 01' or '#Prop 03'")
+    current_item: dict[str, Any] | None = Field(
+        default=None,
+        description="Current saved item payload; auto-resolved from the Bible when omitted",
+    )
+    additional_notes: str | None = Field(default=None, description="Optional showrunner steering notes")
+
+
+class SheetOverrideRequest(BaseModel):
+    slot_key: str = Field(description="Canonical sheet slot or dynamic state code")
+    prompt_override: str | None = Field(default=None, description="Positive prompt override")
+    negative_prompt_override: str | None = Field(default=None, description="Negative prompt override")
 
 
 class RulesInvariantsGenerateRequest(BaseModel):
@@ -402,6 +421,114 @@ async def _resolve_project(project_id: str, session: AsyncSession) -> ProjectMod
     return project
 
 
+async def _load_latest_bible(
+    project: ProjectModel,
+    session: AsyncSession,
+) -> MasterProductionBibleModel | None:
+    stmt = (
+        select(MasterProductionBibleModel)
+        .where(MasterProductionBibleModel.project_id == project.id)
+        .order_by(MasterProductionBibleModel.version.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _build_narrative_context(
+    project: ProjectModel,
+    session: AsyncSession,
+) -> tuple[ProjectNarrativeContext, MasterProductionBibleModel | None]:
+    """Assemble a full ProjectNarrativeContext from live cast, states, and storyboard data."""
+    bible = await _load_latest_bible(project, session)
+
+    char_stmt = (
+        select(CharacterModel)
+        .where(CharacterModel.project_id == project.id)
+        .order_by(CharacterModel.created_at.asc())
+    )
+    char_rows = (await session.execute(char_stmt)).scalars().all()
+    characters_list: list[dict[str, Any]] = []
+    for c in char_rows:
+        state_stmt = (
+            select(CharacterStateModel)
+            .where(CharacterStateModel.character_id == c.id)
+            .order_by(CharacterStateModel.state_code.asc())
+        )
+        st_rows = (await session.execute(state_stmt)).scalars().all()
+        meta = c.sheet_metadata or {}
+        characters_list.append({
+            "id": str(c.id),
+            "name": c.name,
+            "role": c.role,
+            "narrative_profile": getattr(c, "narrative_summary", None) or meta.get("narrative_summary") or "",
+            "base_visual_prompt": c.base_prompt,
+            "states": [
+                {
+                    "state_code": s.state_code,
+                    "state_label": s.state_label or s.state_code,
+                    "wardrobe": s.wardrobe,
+                    "injuries_and_wear": s.injuries_and_wear,
+                    "expression_anchor": s.expression_anchor,
+                }
+                for s in st_rows
+            ],
+        })
+
+    scene_stmt = (
+        select(SceneModel)
+        .where(SceneModel.project_id == project.id)
+        .order_by(SceneModel.act_number.asc(), SceneModel.scene_number.asc())
+    )
+    scene_rows = (await session.execute(scene_stmt)).scalars().all()
+    scenes_list = [
+        {
+            "scene_number": sc.scene_number,
+            "act_number": sc.act_number,
+            "slugline": sc.slugline,
+            "narrative_goal": sc.narrative_goal,
+        }
+        for sc in scene_rows
+    ]
+
+    try:
+        context = extract_project_narrative_context(
+            project,
+            bible,
+            characters=characters_list,
+            scenes=scenes_list,
+        )
+    except ValueError as exc:
+        title = (project.title or "").strip()
+        if not title:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        settings = project.settings if isinstance(project.settings, dict) else {}
+        genre_tone = settings.get("genre") or settings.get("tone") or "Cinematic Film"
+        context = ProjectNarrativeContext(
+            project_id=str(project.id),
+            title=title,
+            synopsis=(
+                f"A cinematic {genre_tone} production titled '{title}' exploring "
+                "immersive environments and signature hero props."
+            ),
+            genre_tone=str(genre_tone),
+            master_style_code=project.target_style_code or "#Style 01",
+            style_name="Hollywood Cinematic",
+            aesthetic_directives="",
+            color_grade_emulation="",
+            world_setting="Cinematic Universe",
+            continuity_rules=[],
+            visual_dna_parameters={},
+            environments_summary="",
+            props_summary="",
+            aspect_ratio=project.aspect_ratio or "16:9",
+            operational_stage=project.operational_stage or 1,
+            cast_characters=characters_list,
+            storyboard_scenes=scenes_list,
+        )
+
+    return context, bible
+
+
 @router.get("/projects/{project_id}/bible", status_code=status.HTTP_200_OK)
 async def get_project_bible(
     project_id: str,
@@ -704,6 +831,72 @@ async def generate_world_props_endpoint(
         },
     }
 
+
+@router.post("/projects/{project_id}/bible/world-props/variations", status_code=status.HTTP_200_OK)
+async def generate_world_prop_variations_endpoint(
+    project_id: str,
+    payload: WorldPropVariationRequest | None = None,
+    item_type: Literal["environment", "prop"] | None = Query(default=None),
+    code: str | None = Query(default=None),
+    additional_notes: str | None = Query(default=None),
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Generate exactly 3 distinct selectable variations for ONE environment or prop.
+
+    Accepts a typed JSON body (preferred). Legacy query parameters remain supported for
+    backward compatibility. Never mutates any other saved Bible item.
+    """
+    resolved_type = payload.item_type if payload else item_type
+    resolved_code = (payload.code if payload else code) or ""
+    resolved_item = payload.current_item if payload else None
+    resolved_notes = payload.additional_notes if payload else additional_notes
+
+    if not resolved_type or not resolved_code.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="item_type and code are required (JSON body or query parameters).",
+        )
+
+    resolved_code = resolved_code.strip()
+    project = await _resolve_project(project_id, session)
+    context, bible = await _build_narrative_context(project, session)
+
+    # Auto-resolve the current saved item by code when the client did not supply one.
+    if resolved_item is None and bible and isinstance(bible.world_rules, dict):
+        collection_key = "environments" if resolved_type == "environment" else "props"
+        collection = bible.world_rules.get(collection_key) or []
+        if isinstance(collection, list):
+            for candidate in collection:
+                if not isinstance(candidate, dict):
+                    continue
+                if str(candidate.get("code", "")).strip().lower() == resolved_code.lower():
+                    resolved_item = dict(candidate)
+                    break
+
+    engine = PolyaScreenwriterEngine()
+    try:
+        variations = await engine.generate_world_prop_variations(
+            context=context,
+            item_type=resolved_type,
+            code=resolved_code,
+            current_item=resolved_item,
+            additional_notes=resolved_notes,
+        )
+    except Exception as exc:
+        logger.error("Polya AI Director world/prop variation failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Polya AI Director failed to generate variations: {exc}",
+        )
+
+    return {
+        "status": "success",
+        "project_id": str(project.id),
+        "item_type": resolved_type,
+        "code": resolved_code,
+        "data": variations,
+    }
 
 @router.post("/projects/{project_id}/bible/generate-rules-invariants", status_code=status.HTTP_200_OK)
 async def generate_rules_invariants_endpoint(
@@ -1901,7 +2094,59 @@ async def update_character_state(
     }
 
 
+@router.put("/projects/{project_id}/characters/{character_id}/sheet-overrides", status_code=status.HTTP_200_OK)
+async def update_character_sheet_overrides(
+    project_id: str,
+    character_id: str,
+    payload: SheetOverrideRequest,
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Store or clear per-slot positive/negative prompt overrides for a character sheet slot."""
+    p_uuid = _parse_uuid(project_id, "project_id")
+    c_uuid = _parse_uuid(character_id, "character_id")
+    char_stmt = select(CharacterModel).where(CharacterModel.id == c_uuid)
+    char = (await session.execute(char_stmt)).scalar_one_or_none()
+    if not char:
+        raise HTTPException(status_code=404, detail="Character not found")
+    if char.project_id != p_uuid:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Character does not belong to this project",
+        )
+
+    slot_key = (payload.slot_key or "").strip()
+    if not slot_key:
+        raise HTTPException(status_code=422, detail="slot_key is required")
+
+    prompt_override = (payload.prompt_override or "").strip() or None
+    negative_override = (payload.negative_prompt_override or "").strip() or None
+
+    overrides = dict(char.sheet_overrides or {})
+
+    if prompt_override is None and negative_override is None:
+        overrides.pop(slot_key, None)
+    else:
+        overrides[slot_key] = {
+            "prompt_override": prompt_override,
+            "negative_prompt_override": negative_override,
+        }
+
+    char.sheet_overrides = overrides
+    flag_modified(char, "sheet_overrides")
+    await session.commit()
+    await session.refresh(char)
+
+    return {
+        "status": "success",
+        "character_id": str(char.id),
+        "slot_key": slot_key,
+        "has_override": slot_key in overrides,
+        "overrides": overrides,
+    }
+
 @router.delete("/characters/{character_id}/states/{state_id}", status_code=status.HTTP_200_OK)
+
 async def delete_character_state(
     character_id: str,
     state_id: str,
@@ -2097,9 +2342,14 @@ STUDIO_EXCLUSION_DIRECTIVE = (
 )
 
 
-def _clean_style_directives_for_character_sheet(text: str, is_stylized: bool = False) -> str:
+def _clean_style_directives_for_character_sheet(
+    text: str,
+    is_stylized: bool = False,
+    style_family: str | None = None,
+) -> str:
     """Strip scenic, environmental, weather, and camera motion overrides from style directives."""
     import re
+    family = style_family or ("anime_2d" if is_stylized else "photorealistic")
     conflicts = [
         "lush watercolor nature backgrounds",
         "painterly flora",
@@ -2137,20 +2387,31 @@ def _clean_style_directives_for_character_sheet(text: str, is_stylized: bool = F
     cleaned = text
     for c in conflicts:
         cleaned = re.sub(re.escape(c) + r"[,.]?", "", cleaned, flags=re.IGNORECASE)
-    if is_stylized:
+    if family != "photorealistic":
         cleaned = re.sub(r"\bphotorealistic\b", "expressive", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r",\s*,+", ",", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.")
     if cleaned and not cleaned.endswith("."):
         cleaned += "."
-    if is_stylized:
-        return cleaned or "Crisp clean linework, dimensional anime cel-shading, vibrant character palette."
-    return cleaned or "Pristine dynamic range, lifelike skin pores, crisp micro-texture detail."
+    if cleaned:
+        return cleaned
+    if family == "anime_2d":
+        return "Crisp clean linework, dimensional anime cel-shading, vibrant character palette."
+    if family == "stylized_3d":
+        return "Sculpted stylized 3D geometry, rich PBR surface shading, clean rim-lit form."
+    if family == "stop_motion":
+        return "Tactile handcrafted plasticine texture, subtle handmade surface relief, physical armature form."
+    return "Pristine dynamic range, lifelike skin pores, crisp micro-texture detail."
 
 
-def _clean_color_grade_for_character_sheet(text: str, is_stylized: bool = False) -> str:
+def _clean_color_grade_for_character_sheet(
+    text: str,
+    is_stylized: bool = False,
+    style_family: str | None = None,
+) -> str:
     """Strip environmental and location lighting overrides from color grade emulation."""
     import re
+    family = style_family or ("anime_2d" if is_stylized else "photorealistic")
     conflicts = [
         "heavy tungsten edge lighting",
         "gentle naturalistic backlighting",
@@ -2168,9 +2429,15 @@ def _clean_color_grade_for_character_sheet(text: str, is_stylized: bool = False)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.")
     if cleaned and not cleaned.endswith("."):
         cleaned += "."
-    if is_stylized:
-        return cleaned or "Pure neutral white balance, vibrant anime palette emulation."
-    return cleaned or "Naturalistic color timing, neutral balanced 65mm sensor reproduction."
+    if cleaned:
+        return cleaned
+    if family == "anime_2d":
+        return "Pure neutral white balance, vibrant 2D animation palette emulation."
+    if family == "stylized_3d":
+        return "Balanced studio global illumination, clean stylized 3D color harmony."
+    if family == "stop_motion":
+        return "Neutral miniature stage lighting, authentic physical clay color fidelity."
+    return "Naturalistic color timing, neutral balanced 65mm sensor reproduction."
 
 
 def _extract_biometric_and_collar(base_prompt: str, char_name: str | None = None) -> tuple[str, str]:
@@ -2435,6 +2702,144 @@ def _extract_full_body_costume(base_prompt: str, wardrobe_collar: str, char_name
     return f"a {costume_base} paired with tailored matching trousers and clean minimalist studio footwear"
 
 
+def _resolve_sheet_family_profile(
+    style_code: str,
+    style_name: str,
+    style_family: str,
+    clean_directives: str,
+    clean_palette: str,
+) -> dict[str, str]:
+    """Build style-authentic rendering descriptors for each of the 4 canonical style families."""
+    if style_family == "stylized_3d":
+        if style_code == "#Style 11":
+            medium_desc = (
+                f"2.5D painterly brushstroke textures mapped onto sculpted 3D character geometry in {style_name} style, "
+                f"graphic novel contour edges, rough oil-paint shader finishes ({clean_directives})"
+            )
+            ref_noun = "3D/2.5D animated character model"
+        elif style_code == "#Style 06":
+            medium_desc = (
+                f"hyper-detailed stylized 3D Donghua animation character model in {style_name} style, "
+                f"clean PBR shaders, expressive sculpted proportions ({clean_directives})"
+            )
+            ref_noun = "3D animated Donghua character model"
+        else:
+            medium_desc = (
+                f"stylized 3D feature animation character model in {style_name} style, "
+                f"expressive sculpted facial geometry, tactile PBR surface shaders, soft studio rim ({clean_directives})"
+            )
+            ref_noun = "stylized 3D animated character model"
+        return {
+            "family": "stylized_3d",
+            "sheet_header": f"Clean studio stylized 3D animation character model sheet",
+            "ref_noun": ref_noun,
+            "medium_desc": medium_desc,
+            "lighting": "Pure neutral 5500K studio three-point illumination with clean rim separation and true neutral white balance",
+            "backdrop": "solid, uniform, seamless matte neutral gray studio cyclorama backdrop",
+            "optics": "virtual 85mm distortion-free studio turntable camera",
+            "inline_guardrail": "[Aesthetic Constraints: Strictly stylized 3D/2.5D animated CGI character model sheet. Avoid: live-action DSLR photography, raw human skin pores, flat 2D cel sketch]",
+            "base_negative": (
+                "live-action DSLR photography, raw human skin pores, realistic wrinkles, flat 2D cel sketch, "
+                "text, numbers, captions, labels, watermarks, panel numbering, typography, subtitles, UI overlay, "
+                "colored light spill, colored reflection on chin or neck, facial morphing, distorted facial anatomy, "
+                "asymmetrical eyes, missing fingers, extra limbs, blurry textures, pixelated face, low resolution, "
+                "inconsistent clothing, oversaturated"
+            ),
+        }
+
+    if style_family == "stop_motion":
+        return {
+            "family": "stop_motion",
+            "sheet_header": "Handcrafted stop-motion miniature maquette character model sheet",
+            "ref_noun": "handcrafted stop-motion clay/plasticine puppet",
+            "medium_desc": (
+                f"tactile sculpted plasticine and clay maquette in {style_name} style, subtle authentic fingerprint impressions, "
+                f"handmade wool/fabric miniature costume textures, internal armature proportions ({clean_directives})"
+            ),
+            "lighting": "Balanced neutral miniature stage spotlights with soft overhead fill and zero colored light spill",
+            "backdrop": "solid, uniform, seamless matte neutral gray miniature stage cyclorama backdrop",
+            "optics": "macro studio stage lens at f/8 with natural miniature depth-of-field clarity",
+            "inline_guardrail": "[Aesthetic Constraints: Strictly handcrafted stop-motion clay/plasticine miniature maquette. Avoid: live-action DSLR human skin pores, flat 2D anime cel shading, glossy digital CGI]",
+            "base_negative": (
+                "live-action human skin pores, glossy digital CGI, flat 2D anime cel shading, "
+                "text, numbers, captions, labels, watermarks, panel numbering, typography, subtitles, UI overlay, "
+                "colored light spill, colored reflection on chin or neck, facial morphing, distorted anatomy, "
+                "asymmetrical eyes, missing fingers, extra limbs, blurry textures, low resolution, inconsistent clothing"
+            ),
+        }
+
+    if style_family == "anime_2d":
+        if style_code == "#Style 16":
+            medium_desc = (
+                f"Studio Ghibli-inspired hand-drawn 2D animation model sheet in {style_name} style, "
+                f"soft organic pencil-and-ink linework, gentle hand-painted watercolor cel washes ({clean_directives})"
+            )
+            ref_noun = "2D hand-painted anime character illustration"
+        elif style_code == "#Style 17":
+            medium_desc = (
+                f"dark graphic novel character model sheet in {style_name} style, "
+                f"heavy chiaroscuro black ink shadows, stark angular contour linework, high-contrast noir ink washes ({clean_directives})"
+            )
+            ref_noun = "2D graphic novel ink character illustration"
+        elif style_code == "#Style 14":
+            medium_desc = (
+                f"classic 2D cel animation character model sheet in {style_name} style, "
+                f"crisp variable-weight ink lineart, clean flat cel color fills ({clean_directives})"
+            )
+            ref_noun = "2D cel animation character illustration"
+        else:
+            medium_desc = (
+                f"2D anime character model sheet in {style_name} style, "
+                f"crisp anime ink lineart, luminous multi-layered expressive eyes, delicate cel-shading ({clean_directives})"
+            )
+            ref_noun = "2D anime character illustration"
+        return {
+            "family": "anime_2d",
+            "sheet_header": "Clean studio animation character model sheet",
+            "ref_noun": ref_noun,
+            "medium_desc": medium_desc,
+            "lighting": f"Pure neutral studio illumination with zero colored light spill on chin or neck and true neutral white balance ({clean_palette})",
+            "backdrop": "solid, uniform, seamless matte neutral gray studio paper backdrop",
+            "optics": "flat distortion-free orthographic animation camera",
+            "inline_guardrail": "[Aesthetic Constraints: Strictly 2D anime cel-shaded illustration or hand-drawn art. Avoid: photorealism, real human photography, skin pores, realistic wrinkles, 3D CGI render, live-action camera artifacts]",
+            "base_negative": (
+                "photorealism, real human photography, realistic skin texture, skin pores, wrinkles, "
+                "3D CGI render, live-action, camera artifacts, "
+                "text, numbers, captions, labels, watermarks, panel numbering, typography, subtitles, UI overlay, "
+                "colored light spill, colored reflection on chin or neck, blue light spill on chin, blue reflection, "
+                "neon collar glow, colored rim lighting, photographic drift, facial morphing, distorted facial anatomy, "
+                "asymmetrical eyes, missing fingers, extra limbs, blurry textures, pixelated face, low resolution, "
+                "amateur art, inconsistent clothing, plastic skin, 3d doll, oversaturated"
+            ),
+        }
+
+    # photorealistic family (#Style 01, 02, 03, 04, 05, 07, 08, 12, 18)
+    if style_code == "#Style 12":
+        medium_note = f"UE5 Metahuman digital human studio render ({clean_directives}; {clean_palette})"
+    elif style_code == "#Style 18":
+        medium_note = f"35mm archival film stock texture with organic grain and natural dye balance ({clean_directives}; {clean_palette})"
+    else:
+        medium_note = f"authentic lived-in human skin with visible pores, natural skin grain, and matte finish ({clean_directives})"
+
+    return {
+        "family": "photorealistic",
+        "sheet_header": "Unretouched RAW photographic studio casting portrait",
+        "ref_noun": "individual from the reference photograph",
+        "medium_desc": medium_note,
+        "lighting": "balanced, softly diffused 5500K neutral daylight studio softboxes with zero colored light spill",
+        "backdrop": "solid, uniform, seamless matte neutral gray studio sweep cyclorama backdrop",
+        "optics": "100-megapixel medium-format studio camera with 85mm prime lens at f/8",
+        "inline_guardrail": "",
+        "base_negative": (
+            "text, numbers, captions, labels, watermarks, panel numbering, typography, subtitles, UI overlay, "
+            "colored light spill, colored reflection on chin or neck, blue light spill on chin, blue reflection, "
+            "neon collar glow, colored rim lighting, photographic drift, facial morphing, distorted facial anatomy, "
+            "asymmetrical eyes, missing fingers, extra limbs, blurry textures, pixelated face, low resolution, "
+            "amateur art, inconsistent clothing, CGI render, plastic skin, 3d doll, oversaturated"
+        ),
+    }
+
+
 def compile_sheet_prompt(
     character: CharacterModel,
     project: ProjectModel | None,
@@ -2443,8 +2848,9 @@ def compile_sheet_prompt(
     target_state: CharacterStateModel | None = None,
     prompt_override: str | None = None,
     aspect_ratio: str | None = None,
+    director_rag_cues: str = "",
 ) -> dict[str, Any]:
-    """Pure compiler producing project-synced master prompts for any of the 8 cards or dynamic states."""
+    """Pure compiler producing project-synced, 4-family style-authentic prompts for Cards 1-8 and dynamic states."""
     norm_slot = (slot or "closeup").lower().strip()
     if norm_slot in ("closeup", "close_up", "headshot", "portrait", "master_closeup", "slot_1"):
         slot_key = "closeup"
@@ -2477,7 +2883,7 @@ def compile_sheet_prompt(
 
     style_def = next((s for s in STYLE_CATALOG if s.get("code") == style_code), None) or STYLE_CATALOG[0]
     style_name = str(style_def.get("name") or "Hollywood Cinematic")
-    style_family = str(style_def.get("family") or "")
+    style_family = str(style_def.get("family") or get_style_family(style_code) or "photorealistic")
 
     aesthetic_directives = (
         bible.style_parameters.get("aesthetic_directives")
@@ -2489,20 +2895,12 @@ def compile_sheet_prompt(
         if bible and bible.style_parameters and bible.style_parameters.get("color_grade_emulation")
         else style_def.get("color_grade_emulation", "")
     )
-    project_title = (project.title if project else "") or ""
 
-    combined_style = f"{style_name} {style_code} {style_family}".lower()
-    is_stylized = any(
-        k in combined_style
-        for k in ("anime", "cartoon", "2d", "comic", "manga", "pixar", "claymation", "illustration")
-    )
+    clean_directives = _clean_style_directives_for_character_sheet(aesthetic_directives, style_family=style_family)
+    clean_palette = _clean_color_grade_for_character_sheet(color_grade_emulation, style_family=style_family)
+    fam_spec = _resolve_sheet_family_profile(style_code, style_name, style_family, clean_directives, clean_palette)
 
-    clean_directives = _clean_style_directives_for_character_sheet(aesthetic_directives, is_stylized=is_stylized)
-    clean_palette = _clean_color_grade_for_character_sheet(color_grade_emulation, is_stylized=is_stylized)
-
-    # Runtime boilerplate sanitization on base_prompt to purge any leaked studio tags or softbox terms
     sanitized_base_prompt = _sanitize_character_base_prompt(character.base_prompt)
-
     biometric_profile, wardrobe_collar = _extract_biometric_and_collar(
         sanitized_base_prompt,
         char_name=character.name,
@@ -2524,133 +2922,77 @@ def compile_sheet_prompt(
         if getattr(character, "face_ref_asset_id", None):
             ref_candidates.append(("Face Reference Asset", str(character.face_ref_asset_id)))
 
-        if is_stylized:
-            if ref_candidates:
-                positive_prompt = (
-                    f"Analyze the reference 2D illustration and strictly preserve the character's exact 2D anime identity, "
-                    f"facial proportions, eye shape, iris design and color, nose and mouth geometry, hair silhouette and color, "
-                    f"and distinguishing features exactly as they are. Re-render the character as a clean 2D anime character model sheet "
-                    f"close-up casting portrait framed from the crown of the head to the upper collarbone. Re-align to a direct frontal, "
-                    f"strict eye-level camera angle with head upright and centered, both ears clearly visible, a calm neutral resting "
-                    f"expression, naturally closed mouth, and direct eye contact. Strictly preserve authentic {style_name} 2D anime aesthetic: "
-                    f"crisp ink lineart, flat and subtle dimensional cel-shading, vibrant animation color palette ({clean_palette}), and zero photographic conversion. "
-                    f"Illuminated by pure neutral studio illumination with zero colored light spill on the chin or neck. "
-                    f"Isolated cleanly against a solid, uniform, seamless matte neutral gray studio backdrop. "
-                    f"Dress the upper shoulders in {wardrobe_collar} with the neck fully visible."
-                )
-            else:
-                positive_prompt = (
-                    f"Clean studio animation character model sheet casting portrait of {biometric_profile}. "
-                    f"Tight head-and-shoulders close-up framed cleanly from the top of the head down to the base of the neck "
-                    f"and upper collarbone. Direct frontal view at exact eye-level, head held upright and centered facing straight ahead "
-                    f"with both ears, cheekbones, and jawline equally visible and unobstructed. Completely calm, relaxed neutral "
-                    f"resting expression with naturally closed lips and steady, direct eye contact into the lens. "
-                    f"Authentic {style_name} animation visual style with crisp ink linework, dimensional cel-shading, and balanced facial proportions ({clean_directives}). "
-                    f"Illuminated by pure neutral studio illumination with no colored light spill on the chin or neck, with true neutral white balance ({clean_palette}). "
-                    f"Isolated cleanly against a completely uniform, seamless matte neutral gray studio paper backdrop. Wearing {wardrobe_collar} "
-                    f"that keeps the entire neck and jawline cleanly visible."
-                )
-        else:
+        if style_family == "photorealistic":
             if ref_candidates:
                 positive_prompt = (
                     f"Analyze the reference photograph and strictly preserve the exact person's biometric identity, "
                     f"bone structure, eye shape, iris color, nose bridge, lip shape, natural skin tone, age, ethnicity, "
                     f"hair texture, and distinguishing facial marks exactly as they are. Re-render the subject as an "
-                    f"unretouched RAW photographic studio casting close-up portrait framed from the crown of the head "
-                    f"to the upper collarbone. Re-align to a direct frontal, strict eye-level camera angle with head "
-                    f"upright and centered, both ears clearly visible, a calm neutral resting expression, naturally "
-                    f"closed mouth, and direct eye contact with the lens. Preserve authentic raw human skin texture "
-                    f"including visible pores, natural skin grain, subtle tonal variations, fine facial hair, under-eye "
-                    f"texture, and natural lip lines with a matte finish. Captured on a 100-megapixel medium-format studio camera "
-                    f"with a 100mm macro-portrait prime lens at f/5.6, delivering extreme optical micro-contrast, zero wide-angle "
-                    f"distortion, and razor-sharp edge-to-edge focus from the tip of the nose, individual eyelashes, eyebrow hairs, "
-                    f"and skin pores all the way to both ears, with hyper-crisp iris detail and clean natural catchlights. Replace all original "
-                    f"lighting with pure neutral 5500K studio illumination with no colored light spill on the chin or neck, evenly diffused "
-                    f"neutral daylight studio softboxes, and isolate the subject against a solid, uniform, seamless matte light-medium "
-                    f"neutral gray studio backdrop. Dress the upper shoulders in {wardrobe_collar} with the neck fully visible. "
-                    f"Indistinguishable from an unedited real DSLR casting photograph."
+                    f"{fam_spec['sheet_header']} close-up framed from the crown of the head to the upper collarbone. "
+                    f"Direct frontal, strict eye-level camera angle with head upright and centered, both ears clearly visible, "
+                    f"a calm neutral resting expression, naturally closed mouth, and direct eye contact with the lens. "
+                    f"Preserve {fam_spec['medium_desc']}. Captured on a 100-megapixel medium-format studio camera with a 100mm macro-portrait prime lens at f/5.6, "
+                    f"delivering edge-to-edge focus and clean iris catchlights. Illuminated by {fam_spec['lighting']}, "
+                    f"isolated cleanly against a {fam_spec['backdrop']}. Dress the upper shoulders in {wardrobe_collar} with the neck fully visible."
                 )
             else:
                 positive_prompt = (
-                    f"Unretouched RAW photographic studio casting portrait of {biometric_profile}. "
+                    f"{fam_spec['sheet_header']} of {biometric_profile}. "
                     f"Tight head-and-shoulders close-up framed cleanly from the top of the head down to the base of the neck "
                     f"and upper collarbone. Direct frontal view at exact eye-level, head held upright and centered facing straight ahead "
                     f"with both ears, cheekbones, and jawline equally visible and unobstructed. Completely calm, relaxed neutral "
-                    f"resting expression with naturally closed lips and steady, direct eye contact into the lens. Authentic lived-in "
-                    f"human skin with genuine microscopic detail: natural visible pores, subtle skin grain, fine vellus peach fuzz, "
-                    f"wispy baby hairs along the hairline, true-to-life tonal variation across forehead and cheeks, natural under-eye "
-                    f"texture, subtle fine lines, and realistic lip texture with a natural matte finish and physically accurate subsurface "
-                    f"scattering. Captured on a 100-megapixel medium-format studio camera with a 100mm macro-portrait prime lens at f/5.6, "
-                    f"delivering extreme optical micro-contrast, zero wide-angle distortion, and razor-sharp edge-to-edge focus from the tip "
-                    f"of the nose, individual eyelashes, eyebrow hairs, and skin pores all the way to both ears, with hyper-crisp iris detail "
-                    f"and clean natural catchlights. Illuminated by pure neutral 5500K neutral daylight studio softboxes with no colored light spill on the chin or neck, "
-                    f"balanced softly diffused gentle frontal fill and subtle dimensional micro-shadows with "
-                    f"true neutral white balance. Isolated cleanly against a completely uniform, seamless matte light-medium neutral gray "
-                    f"studio paper backdrop. Wearing {wardrobe_collar} that keeps the entire neck and jawline cleanly visible. "
-                    f"Indistinguishable from an unedited DSLR casting photograph."
+                    f"resting expression with naturally closed lips and steady, direct eye contact into the lens. "
+                    f"Surface & style fidelity: {fam_spec['medium_desc']}. "
+                    f"Captured on a 100-megapixel medium-format studio camera with a 100mm macro-portrait prime lens at f/5.6, "
+                    f"delivering extreme optical micro-contrast, zero wide-angle distortion, and razor-sharp focus. "
+                    f"Illuminated by {fam_spec['lighting']}, isolated cleanly against a {fam_spec['backdrop']}. "
+                    f"Wearing {wardrobe_collar} that keeps the entire neck and jawline cleanly visible."
                 )
+        else:
+            ref_clause = (
+                f"Analyze the visual reference and strictly preserve the exact {fam_spec['ref_noun']} identity, "
+                f"facial proportions, eye design, hair silhouette, and distinguishing features. "
+                if ref_candidates else ""
+            )
+            positive_prompt = (
+                f"{fam_spec['sheet_header']} close-up casting portrait of {biometric_profile}. {ref_clause}"
+                f"Tight head-and-shoulders close-up framed cleanly from the crown of the head down to the upper collarbone. "
+                f"Direct frontal view at exact eye-level, head held upright and centered facing straight ahead with both ears clearly visible, "
+                f"calm neutral resting expression, naturally closed lips, and steady direct eye contact. "
+                f"Strictly render in {fam_spec['medium_desc']} ({clean_palette}). "
+                f"Illuminated by {fam_spec['lighting']} against a {fam_spec['backdrop']}. "
+                f"Dress the upper shoulders in {wardrobe_collar} keeping the neck and jawline cleanly visible."
+            )
 
     elif slot_key == "expression":
         card_title = "Card 2: Expression Sheet (3x2 Micro-Expressions Grid)"
         card_aspect = aspect_ratio or "16:9"
-        width, height = (1344, 768)  # Sharp 16:9 resolution
+        width, height = (1344, 768)
         ref_candidates = []
         if getattr(character, "closeup_image_url", None):
             ref_candidates.append(("Card 1 Character Close-Up", character.closeup_image_url))
 
-        if is_stylized:
-            if ref_candidates:
-                positive_prompt = (
-                    f"Animation character expression model sheet contact montage composed of exactly six equal distinct portrait panels "
-                    f"arranged in a rigid 3-column by 2-row grid on a single horizontal canvas, featuring {char_name}, {biometric_profile}. "
-                    "Capturing the exact same 2D anime character from the reference close-up illustration. "
-                    "Strictly preserve 100% character identity, facial proportions, cranial structure, expressive anime eye shape, iris design and pigmentation, "
-                    f"ear geometry, hairstyle and silhouette, and consistent wardrobe collar ({wardrobe_collar}) across all six panels. "
-                    f"Maintain consistent authentic {style_name} 2D anime aesthetic ({clean_palette}): crisp ink lineart, delicate cel-shading, and clean animated color fills "
-                    "exclusively rendered with clean animated 2D flat fills and crisp cel-shaded shadows, completely free of photographic conversion. "
-                    "Top row from left to right: calm neutral resting face with relaxed closed lips, "
-                    "subtle genuine smile with bright expressive anime eyes and relaxed cheeks, and intense controlled anger with tightened jawline and furrowed brows. "
-                    "Bottom row from left to right: quiet sorrow and grief with softened downward gaze, sudden shock and astonishment with widened eyes and slightly parted lips, "
-                    "and wary sharp suspicion with narrowed focused eyes. Each individual panel maintains consistent head-and-shoulders framing at eye level "
-                    "under pure neutral studio illumination against a seamless matte neutral gray studio backdrop. "
-                    "Clean division lines separating panels, pristine animation character model sheet."
-                )
-            else:
-                positive_prompt = (
-                    f"Clean studio animation character model sheet expression sheet arranged in a rigid 3-column by 2-row grid "
-                    f"(six equal distinct portrait panels) of {char_name}, {biometric_profile}. Authentic {style_name} animation visual style "
-                    f"with crisp linework and dimensional cel-shading ({clean_directives}). Strictly preserve character identity, facial proportions, hair, and wardrobe ({wardrobe_collar}) "
-                    "across all six panels. Top row from left to right: calm neutral resting face with relaxed closed lips, subtle genuine smile with expressive eyes, "
-                    "and intense controlled anger with tightened jawline and furrowed brows. Bottom row from left to right: quiet sorrow and grief with softened downward gaze, "
-                    "sudden shock and astonishment with widened eyes and slightly parted lips, and wary sharp suspicion with narrowed focused eyes. "
-                    "Each panel maintains consistent head-and-shoulders framing at eye level under pure neutral studio illumination against a seamless matte neutral gray studio backdrop. "
-                    "Clean division lines separating panels."
-                )
-        else:
-            if ref_candidates:
-                positive_prompt = (
-                    f"Photographic character expression contact sheet montage composed of exactly six equal distinct portrait panels "
-                    f"arranged in a rigid 3-column by 2-row grid on a single horizontal canvas, featuring {char_name}, {biometric_profile}. "
-                    "Capturing the exact same individual from the reference close-up photograph. "
-                    "Strictly preserve 100% facial identity, cranial bone structure, eye shape, iris pigmentation, ear geometry, hair texture and hairline, "
-                    f"natural skin markings, and consistent wardrobe collar ({wardrobe_collar}) across all six panels with authentic unretouched human skin texture "
-                    "(visible pores, micro-wrinkles, natural skin grain, matte finish). Top row from left to right: calm neutral resting face with relaxed closed lips, "
-                    "subtle genuine smile with natural eye crinkles and relaxed cheeks, and intense controlled anger with tightened jawline and furrowed brows. "
-                    "Bottom row from left to right: quiet sorrow and grief with softened downward gaze, sudden shock and astonishment with widened eyes and slightly parted lips, "
-                    "and wary sharp suspicion with narrowed focused eyes. Each individual panel maintains consistent head-and-shoulders framing at eye level, "
-                    "captured with a 100mm portrait lens under identical 5500K neutral daylight studio softboxes against a seamless matte neutral gray (#D4D4D4) studio backdrop. "
-                    "Clean division lines separating panels, pristine photographic casting sheet realism."
-                )
-            else:
-                positive_prompt = (
-                    f"Photographic character expression sheet arranged in a rigid 3-column by 2-row grid (six equal distinct portrait panels) "
-                    f"of {char_name}, {biometric_profile}. Authentic casting sheet with lived-in human skin texture, pores, and natural grain. "
-                    f"Strictly preserve character identity, facial bone structure, hair, and wardrobe ({wardrobe_collar}) across all six panels. "
-                    "Top row from left to right: calm neutral resting face, subtle genuine smile, and intense controlled anger. "
-                    "Bottom row from left to right: quiet sorrow and grief, sudden shock and astonishment, and wary sharp suspicion. "
-                    "Each panel framed at eye level, captured with a 100mm portrait lens under identical 5500K neutral daylight studio softboxes against a seamless matte neutral gray (#D4D4D4) studio backdrop. "
-                    "Clean division lines separating panels."
-                )
+        ref_note = (
+            f"Capturing the exact same {fam_spec['ref_noun']} from the reference close-up. "
+            if ref_candidates else ""
+        )
+        grid_lead = (
+            f"Photographic character expression contact sheet montage"
+            if style_family == "photorealistic"
+            else f"{fam_spec['sheet_header']} expression grid"
+        )
+        positive_prompt = (
+            f"{grid_lead} composed of exactly six equal distinct portrait panels arranged in a rigid 3-column by 2-row grid "
+            f"on a single horizontal canvas, featuring {char_name}, {biometric_profile}. {ref_note}"
+            f"Strictly preserve 100% character identity, facial proportions, eye design, hairstyle silhouette, and consistent wardrobe collar ({wardrobe_collar}) across all six panels. "
+            f"Render consistently with {fam_spec['medium_desc']} ({clean_palette}). "
+            "Top row from left to right: calm neutral resting face with relaxed closed lips, subtle genuine smile with expressive eyes and relaxed cheeks, "
+            "and intense controlled anger with tightened jawline and furrowed brows. "
+            "Bottom row from left to right: quiet sorrow and grief with softened downward gaze, sudden shock and astonishment with widened eyes and slightly parted lips, "
+            "and wary sharp suspicion with narrowed focused eyes. "
+            f"Each individual panel maintains consistent head-and-shoulders framing at eye level using {fam_spec['optics']}, "
+            f"illuminated by {fam_spec['lighting']} against a {fam_spec['backdrop']}. Clean division lines separating panels."
+        )
 
     elif slot_key == "side":
         card_title = "Card 4: Side Profile 90° (Profile 90° • Silhouette & Proportions)"
@@ -2662,47 +3004,14 @@ def compile_sheet_prompt(
         if getattr(character, "front_image_url", None):
             ref_candidates.append(("Card 3 Full Body Front", character.front_image_url))
 
-        if is_stylized:
-            if ref_candidates:
-                positive_prompt = (
-                    f"Full-body studio animation character model sheet 90-degree lateral side profile portrait of {char_name}, {biometric_profile}. "
-                    "Capturing the exact same 2D anime character from the reference close-up and full-body front-view illustrations. "
-                    "Full-length strict 90-degree lateral side-profile orthogonal view framed cleanly from top of head down to footwear touching the ground. "
-                    "Strictly preserves 2D anime facial profile contour, nose slope, chin, cranial geometry, hair silhouette, and lineart styling from reference images with zero photorealistic conversion. "
-                    f"Standing upright in a natural neutral profile posture revealing lateral proportions and complete side costume construction matching {full_body_costume}. "
-                    f"Rendered in authentic {style_name} animation style with crisp ink lineart, clean 2D cel-shading, and balanced animation proportions ({clean_palette}). "
-                    "Illuminated by balanced neutral studio illumination on a seamless matte neutral gray studio backdrop with soft ground contact shadow."
-                )
-            else:
-                positive_prompt = (
-                    f"Clean studio animation character model sheet side profile portrait of {char_name}, {biometric_profile}. "
-                    f"Authentic {style_name} animation visual style with crisp linework and dimensional cel-shading. Strict 90-degree lateral side-profile view framed cleanly from top of head down to footwear. "
-                    f"Standing upright in a neutral profile posture showing lateral proportions and costume construction matching {full_body_costume}. "
-                    f"Illuminated by balanced neutral studio illumination on a seamless matte neutral gray studio backdrop with soft ground contact shadow."
-                )
-        else:
-            if ref_candidates:
-                positive_prompt = (
-                    f"Unretouched RAW photographic full-body studio casting profile portrait of {char_name}, {biometric_profile}. "
-                    "Capturing the exact same individual from the reference close-up and full-body front-view casting photographs. "
-                    "Full-length strict 90-degree lateral side-profile orthogonal view framed cleanly from the top of the head down to the soles of the footwear touching the ground with comfortable margins above and below. "
-                    "Strictly preserves their exact biometric identity, facial profile topography, cranial structure, jawline contour, nose bridge, ear geometry, hair silhouette, and natural skin texture from the reference images. "
-                    "Standing upright in a natural, balanced neutral profile standing posture with arms resting naturally at the sides, revealing precise lateral anatomical proportions, natural posture contour, "
-                    f"and complete side costume construction matching {full_body_costume}. "
-                    "Captured on a medium-format studio camera with an 85mm prime lens at f/8 for zero focal distortion, crisp edge-to-edge optical clarity, and authentic material textures from head to toe. "
-                    "Illuminated by balanced, evenly diffused 5500K neutral daylight studio softboxes with delicate lateral separation and true neutral white balance, with zero colored light spill. "
-                    "Isolated cleanly against a seamless, solid, uniform matte neutral gray (#D4D4D4) studio sweep cyclorama backdrop with a soft natural ground contact shadow directly beneath the footwear. "
-                    "Indistinguishable from an unedited real wardrobe-fitting profile photograph."
-                )
-            else:
-                positive_prompt = (
-                    f"Unretouched RAW photographic full-body studio casting profile portrait of {char_name}, {biometric_profile}. "
-                    f"Full-length strict 90-degree lateral side-profile view framed cleanly from top of head down to the soles of the footwear touching the ground. "
-                    f"Standing upright in a natural neutral profile posture, revealing precise lateral anatomical proportions, posture contour, and costume construction matching {full_body_costume}. "
-                    f"Captured on a medium-format studio camera with an 85mm prime lens at f/8 for zero focal distortion and crisp material textures from head to toe. "
-                    f"Illuminated by balanced, softly diffused 5500K neutral daylight studio softboxes with subtle lateral separation on a seamless matte neutral gray (#D4D4D4) studio sweep backdrop with soft ground contact shadow. "
-                    f"Indistinguishable from an unedited real costume-fitting profile photograph."
-                )
+        ref_note = f"Capturing the exact same {fam_spec['ref_noun']} from the reference Card 1 close-up and Card 3 front view. " if ref_candidates else ""
+        positive_prompt = (
+            f"Full-body {fam_spec['sheet_header']} 90-degree lateral side profile portrait of {char_name}, {biometric_profile}. {ref_note}"
+            "Full-length strict 90-degree lateral side-profile orthogonal view framed cleanly from top of head down to the soles of the footwear touching the ground with comfortable margins. "
+            "Standing upright in a natural, balanced neutral profile standing posture revealing precise lateral proportions and complete side costume construction matching "
+            f"{full_body_costume}. Strictly render in {fam_spec['medium_desc']} ({clean_palette}). "
+            f"Captured via {fam_spec['optics']}, illuminated by {fam_spec['lighting']} against a {fam_spec['backdrop']} with a soft ground contact shadow."
+        )
 
     elif slot_key == "three_quarter":
         card_title = "Card 5: 3/4 Hero Angle (Oblique 45° • Hero Perspective)"
@@ -2714,48 +3023,15 @@ def compile_sheet_prompt(
         if getattr(character, "front_image_url", None):
             ref_candidates.append(("Card 3 Full Body Front", character.front_image_url))
 
-        if is_stylized:
-            if ref_candidates:
-                positive_prompt = (
-                    f"Full-body studio animation character model sheet 45-degree three-quarter hero angle portrait of {char_name}, {biometric_profile}. "
-                    "Capturing the exact same 2D anime character from the reference close-up and front-view illustrations. "
-                    "Full-length distinct 45-degree three-quarter oblique standing perspective framed cleanly from top of head down to footwear with comfortable margins. "
-                    "Torso and shoulders are distinctly turned 45 degrees away from the optical axis with one shoulder forward toward the camera, breaking frontal symmetry and showing rich three-dimensional depth, side drapery, and dynamic silhouette. The head turns gently toward the viewer while the body maintains a strict 45-degree three-quarter oblique orientation. Strictly avoid flat orthogonal front-facing orientation (0-degree front view) or camera-parallel torso alignment. "
-                    "Strictly preserves 2D anime facial identity, expressive anime eyes, hairstyle silhouette, and costume details from reference images with zero conversion to real photography. "
-                    f"Standing in a confident, dynamic three-quarter hero stance wearing complete consistent costume design matching {full_body_costume}. "
-                    f"Authentic {style_name} animation visual style with crisp ink linework, dimensional cel-shading, and clean animation palette ({clean_palette}). "
-                    "Illuminated by balanced neutral studio illumination on a seamless matte neutral gray studio sweep backdrop with soft ground contact shadow."
-                )
-            else:
-                positive_prompt = (
-                    f"Clean studio animation character model sheet 3/4 hero angle portrait of {char_name}, {biometric_profile}. "
-                    f"Authentic {style_name} animation visual style with dimensional cel-shading. 45-degree three-quarter studio standing view framed from head to toe. "
-                    f"Confident stance wearing complete costume design: {full_body_costume}. "
-                    "Illuminated by balanced neutral studio illumination on a seamless matte neutral gray studio backdrop."
-                )
-        else:
-            if ref_candidates:
-                positive_prompt = (
-                    f"Unretouched RAW photographic full-body studio casting portrait of {char_name}, {biometric_profile}. "
-                    "Capturing the exact same individual from the reference close-up and front-view photographs. "
-                    "Full-length distinct 45-degree three-quarter hero angle standing perspective framed cleanly from the top of the head down to the soles of the footwear touching the ground with comfortable margins. "
-                    "The subject's torso and shoulders are distinctly turned 45 degrees away from the optical axis with one shoulder forward toward the camera, breaking frontal symmetry and revealing three-dimensional volumetric depth, side garment drapery, and dynamic body contour. The head turns gently toward the camera lens while the body maintains a strict 45-degree three-quarter oblique orientation. Strictly avoid flat orthogonal front-facing orientation (0-degree front view) or camera-parallel torso alignment. "
-                    "Strictly preserves their exact facial identity, bone structure, eye shape and color, hair texture, and distinctive physical features from the reference images. "
-                    "Standing in a confident, natural three-quarter stance showing authentic volumetric depth, realistic garment drapery, and natural weight distribution. "
-                    f"Wearing complete, consistent wardrobe design matching {full_body_costume}. "
-                    "Captured on a medium-format studio camera with an 85mm prime lens at f/8 for distortion-free anatomical perspective, rich dimensional depth, and tactile fabric and material micro-textures from head to toe. "
-                    "Evenly illuminated by balanced 5500K neutral daylight studio softboxes with subtle edge separation and true neutral white balance, with zero colored light spill. "
-                    "Isolated cleanly against a seamless, solid, uniform matte neutral gray (#D4D4D4) studio sweep cyclorama backdrop with a soft natural ground contact shadow directly beneath the footwear. "
-                    "Indistinguishable from an unedited real studio casting photograph."
-                )
-            else:
-                positive_prompt = (
-                    f"Unretouched RAW photographic full-body studio casting portrait of {char_name}, {biometric_profile}. "
-                    f"Full-length 45-degree three-quarter studio standing view framed cleanly from top of head down to the soles of the footwear. "
-                    f"Standing in a confident, natural three-quarter stance showing volumetric depth and dimensional fabric drapery. "
-                    f"Wearing complete costume design: {full_body_costume}. Captured on a medium-format studio camera with an 85mm prime lens at f/8. "
-                    f"Illuminated by balanced, softly diffused 5500K neutral daylight studio softboxes on a seamless matte neutral gray (#D4D4D4) studio sweep backdrop with soft ground contact shadow."
-                )
+        ref_note = f"Capturing the exact same {fam_spec['ref_noun']} from the reference Card 1 and Card 3 anchors. " if ref_candidates else ""
+        positive_prompt = (
+            f"Full-body {fam_spec['sheet_header']} 45-degree three-quarter hero angle portrait of {char_name}, {biometric_profile}. {ref_note}"
+            "Full-length distinct 45-degree three-quarter oblique standing perspective framed cleanly from top of head down to the soles of the footwear with comfortable margins. "
+            "The subject's torso and shoulders are distinctly turned 45 degrees away from the optical axis with one shoulder forward toward the camera, breaking frontal symmetry and revealing volumetric depth and side garment drapery. "
+            "The head turns gently toward the viewer while the body maintains a strict 45-degree three-quarter oblique orientation. Strictly avoid flat orthogonal front-facing orientation (0-degree front view) or camera-parallel torso alignment. "
+            f"Standing in a confident three-quarter stance wearing complete consistent costume design matching {full_body_costume}. "
+            f"Rendered in {fam_spec['medium_desc']} ({clean_palette}) via {fam_spec['optics']}, illuminated by {fam_spec['lighting']} against a {fam_spec['backdrop']} with soft ground contact shadow."
+        )
 
     elif slot_key == "back":
         card_title = "Card 6: Back View (Orthogonal 180° • Rear Anatomy & Gear)"
@@ -2767,45 +3043,13 @@ def compile_sheet_prompt(
         if getattr(character, "front_image_url", None):
             ref_candidates.append(("Card 3 Full Body Front", character.front_image_url))
 
-        if is_stylized:
-            if ref_candidates:
-                positive_prompt = (
-                    f"Full-body studio animation character model sheet 180-degree rear turnaround portrait of {char_name}, {biometric_profile}. "
-                    "Capturing the exact same 2D anime character from the reference illustrations in a direct 180-degree rear orthogonal view. "
-                    "Full-length head-to-toe framing facing squarely away from the camera, showing rear hair silhouette, shoulder structure, and complete back costume design: "
-                    f"{full_body_costume}. "
-                    f"Strictly maintain consistent authentic {style_name} 2D anime styling, clean ink contours, and cel-shaded materials matching the reference images, with zero photographic drift. "
-                    "Illuminated by balanced neutral studio illumination on a seamless matte neutral gray studio backdrop with soft ground contact shadow."
-                )
-            else:
-                positive_prompt = (
-                    f"Clean studio animation character model sheet back view portrait of {char_name}, {biometric_profile}. "
-                    f"Authentic {style_name} animation visual style with crisp lineart and cel-shading. Full-length 180-degree rear orthogonal view framed from head to toe facing away. "
-                    f"Showing back silhouette and complete rear costume construction: {full_body_costume}. "
-                    "Illuminated by balanced neutral studio illumination on a seamless matte neutral gray studio backdrop."
-                )
-        else:
-            if ref_candidates:
-                positive_prompt = (
-                    f"Unretouched RAW photographic full-body studio turnaround casting portrait of {char_name}, {biometric_profile}. "
-                    "Capturing the exact same individual from the reference photographs in a direct 180-degree rear orthogonal view. "
-                    "Full-length head-to-toe framing facing squarely and directly away from the lens, capturing the full figure unobstructed from the back of the head down to the soles of the footwear. "
-                    "Strictly preserves exact physical proportions, cranial contour, hair shape from behind, neck and shoulder anatomy, and authentic posture matching the reference images. "
-                    f"Wearing complete, consistent wardrobe design from the rear matching {full_body_costume}. "
-                    "Captured on a medium-format studio camera with an 85mm prime lens at f/8 for zero focal distortion, crisp edge-to-edge optical clarity, and authentic material micro-textures from head to toe. "
-                    "Illuminated by clinical, evenly diffused 5500K neutral daylight studio softboxes with subtle rim separation and zero colored light spill. "
-                    "Isolated cleanly against a seamless, solid, uniform matte neutral gray (#D4D4D4) studio sweep cyclorama backdrop with a soft natural ground contact shadow directly beneath the footwear. "
-                    "Indistinguishable from an unedited real wardrobe-fitting rear-angle photograph."
-                )
-            else:
-                positive_prompt = (
-                    f"Unretouched RAW photographic full-body studio turnaround casting portrait of {char_name}, {biometric_profile}. "
-                    f"Full-length direct 180-degree rear orthogonal view framed cleanly from the back of the head down to the soles of the footwear touching the ground. "
-                    f"Facing directly away from the lens, revealing rear anatomical proportions, back posture contour, and complete rear costume construction matching {full_body_costume}. "
-                    f"Captured on a medium-format studio camera with an 85mm prime lens at f/8 for zero focal distortion and crisp material textures from head to toe. "
-                    f"Illuminated by balanced, softly diffused 5500K neutral daylight studio softboxes on a seamless matte neutral gray (#D4D4D4) studio sweep backdrop with soft ground contact shadow. "
-                    f"Indistinguishable from an unedited real costume-fitting rear photograph."
-                )
+        ref_note = f"Capturing the exact same {fam_spec['ref_noun']} from the reference anchors in a direct 180-degree rear orthogonal view. " if ref_candidates else ""
+        positive_prompt = (
+            f"Full-body {fam_spec['sheet_header']} 180-degree rear turnaround portrait of {char_name}, {biometric_profile}. {ref_note}"
+            "Full-length head-to-toe framing facing squarely away from the camera, capturing rear hair silhouette, shoulder anatomy, and complete back costume construction: "
+            f"{full_body_costume}. Rendered in {fam_spec['medium_desc']} ({clean_palette}) via {fam_spec['optics']}, "
+            f"illuminated by {fam_spec['lighting']} against a {fam_spec['backdrop']} with soft ground contact shadow."
+        )
 
     elif slot_key == "tpose":
         card_title = "Card 7: Calibration T-Pose (Full Body Frontal • Neutral A/T Calibration)"
@@ -2817,45 +3061,15 @@ def compile_sheet_prompt(
         if getattr(character, "front_image_url", None):
             ref_candidates.append(("Card 3 Full Body Front", character.front_image_url))
 
-        if is_stylized:
-            if ref_candidates:
-                positive_prompt = (
-                    f"Studio animation character model sheet technical T-pose calibration sheet of {char_name}, {biometric_profile}. "
-                    "Capturing the exact same 2D anime character from the reference illustrations in a strict orthopedic calibration T-pose. "
-                    "Full-length direct frontal view framed cleanly from top of head to footwear with comfortable margins. Arms extended horizontally at exactly 90 degrees shoulder height, palms open facing forward, feet planted shoulder-width apart. "
-                    f"Strictly preserves 2D anime facial geometry, hair silhouette, and complete costume construction: {full_body_costume}. "
-                    f"Authentic {style_name} animation visual style with crisp ink lineart, flat and dimensional cel-shading, and zero photographic conversion. "
-                    "Illuminated by balanced neutral studio illumination on a seamless matte neutral gray studio backdrop."
-                )
-            else:
-                positive_prompt = (
-                    f"Clean studio animation character model sheet technical T-pose portrait of {char_name}, {biometric_profile}. "
-                    f"Authentic {style_name} animation visual style with crisp lineart and cel-shading. Full-length frontal view, arms extended horizontally at 90 degrees, palms facing forward. "
-                    f"Complete costume construction: {full_body_costume}. "
-                    "Illuminated by balanced neutral studio illumination on a seamless matte neutral gray studio backdrop."
-                )
-        else:
-            if ref_candidates:
-                positive_prompt = (
-                    f"Unretouched RAW photographic full-body orthopedic calibration T-pose studio casting photograph of {char_name}, {biometric_profile}. "
-                    "Capturing the exact same individual from the reference photographs in a strict rigging and orthopedic calibration T-pose. "
-                    "Full-length direct frontal view framed cleanly from the top of the head down to the soles of the footwear touching the ground with comfortable margins. "
-                    "Standing upright with head level and facing straight forward, arms extended fully horizontally to each side at exact 90-degree shoulder height with palms open and flat facing forward, "
-                    "fingers extended naturally, legs straight with feet planted shoulder-width apart pointing straight ahead. "
-                    "Strictly preserves identical facial identity, cranial bone structure, eye shape and color, hair silhouette, and skin texture matching the reference images. "
-                    f"Wearing complete, consistent wardrobe design matching {full_body_costume}. "
-                    "Photographed on a medium-format camera with an 85mm prime lens at f/8 for zero optical distortion, perfectly true anatomical proportions, and edge-to-edge optical clarity from head to toe. "
-                    "Illuminated by clinical, evenly diffused shadowless 5500K neutral daylight studio softboxes with true neutral white balance and zero colored spill. "
-                    "Isolated cleanly against a seamless, solid, uniform matte neutral gray (#D4D4D4) studio cyclorama sweep backdrop. "
-                    "Indistinguishable from an unedited real motion-capture rigging calibration photograph."
-                )
-            else:
-                positive_prompt = (
-                    f"Unretouched RAW photographic full-body orthopedic calibration T-pose studio photograph of {char_name}, {biometric_profile}. "
-                    f"Full-length direct frontal view, head level, arms extended horizontally to each side at 90-degree shoulder height, palms open and flat facing forward, feet shoulder-width apart. "
-                    f"Wearing complete costume design: {full_body_costume}. Captured on a medium-format studio camera with an 85mm prime lens at f/8 for distortion-free true anatomical proportions. "
-                    f"Illuminated by clinical, evenly diffused 5500K neutral daylight studio softboxes on a seamless matte neutral gray (#D4D4D4) studio sweep backdrop."
-                )
+        ref_note = f"Capturing the exact same {fam_spec['ref_noun']} from the reference anchors in a strict orthopedic calibration T-pose. " if ref_candidates else ""
+        positive_prompt = (
+            f"Full-body {fam_spec['sheet_header']} technical T-pose calibration sheet of {char_name}, {biometric_profile}. {ref_note}"
+            "Full-length direct frontal view framed cleanly from top of head down to footwear with comfortable margins. "
+            "Standing upright with head level facing straight forward, arms extended horizontally to each side at exact 90-degree shoulder height, palms open facing forward, feet shoulder-width apart. "
+            f"Wearing complete consistent costume construction: {full_body_costume}. "
+            f"Rendered in {fam_spec['medium_desc']} ({clean_palette}) via {fam_spec['optics']}, "
+            f"illuminated by {fam_spec['lighting']} against a {fam_spec['backdrop']}."
+        )
 
     elif slot_key == "action":
         card_title = "Card 8: Action Pose (Dynamic Stance • Narrative Silhouette)"
@@ -2867,43 +3081,14 @@ def compile_sheet_prompt(
         if getattr(character, "front_image_url", None):
             ref_candidates.append(("Card 3 Full Body Front", character.front_image_url))
 
-        if is_stylized:
-            if ref_candidates:
-                positive_prompt = (
-                    f"Full-body studio animation character model sheet dynamic combat/action stance portrait of {char_name}, {biometric_profile}. "
-                    "Capturing the exact same 2D anime character from the reference illustrations in a dynamic narrative signature action pose. "
-                    "Full-length head-to-toe framing with athletic weight distribution, showing expressive movement, dynamic garment drapery, and signature pose. "
-                    f"Strictly preserves 2D anime identity, expressive facial features, hair silhouette, and complete costume design: {full_body_costume}. "
-                    f"Dynamic {style_name} animation cel-shading, sharp ink lineart, and vibrant palette with zero photorealistic human texture. "
-                    "Illuminated by balanced neutral studio illumination with dynamic contact shadow on a seamless matte neutral gray studio sweep backdrop."
-                )
-            else:
-                positive_prompt = (
-                    f"Clean studio animation character model sheet dynamic action pose portrait of {char_name}, {biometric_profile}. "
-                    f"Authentic {style_name} animation visual style with crisp lineart and dynamic cel-shading. Full-length dynamic action stance. "
-                    f"Complete costume design: {full_body_costume}. "
-                    "Illuminated by balanced neutral studio illumination on a seamless matte neutral gray studio backdrop."
-                )
-        else:
-            if ref_candidates:
-                positive_prompt = (
-                    f"Unretouched RAW photographic full-body dynamic action-stance studio casting photograph of {char_name}, {biometric_profile}. "
-                    "Capturing the exact same individual from the reference close-up and front-view photographs in a dynamic narrative action stance. "
-                    "Full-length head-to-toe framing capturing the full athletic silhouette, weight distribution, and character-defining dynamic movement with comfortable margins. "
-                    "Strictly preserves their exact facial identity, cranial bone structure, eye shape and color, hair silhouette, and skin texture matching the reference images. "
-                    f"Wearing complete, consistent wardrobe design under dynamic stress matching {full_body_costume}. "
-                    "Captured on a medium-format camera with an 85mm prime lens at f/8 for zero focal distortion, crisp motion-free clarity, and authentic material micro-textures from head to toe. "
-                    "Illuminated by balanced, softly diffused 5500K neutral daylight studio softboxes with delicate rim separation and zero colored light spill. "
-                    "Isolated cleanly against a seamless, solid, uniform matte neutral gray (#D4D4D4) studio sweep cyclorama backdrop with a realistic dynamic ground contact shadow. "
-                    "Indistinguishable from an unedited real studio action-casting photograph."
-                )
-            else:
-                positive_prompt = (
-                    f"Unretouched RAW photographic full-body dynamic action-stance studio casting photograph of {char_name}, {biometric_profile}. "
-                    f"Full-length head-to-toe framing capturing dynamic athletic silhouette and character-defining action movement. "
-                    f"Wearing complete costume design: {full_body_costume}. Captured on a medium-format camera with an 85mm prime lens at f/8. "
-                    f"Illuminated by balanced, softly diffused 5500K neutral daylight studio softboxes on a seamless matte neutral gray (#D4D4D4) studio sweep backdrop with ground contact shadow."
-                )
+        ref_note = f"Capturing the exact same {fam_spec['ref_noun']} from the reference anchors in a dynamic narrative signature action pose. " if ref_candidates else ""
+        positive_prompt = (
+            f"Full-body {fam_spec['sheet_header']} dynamic action-stance portrait of {char_name}, {biometric_profile}. {ref_note}"
+            "Full-length head-to-toe framing with athletic weight distribution, expressive silhouette, and dynamic garment drapery. "
+            f"Wearing complete consistent costume design under dynamic motion matching {full_body_costume}. "
+            f"Rendered in {fam_spec['medium_desc']} ({clean_palette}) via {fam_spec['optics']}, "
+            f"illuminated by {fam_spec['lighting']} against a {fam_spec['backdrop']} with dynamic ground contact shadow."
+        )
 
     elif slot_key == "state":
         if not target_state:
@@ -2924,50 +3109,18 @@ def compile_sheet_prompt(
         if getattr(character, "front_image_url", None):
             ref_candidates.append(("Card 3 Full Body Front", character.front_image_url))
 
-        if is_stylized:
-            if ref_candidates:
-                positive_prompt = (
-                    f"Clean studio animation character model sheet state portrait of {char_name}, {biometric_profile}, in state {target_state.state_code}. "
-                    "Composed as a single unified character portrait on a single undivided canvas (strictly single frame, zero multi-panel grid, zero collage, zero split screen). "
-                    f"Authentic {style_name} animation visual style with crisp linework and dimensional shading. "
-                    "Strictly preserving character identity and micro-expression baselines from reference images while applying state progression: "
-                    f"Wardrobe: {target_state.wardrobe}. Physical weathering, damage, and wear: {target_state.injuries_and_wear}. "
-                    f"Emotional and psychological expression: {target_state.expression_anchor}. "
-                    "Strictly preserve 2D anime illustration aesthetic with crisp ink lineart, cel-shading, and zero conversion to photorealism or live-action photography. "
-                    "Illuminated by pure neutral studio illumination on a seamless matte neutral gray studio backdrop."
-                )
-            else:
-                positive_prompt = (
-                    f"Clean studio animation character model sheet state portrait of {char_name}, {biometric_profile} in state {target_state.state_code}. "
-                    "Composed as a single unified character portrait on a single undivided canvas (strictly single frame, zero multi-panel grid, zero collage, zero split screen). "
-                    f"Authentic {style_name} animation visual style with crisp linework and dimensional shading. "
-                    f"Wardrobe: {target_state.wardrobe}. Physical weathering, damage, and wear: {target_state.injuries_and_wear}. "
-                    f"Emotional and psychological expression: {target_state.expression_anchor}. "
-                    "Illuminated by pure neutral studio illumination on a seamless matte neutral gray studio backdrop."
-                )
-        else:
-            if ref_candidates:
-                positive_prompt = (
-                    f"Unretouched RAW photographic studio character state portrait of {char_name}, {biometric_profile}, in state {target_state.state_code}. "
-                    "Composed as a single unified full-length/three-quarter photographic studio character portrait on a single undivided canvas (strictly single frame, zero multi-panel grid, zero collage, zero split screen). "
-                    "Strictly capturing the exact same individual from the reference photographs while applying realistic state progression: "
-                    f"Wardrobe: {target_state.wardrobe}. Physical weathering, damage, and wear: {target_state.injuries_and_wear}. "
-                    f"Emotional and psychological expression: {target_state.expression_anchor}. "
-                    "Captured on a medium-format studio camera with an 85mm prime lens at f/5.6, revealing authentic fabric wear, realistic wound detail, and skin texture. "
-                    "Illuminated by balanced, softly diffused 5500K neutral daylight studio softboxes on a seamless matte neutral gray (#D4D4D4) studio sweep backdrop. "
-                    "Indistinguishable from an unedited real production costume test photograph."
-                )
-            else:
-                positive_prompt = (
-                    f"Unretouched RAW photographic studio character state portrait of {char_name}, {biometric_profile} in state {target_state.state_code}. "
-                    "Composed as a single unified full-length/three-quarter photographic studio character portrait on a single undivided canvas (strictly single frame, zero multi-panel grid, zero collage, zero split screen). "
-                    f"Wardrobe: {target_state.wardrobe}. Physical weathering, damage, and wear: {target_state.injuries_and_wear}. "
-                    f"Emotional and psychological expression: {target_state.expression_anchor}. "
-                    f"Captured on a medium-format studio camera with an 85mm prime lens at f/5.6. "
-                    "Illuminated by balanced, softly diffused 5500K neutral daylight studio softboxes on a seamless matte neutral gray (#D4D4D4) studio sweep backdrop."
-                )
+        ref_note = f"Strictly preserving character identity and baseline proportions from the reference {fam_spec['ref_noun']} while applying state progression. " if ref_candidates else ""
+        positive_prompt = (
+            f"{fam_spec['sheet_header']} state portrait of {char_name}, {biometric_profile}, in state {target_state.state_code}. "
+            "Composed as a single unified character portrait on a single undivided canvas (strictly single frame, zero multi-panel grid, zero collage, zero split screen). "
+            f"{ref_note}"
+            f"Wardrobe: {target_state.wardrobe}. Physical weathering, damage, and wear: {target_state.injuries_and_wear}. "
+            f"Emotional and psychological expression: {target_state.expression_anchor}. "
+            f"Rendered in {fam_spec['medium_desc']} ({clean_palette}) via {fam_spec['optics']}, "
+            f"illuminated by {fam_spec['lighting']} against a {fam_spec['backdrop']}."
+        )
 
-    else:  # front fallback
+    else:  # front fallback (Card 3)
         card_title = "Card 3: Full Body (Front View • Orthogonal 0° • Primary Body Anchor)"
         card_aspect = aspect_ratio or "3:4"
         width, height = (768, 1024)
@@ -2975,64 +3128,26 @@ def compile_sheet_prompt(
         if getattr(character, "closeup_image_url", None):
             ref_candidates.append(("Card 1 Character Close-Up", character.closeup_image_url))
 
-        if is_stylized:
-            if ref_candidates:
-                positive_prompt = (
-                    f"Full-length studio animation character model sheet turnaround portrait capturing {char_name}, {biometric_profile}. "
-                    "Capturing the exact same 2D anime character from the reference close-up illustration in a complete head-to-toe standing view. "
-                    "The camera is pulled back at neutral chest height to capture the full standing figure unobstructed from the crown of the hair down to the soles of the footwear touching the ground, "
-                    "with comfortable visible margins above and below. Standing centered upright in a relaxed neutral model sheet A-pose, arms hanging naturally slightly away from the torso, "
-                    "hands open and relaxed, feet planted shoulder-width apart, looking straight ahead at orthogonal 0-degree angle. "
-                    "Strictly preserve identical 2D anime facial geometry, eye shape and color, hair silhouette, lineart weight, and cel-shading aesthetic matching the reference close-up illustration. "
-                    "Strictly 2D anime illustration, zero conversion to photorealism or 3D CGI. "
-                    f"Wearing complete, consistent costume design matching the upper collar seen in the reference image: {full_body_costume}. "
-                    f"Rendered in authentic {style_name} animation style with clean ink lineart, consistent cel-shaded shadows, and balanced animation proportions ({clean_palette}). "
-                    "Evenly illuminated by balanced neutral studio illumination with a soft ground contact shadow directly beneath the footwear on a seamless matte neutral gray studio cyclorama sweep floor. "
-                    "Authentic full-body animation model sheet."
-                )
-            else:
-                positive_prompt = (
-                    f"Clean studio animation character model sheet full-body turnaround portrait of {char_name}, {biometric_profile}. "
-                    f"Authentic {style_name} animation visual style with crisp ink lineart and dimensional cel-shading ({clean_directives}). Full-length direct frontal standing view framed cleanly from top of head to footwear with comfortable margins. "
-                    f"Standing upright in a neutral model sheet A-pose, arms resting slightly away from the torso, hands relaxed, feet shoulder-width apart, looking straight ahead at orthogonal 0-degree angle. "
-                    f"Wearing complete costume design: {full_body_costume}. Clean ink contours and balanced cel-shading ({clean_palette}). "
-                    "Illuminated by balanced neutral studio illumination with soft ground contact shadow on a seamless matte neutral gray studio backdrop."
-                )
-        else:
-            if ref_candidates:
-                positive_prompt = (
-                    f"Full-length distant-framed studio casting photograph capturing {char_name}, {biometric_profile}. "
-                    "Capturing the exact same individual from the reference close-up photograph in a complete head-to-toe standing view. "
-                    "The camera is pulled back at neutral chest height to capture the full standing figure unobstructed from the crown of the hair down to the soles of the footwear touching the ground, "
-                    "with comfortable visible margins above and below. Standing centered upright in a relaxed neutral studio A-pose, arms hanging naturally slightly away from the torso, "
-                    "hands open and relaxed, feet planted shoulder-width apart, looking straight into the lens at orthogonal 0-degree angle. "
-                    "Strictly preserve identical facial bone structure, jawline, eye color, hair silhouette, and skin texture matching the reference close-up photograph. "
-                    f"Wearing complete, consistent costume design matching the upper collar seen in the reference image: {full_body_costume}. "
-                    "Photographed on a medium-format camera with an 85mm prime lens at f/8, delivering distortion-free anatomical proportions and crisp material micro-textures from head to toe. "
-                    "Evenly illuminated by balanced 5500K neutral daylight studio softboxes with soft natural ground contact shadow directly beneath the footwear on a seamless matte neutral gray (#D4D4D4) studio cyclorama sweep floor. "
-                    "Authentic unretouched full-body wardrobe fitting photograph."
-                )
-            else:
-                positive_prompt = (
-                    f"Unretouched RAW photographic full-body studio casting portrait of {char_name}, {biometric_profile}. "
-                    f"Full-length direct frontal standing view framed cleanly from the top of the head all the way down to the soles of the footwear with comfortable margin above the head and below the feet. "
-                    f"Standing upright in a natural, relaxed neutral A-pose with arms resting slightly away from the torso, hands relaxed, feet shoulder-width apart, looking straight into the lens at chest-to-eye level. "
-                    f"Wearing complete costume design: {full_body_costume}. Captured on a medium-format studio camera with an 85mm prime lens at f/8, "
-                    f"delivering distortion-free anatomical proportions and crisp fabric, leather, and material micro-textures from head to toe. "
-                    f"Illuminated by balanced, softly diffused 5500K neutral daylight studio softboxes with soft natural ground contact shadow on a seamless matte neutral gray (#D4D4D4) studio sweep backdrop. "
-                    "Indistinguishable from an unedited real costume-fitting studio photograph."
-                )
+        ref_note = f"Capturing the exact same {fam_spec['ref_noun']} from the reference close-up in a complete head-to-toe standing view. " if ref_candidates else ""
+        pose_phrase = "studio A-pose" if style_family == "photorealistic" else "model sheet A-pose"
+        positive_prompt = (
+            f"Full-body {fam_spec['sheet_header']} full-length turnaround portrait of {char_name}, {biometric_profile}. {ref_note}"
+            "The camera is pulled back at neutral chest height to capture the full standing figure unobstructed from the crown of the hair down to the soles of the footwear touching the ground, "
+            f"with comfortable visible margins above and below. Standing centered upright in a relaxed neutral {pose_phrase}, arms hanging naturally slightly away from the torso, "
+            "hands open and relaxed, feet planted shoulder-width apart, looking straight ahead at orthogonal 0-degree angle. "
+            f"Wearing complete, consistent costume design: {full_body_costume}. "
+            f"Rendered in {fam_spec['medium_desc']} ({clean_palette}) via {fam_spec['optics']}, "
+            f"illuminated by {fam_spec['lighting']} against a {fam_spec['backdrop']} with a soft natural ground contact shadow."
+        )
 
     if prompt_override and prompt_override.strip():
         positive_prompt = prompt_override.strip()
 
-    if is_stylized:
-        inline_guardrail = "[Aesthetic Constraints: Strictly 2D anime cel-shaded illustration. Avoid: photorealism, real human photography, skin pores, realistic wrinkles, 3D CGI render, live-action camera artifacts]"
-        if "Aesthetic Constraints: Strictly 2D anime" not in positive_prompt:
-            positive_prompt = f"{positive_prompt.rstrip('. ')}. {inline_guardrail}"
+    if director_rag_cues and director_rag_cues.strip():
+        positive_prompt = f"{positive_prompt.rstrip('. ')}. Director look-dev style cues: {director_rag_cues.strip()}."
 
-    if positive_prompt:
-        positive_prompt = positive_prompt.replace(" (#D4D4D4)", "").replace("#D4D4D4", "")
+    if fam_spec["inline_guardrail"] and fam_spec["inline_guardrail"] not in positive_prompt:
+        positive_prompt = f"{positive_prompt.rstrip('. ')}. {fam_spec['inline_guardrail']}"
 
     # Build Strict Production Constraints
     if slot_key == "expression":
@@ -3044,11 +3159,10 @@ def compile_sheet_prompt(
     elif slot_key == "closeup":
         strict_constraints = (
             "[Strict Production Constraints: Single unified close-up portrait frame only. Zero grids, zero collages, zero split frames. "
-            "Strictly preserve authentic biometric identity, cranial bone structure, eye shape and color, hair silhouette, and skin texture from visual reference. "
+            "Strictly preserve authentic biometric identity, cranial bone structure, eye shape and color, hair silhouette, and surface texture from visual reference. "
             "Zero text, zero watermarks, zero artifacts.]"
         )
     else:
-        # Cards 3-8 and Dynamic States
         costume_lower = full_body_costume.lower()
         if any(g in costume_lower for g in ("gown", "dress", "hanfu", "cheongsam", "qipao", "robe", "skirt")):
             garment_invariance = "Garment type must remain a gown/dress/robe/skirt matching reference Card 3; DO NOT convert into trousers, pants, or shorts"
@@ -3078,24 +3192,8 @@ def compile_sheet_prompt(
         positive_prompt = f"{positive_prompt.rstrip('. ')}.\n\n{strict_constraints}"
 
     anchors_used = [label for label, u in ref_candidates if u]
-    if is_stylized:
-        negative_prompt = (
-            "photorealism, real human photography, realistic skin texture, skin pores, wrinkles, "
-            "3D CGI render, live-action, camera artifacts, "
-            "text, numbers, captions, labels, watermarks, panel numbering, typography, subtitles, UI overlay, "
-            "colored light spill, colored reflection on chin or neck, blue light spill on chin, blue reflection, "
-            "neon collar glow, colored rim lighting, photographic drift, facial morphing, distorted facial anatomy, "
-            "asymmetrical eyes, missing fingers, extra limbs, blurry textures, pixelated face, low resolution, "
-            "amateur art, inconsistent clothing, plastic skin, 3d doll, oversaturated"
-        )
-    else:
-        negative_prompt = (
-            "text, numbers, captions, labels, watermarks, panel numbering, typography, subtitles, UI overlay, "
-            "colored light spill, colored reflection on chin or neck, blue light spill on chin, blue reflection, "
-            "neon collar glow, colored rim lighting, photographic drift, facial morphing, distorted facial anatomy, "
-            "asymmetrical eyes, missing fingers, extra limbs, blurry textures, pixelated face, low resolution, "
-            "amateur art, inconsistent clothing, CGI render, plastic skin, 3d doll, oversaturated"
-        )
+    sanitized_negs = sanitize_negative_prompts_for_style([fam_spec["base_negative"]], style_code)
+    negative_prompt = ", ".join(sanitized_negs)
 
     copy_ready_text = (
         f"{positive_prompt}\n\n"
@@ -3106,6 +3204,7 @@ def compile_sheet_prompt(
 
     return {
         "slot": slot_key,
+        "style_family": style_family,
         "card_title": card_title,
         "positive_prompt": positive_prompt,
         "negative_prompt": negative_prompt,
@@ -3117,6 +3216,70 @@ def compile_sheet_prompt(
         "width": width,
         "height": height,
     }
+
+
+def _resolve_sheet_override(
+    character: CharacterModel,
+    slot_keys: list[str],
+) -> dict[str, Any]:
+    """Return the first stored per-slot override dict for any of the candidate keys."""
+    overrides = character.sheet_overrides if isinstance(character.sheet_overrides, dict) else {}
+    for key in slot_keys:
+        if not key:
+            continue
+        candidate = overrides.get(key)
+        if isinstance(candidate, dict):
+            return candidate
+    return {}
+
+
+def _apply_sheet_overrides(
+    compiled: dict[str, Any],
+    override: dict[str, Any],
+    style_code: str,
+) -> dict[str, Any]:
+    """Compute compiled vs effective prompts with style-sanitized negative override."""
+    compiled_prompt = compiled.get("positive_prompt", "")
+    compiled_negative = compiled.get("negative_prompt", "")
+
+    prompt_override = str(override.get("prompt_override") or "").strip()
+    negative_override = str(override.get("negative_prompt_override") or "").strip()
+
+    effective_prompt = prompt_override or compiled_prompt
+    if negative_override:
+        sanitized = sanitize_negative_prompts_for_style([negative_override], style_code)
+        effective_negative = ", ".join(sanitized) if sanitized else ""
+    else:
+        effective_negative = compiled_negative
+
+    return {
+        "compiled_prompt": compiled_prompt,
+        "prompt_override": prompt_override or None,
+        "effective_prompt": effective_prompt,
+        "compiled_negative_prompt": compiled_negative,
+        "negative_prompt_override": negative_override or None,
+        "effective_negative_prompt": effective_negative,
+        "has_override": bool(prompt_override or negative_override),
+    }
+
+
+async def _fetch_character_sheet_rag_cues(
+    style_code: str,
+    character_name: str,
+    slot_label: str = "character look-dev portrait",
+) -> str:
+    """Best-effort async Director RAG lookup (1.5s timeout, empty fallback) for character look-dev cues."""
+    try:
+        rag_res = await DirectorRAGClient.retrieve(
+            scene_beat=f"{style_code} {slot_label} for {character_name}",
+            style_code=style_code,
+            engine="flux",
+            top_k=2,
+        )
+        cues_text, _ = DirectorRAGClient.format_transpile_cues(rag_res, max_shots=2)
+        return cues_text[:240].strip() if cues_text else ""
+    except Exception:
+        return ""
 
 
 @router.get("/characters/{character_id}/sheet-prompts", status_code=status.HTTP_200_OK)
@@ -3143,21 +3306,47 @@ async def get_character_sheet_prompts(
     )
     mpb = (await session.execute(mpb_stmt)).scalar_one_or_none()
 
+    active_style_code = (
+        (mpb.style_parameters.get("master_style_code") if mpb and mpb.style_parameters else None)
+        or (proj.target_style_code if proj else None)
+        or "#Style 01"
+    )
+    rag_cues = await _fetch_character_sheet_rag_cues(
+        style_code=active_style_code,
+        character_name=char.name or "Character",
+        slot_label="character sheet turnaround look-dev",
+    )
+
     slots = ["closeup", "expression", "front", "side", "three_quarter", "back", "tpose", "action"]
     prompts_map = {}
     for s in slots:
-        compiled = compile_sheet_prompt(character=char, project=proj, bible=mpb, slot=s)
+        compiled = compile_sheet_prompt(
+            character=char,
+            project=proj,
+            bible=mpb,
+            slot=s,
+            director_rag_cues=rag_cues,
+        )
+        override = _resolve_sheet_override(char, [s])
+        effective = _apply_sheet_overrides(compiled, override, active_style_code)
+        copy_ready = (
+            f"{effective['effective_prompt']}\n\n"
+            f"--negative_prompt: {effective['effective_negative_prompt']}\n"
+            f"--aspect_ratio: {compiled['recommended_aspect_ratio']}\n"
+            f"--seed: {compiled['dna_seed']}"
+        )
         prompts_map[s] = {
             "slot": s,
             "card_title": compiled["card_title"],
-            "positive_prompt": compiled["positive_prompt"],
-            "negative_prompt": compiled["negative_prompt"],
-            "copy_ready_text": compiled["copy_ready_text"],
+            "positive_prompt": effective["effective_prompt"],
+            "negative_prompt": effective["effective_negative_prompt"],
+            "copy_ready_text": copy_ready,
             "recommended_aspect_ratio": compiled["recommended_aspect_ratio"],
             "anchors_used": compiled["anchors_used"],
             "dna_seed": compiled["dna_seed"],
             "width": compiled["width"],
             "height": compiled["height"],
+            **effective,
         }
 
     # Also compile prompts for character dynamic states (#State 01 - #State 05)
@@ -3175,19 +3364,29 @@ async def get_character_sheet_prompts(
             bible=mpb,
             slot="state",
             target_state=st,
+            director_rag_cues=rag_cues,
+        )
+        state_override = _resolve_sheet_override(char, [st.state_code, "state"])
+        state_effective = _apply_sheet_overrides(compiled_st, state_override, active_style_code)
+        state_copy_ready = (
+            f"{state_effective['effective_prompt']}\n\n"
+            f"--negative_prompt: {state_effective['effective_negative_prompt']}\n"
+            f"--aspect_ratio: {compiled_st['recommended_aspect_ratio']}\n"
+            f"--seed: {compiled_st['dna_seed']}"
         )
         states_prompts_map[st.state_code] = {
             "state_id": str(st.id),
             "state_code": st.state_code,
             "card_title": compiled_st["card_title"],
-            "positive_prompt": compiled_st["positive_prompt"],
-            "negative_prompt": compiled_st["negative_prompt"],
-            "copy_ready_text": compiled_st["copy_ready_text"],
+            "positive_prompt": state_effective["effective_prompt"],
+            "negative_prompt": state_effective["effective_negative_prompt"],
+            "copy_ready_text": state_copy_ready,
             "recommended_aspect_ratio": compiled_st["recommended_aspect_ratio"],
             "anchors_used": compiled_st["anchors_used"],
             "dna_seed": compiled_st["dna_seed"],
             "width": compiled_st["width"],
             "height": compiled_st["height"],
+            **state_effective,
         }
 
     return {
@@ -3399,22 +3598,47 @@ async def generate_character_asset(
             raise HTTPException(status_code=404, detail="Character state not found")
 
     slot_to_compile = "state" if payload.target_type == "state" else (payload.angle or "front")
+    active_style_code = (
+        (mpb.style_parameters.get("master_style_code") if mpb and mpb.style_parameters else None)
+        or (proj.target_style_code if proj else None)
+        or "#Style 01"
+    )
+    override_keys = (
+        [target_state.state_code, "state"]
+        if target_state is not None
+        else [slot_to_compile, payload.angle or "front"]
+    )
+    stored_override = _resolve_sheet_override(char, override_keys)
+    has_prompt_override = bool(
+        (payload.prompt_override or "").strip()
+        or str(stored_override.get("prompt_override") or "").strip()
+    )
+    rag_cues = (
+        await _fetch_character_sheet_rag_cues(
+            style_code=active_style_code,
+            character_name=char.name or "Character",
+            slot_label=f"character {slot_to_compile} look-dev",
+        )
+        if not has_prompt_override
+        else ""
+    )
     compiled = compile_sheet_prompt(
         character=char,
         project=proj,
         bible=mpb,
         slot=slot_to_compile,
         target_state=target_state,
-        prompt_override=payload.prompt_override,
         aspect_ratio=payload.aspect_ratio,
+        director_rag_cues=rag_cues,
     )
+    effective = _apply_sheet_overrides(compiled, stored_override, active_style_code)
 
     angle_key = compiled["slot"]
     card_aspect = compiled["recommended_aspect_ratio"]
     width = compiled["width"]
     height = compiled["height"]
-    prompt = compiled["positive_prompt"]
-    negative_prompt = compiled["negative_prompt"]
+    prompt = (payload.prompt_override or "").strip() or effective["effective_prompt"]
+    negative_prompt = effective["effective_negative_prompt"]
     anchors_used = compiled["anchors_used"]
     ref_candidates = compiled["ref_candidates"]
 
@@ -3589,6 +3813,10 @@ async def generate_character_asset(
         "anchors_used": anchors_used,
         "dna_seed": dna_seed,
         "compiled_prompt": prompt,
+        "effective_prompt": prompt,
+        "compiled_negative_prompt": effective["compiled_negative_prompt"],
+        "effective_negative_prompt": negative_prompt,
+        "has_override": effective["has_override"] or bool((payload.prompt_override or "").strip()),
     }
 
 

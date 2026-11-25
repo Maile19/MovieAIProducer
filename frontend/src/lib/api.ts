@@ -135,6 +135,61 @@ export interface RulesGenerationMeta {
   fallback_reason?: string | null;
 }
 
+export interface WorldPropVariation {
+  variation_id: string;
+  label: string;
+  rationale: string;
+  code: string;
+  name: string;
+  lighting_code?: string;
+  visual_description?: string;
+  ambient_foley?: string;
+  dramatic_significance?: string;
+  visual_details?: string;
+}
+
+export interface WorldPropVariationsResponse {
+  status: string;
+  project_id: string;
+  item_type: "environment" | "prop";
+  code: string;
+  data: WorldPropVariation[];
+}
+
+export interface LookDevPaletteToken {
+  role: string;
+  hex: string;
+  name: string;
+}
+
+export interface LookDevPreset {
+  preset_id: string;
+  label: string;
+  mood_rationale: string;
+  palette_tokens: LookDevPaletteToken[];
+  film_stock_or_medium: string;
+  default_lens_code: string;
+  default_light_code: string;
+  aesthetic_directives: string;
+  color_grade_emulation: string;
+  director_rag_cues?: string;
+}
+
+export interface LookDevPresetsResponse {
+  status: string;
+  project_id: string;
+  style_code: string;
+  style_label: string;
+  director_rag_cues: string;
+  count: number;
+  data: LookDevPreset[];
+}
+
+export interface SheetOverrideInput {
+  prompt_override?: string | null;
+  negative_prompt_override?: string | null;
+}
+
 export interface ProjectCreateInput {
   title: string;
   slug?: string;
@@ -364,6 +419,13 @@ export interface SheetPromptItem {
   dna_seed: number;
   width: number;
   height: number;
+  compiled_prompt?: string;
+  prompt_override?: string | null;
+  effective_prompt?: string;
+  compiled_negative_prompt?: string;
+  negative_prompt_override?: string | null;
+  effective_negative_prompt?: string;
+  has_override?: boolean;
 }
 
 export interface CharacterSheetPromptsResponse {
@@ -995,6 +1057,54 @@ export const api = {
       return apiRequest<{ data: MasterProductionBible }>(`/projects/${projectId}/bible/lock`, {
         method: "POST",
         body: JSON.stringify(payload || { approval_notes: "Master DNA Freeze", confirm_dna_freeze: true }),
+      });
+    },
+    generateWorldPropVariations: async (
+      projectId: string,
+      payload: {
+        item_type: "environment" | "prop";
+        code: string;
+        current_item?: Record<string, any> | null;
+        additional_notes?: string | null;
+      }
+    ): Promise<WorldPropVariationsResponse> => {
+      return apiRequest<WorldPropVariationsResponse>(
+        `/projects/${projectId}/bible/world-props/variations`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        }
+      );
+    },
+    lookDevPresets: async (
+      projectId: string,
+      params?: { style_code?: string; include_rag_cues?: boolean }
+    ): Promise<LookDevPresetsResponse> => {
+      const query = new URLSearchParams();
+      if (params?.style_code) query.set("style_code", params.style_code);
+      if (params?.include_rag_cues !== undefined) {
+        query.set("include_rag_cues", String(params.include_rag_cues));
+      }
+      const suffix = query.toString() ? `?${query.toString()}` : "";
+      return apiRequest<LookDevPresetsResponse>(
+        `/projects/${projectId}/bible/look-dev-presets${suffix}`
+      );
+    },
+    saveSheetOverride: async (
+      projectId: string,
+      characterId: string,
+      slotKey: string,
+      payload: SheetOverrideInput
+    ): Promise<{
+      status: string;
+      character_id: string;
+      slot_key: string;
+      has_override: boolean;
+      overrides: Record<string, any>;
+    }> => {
+      return apiRequest(`/projects/${projectId}/characters/${characterId}/sheet-overrides`, {
+        method: "PUT",
+        body: JSON.stringify({ slot_key: slotKey, ...payload }),
       });
     },
     generateWorldProps: async (

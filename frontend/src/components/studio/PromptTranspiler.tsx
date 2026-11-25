@@ -58,7 +58,7 @@ export default function PromptTranspiler({
   isNonVerbal = false,
 }: PromptTranspilerProps) {
   const [selectedEngine, setSelectedEngine] = useState<
-    "veo" | "kling" | "seedance" | "runway" | "sora" | "comfyui" | "9router"
+    "veo" | "kling" | "seedance" | "runway" | "sora" | "comfyui" | "9router" | "flux" | "sd35"
   >("9router");
   const [selected9RouterModel, setSelected9RouterModel] = useState<string>("ag/gemini-3.8-flash");
   const [transpileResult, setTranspileResult] = useState<TranspileResult | null>(null);
@@ -67,6 +67,8 @@ export default function PromptTranspiler({
 
   const engines = [
     { id: "9router", label: "9Router AI", badge: "Multi-Combo" },
+    { id: "flux", label: "FLUX.1 Dev", badge: "Flow" },
+    { id: "sd35", label: "SD 3.5 Large", badge: "HF" },
     { id: "veo", label: "Google Veo / Flow", badge: "Veo 2.0" },
     { id: "kling", label: "Kling 1.5", badge: "Pro" },
     { id: "seedance", label: "Seedance 1.0", badge: "Motion" },

@@ -19,7 +19,13 @@ import {
   ChevronDown,
   ChevronUp,
 } from "lucide-react";
-import { api, EnvironmentItem, PropItem, GenerationMeta } from "@/lib/api";
+import {
+  api,
+  EnvironmentItem,
+  PropItem,
+  GenerationMeta,
+  WorldPropVariation,
+} from "@/lib/api";
 
 interface WorldPropsTabProps {
   worldRules: Record<string, any>;
@@ -53,6 +59,16 @@ export default function WorldPropsTab({
   // Inline edit state for Hero Props
   const [editingPropIdx, setEditingPropIdx] = useState<number | null>(null);
   const [propDraft, setPropDraft] = useState<PropItem | null>(null);
+
+  // Multi-option AI variation state
+  const [variationTarget, setVariationTarget] = useState<{
+    itemType: "environment" | "prop";
+    item: EnvironmentItem | PropItem;
+  } | null>(null);
+  const [variations, setVariations] = useState<WorldPropVariation[]>([]);
+  const [isLoadingVariations, setIsLoadingVariations] = useState<boolean>(false);
+  const [variationError, setVariationError] = useState<string | null>(null);
+  const [applyingVariationId, setApplyingVariationId] = useState<string | null>(null);
 
   const environments: EnvironmentItem[] = Array.isArray(worldRules?.environments)
     ? worldRules.environments
@@ -128,6 +144,69 @@ export default function WorldPropsTab({
     await persistWorldRulesPatch({ props: nextProps });
     setEditingPropIdx(null);
     setPropDraft(null);
+  };
+
+  const openVariations = async (
+    itemType: "environment" | "prop",
+    item: EnvironmentItem | PropItem
+  ) => {
+    if (!projectId || isLocked) return;
+    setVariationTarget({ itemType, item: { ...item } });
+    setVariations([]);
+    setVariationError(null);
+    setIsLoadingVariations(true);
+    try {
+      const res = await api.bible.generateWorldPropVariations(projectId, {
+        item_type: itemType,
+        code: item.code,
+        current_item: item as unknown as Record<string, any>,
+        additional_notes: additionalNotes.trim() || undefined,
+      });
+      setVariations(res.data || []);
+    } catch (err: any) {
+      setVariationError(err?.message || "Failed to generate variations.");
+    } finally {
+      setIsLoadingVariations(false);
+    }
+  };
+
+  const closeVariations = () => {
+    setVariationTarget(null);
+    setVariations([]);
+    setVariationError(null);
+    setApplyingVariationId(null);
+  };
+
+  const handleApplyVariation = async (variation: WorldPropVariation) => {
+    if (!variationTarget) return;
+    setApplyingVariationId(variation.variation_id);
+    const target = variationTarget.item;
+    if (variationTarget.itemType === "environment") {
+      const original = target as EnvironmentItem;
+      const next: EnvironmentItem = {
+        ...original,
+        name: variation.name || original.name,
+        lighting_code: variation.lighting_code || original.lighting_code,
+        architecture: variation.visual_description || original.architecture,
+        atmosphere: variation.rationale || original.atmosphere,
+        lighting_and_audio: variation.ambient_foley || original.lighting_and_audio,
+      };
+      const idx = environments.findIndex((e) => e.code === original.code);
+      const nextEnvs = environments.map((e, i) => (i === idx ? next : e));
+      await persistWorldRulesPatch({ environments: nextEnvs });
+    } else {
+      const original = target as PropItem;
+      const next: PropItem = {
+        ...original,
+        name: variation.name || original.name,
+        material_and_wear: variation.visual_details || original.material_and_wear,
+        narrative_utility: variation.dramatic_significance || original.narrative_utility,
+      };
+      const idx = propsList.findIndex((p) => p.code === original.code);
+      const nextProps = propsList.map((p, i) => (i === idx ? next : p));
+      await persistWorldRulesPatch({ props: nextProps });
+    }
+    closeVariations();
   };
 
   return (
@@ -433,14 +512,24 @@ export default function WorldPropsTab({
                             {env.name}
                           </span>
                           {!isLocked && (
-                            <button
-                              type="button"
-                              onClick={() => { setEditingEnvIdx(idx); setEnvDraft({ ...env }); }}
-                              className="p-1 rounded text-obsidian-muted hover:text-amber-400 shrink-0"
-                              title="Edit Environment"
-                            >
-                              <Edit3 className="w-3 h-3" />
-                            </button>
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => openVariations("environment", env)}
+                                className="p-1 rounded text-obsidian-muted hover:text-amber-400 shrink-0"
+                                title="Generate 3 AI Variations"
+                              >
+                                <Sparkles className="w-3 h-3" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => { setEditingEnvIdx(idx); setEnvDraft({ ...env }); }}
+                                className="p-1 rounded text-obsidian-muted hover:text-amber-400 shrink-0"
+                                title="Edit Environment"
+                              >
+                                <Edit3 className="w-3 h-3" />
+                              </button>
+                            </>
                           )}
                         </div>
                       </div>
@@ -569,14 +658,24 @@ export default function WorldPropsTab({
                             {prp.name}
                           </span>
                           {!isLocked && (
-                            <button
-                              type="button"
-                              onClick={() => { setEditingPropIdx(idx); setPropDraft({ ...prp }); }}
-                              className="p-1 rounded text-obsidian-muted hover:text-amber-400 shrink-0"
-                              title="Edit Prop"
-                            >
-                              <Edit3 className="w-3 h-3" />
-                            </button>
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => openVariations("prop", prp)}
+                                className="p-1 rounded text-obsidian-muted hover:text-amber-400 shrink-0"
+                                title="Generate 3 AI Variations"
+                              >
+                                <Sparkles className="w-3 h-3" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => { setEditingPropIdx(idx); setPropDraft({ ...prp }); }}
+                                className="p-1 rounded text-obsidian-muted hover:text-amber-400 shrink-0"
+                                title="Edit Prop"
+                              >
+                                <Edit3 className="w-3 h-3" />
+                              </button>
+                            </>
                           )}
                         </div>
                       </div>
@@ -616,6 +715,129 @@ export default function WorldPropsTab({
           </div>
         </div>
       )}
+
+      {/* Multi-Option AI Variations Modal */}
+      {variationTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-5xl max-h-[90vh] overflow-y-auto rounded-xl bg-panel border border-border p-5 space-y-4 shadow-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="font-cinzel text-sm font-bold uppercase tracking-wider text-obsidian-primary flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-amber-500" />
+                  <span>
+                    3 AI Variations — {variationTarget.item.code}
+                  </span>
+                </h3>
+                <p className="text-xs font-mono text-obsidian-muted mt-1">
+                  {variationTarget.itemType === "environment" ? "Environment" : "Hero Prop"}:{" "}
+                  {variationTarget.item.name}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeVariations}
+                className="p-1.5 rounded-lg bg-canvas border border-border text-obsidian-muted hover:text-obsidian-primary"
+                title="Close"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {isLoadingVariations && (
+              <div className="flex items-center justify-center gap-2 py-10 text-xs font-mono text-obsidian-muted">
+                <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
+                <span>Polya AI Director is drafting three distinct options...</span>
+              </div>
+            )}
+
+            {variationError && (
+              <div className="p-3 rounded-lg bg-canvas border border-rose-500/30 text-xs font-mono text-rose-400 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{variationError}</span>
+              </div>
+            )}
+
+            {!isLoadingVariations && !variationError && (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                {variations.map((variation) => (
+                  <div
+                    key={variation.variation_id}
+                    className="flex flex-col p-3.5 rounded-xl bg-canvas border border-border hover:border-amber-500/40 transition-all space-y-2 font-mono text-xs"
+                  >
+                    <div className="flex items-center justify-between gap-2 border-b border-border/80 pb-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wide text-amber-400">
+                        {variation.label}
+                      </span>
+                      {variationTypeBadge(variation, variationTarget.itemType)}
+                    </div>
+                    <div className="text-sm font-bold text-obsidian-primary font-sans">
+                      {variation.name}
+                    </div>
+                    <p className="text-[11px] text-obsidian-secondary leading-relaxed font-sans">
+                      {variation.rationale}
+                    </p>
+                    {variationTarget.itemType === "environment" ? (
+                      <>
+                        <VariationField label="Visual Description" value={variation.visual_description} tone="obsidian" />
+                        <VariationField label="Lighting Code" value={variation.lighting_code} tone="blue" />
+                        <VariationField label="Ambient Foley" value={variation.ambient_foley} tone="obsidian" />
+                      </>
+                    ) : (
+                      <>
+                        <VariationField label="Dramatic Significance" value={variation.dramatic_significance} tone="emerald" />
+                        <VariationField label="Visual Details" value={variation.visual_details} tone="obsidian" />
+                      </>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => handleApplyVariation(variation)}
+                      disabled={applyingVariationId !== null}
+                      className="mt-auto flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-canvas font-bold text-[11px] transition-all disabled:opacity-50"
+                    >
+                      {applyingVariationId === variation.variation_id ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Check className="w-3 h-3" />
+                      )}
+                      <span>Apply this option</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+function VariationField({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value?: string;
+  tone: "obsidian" | "blue" | "emerald";
+}) {
+  if (!value) return null;
+  const toneClass =
+    tone === "blue" ? "text-blue-400" : tone === "emerald" ? "text-emerald-400" : "text-obsidian-muted";
+  return (
+    <div className="space-y-0.5">
+      <span className={`text-[9px] uppercase font-bold ${toneClass}`}>{label}:</span>
+      <p className="text-[10px] text-obsidian-secondary leading-relaxed font-sans">{value}</p>
+    </div>
+  );
+}
+
+function variationTypeBadge(variation: WorldPropVariation, itemType: "environment" | "prop") {
+  const code = itemType === "environment" ? variation.lighting_code : variation.code;
+  if (!code) return null;
+  return (
+    <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20 text-amber-400 font-bold shrink-0">
+      {code}
+    </span>
   );
 }

@@ -2,10 +2,14 @@ from collections.abc import Generator
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
+import shutil
+import tempfile
 import uuid
 
-# HARD-GUARD: Force test database path before settings or FastAPI app initialization
-TEST_DB_PATH = Path("./data/test_movieai.db").resolve()
+# HARD-GUARD: Force test database path before settings or FastAPI app initialization.
+# Use an isolated OS temp directory so the suite never leaves .db artifacts in the repo.
+TEST_DB_DIR = Path(tempfile.mkdtemp(prefix="movieai-pytest-"))
+TEST_DB_PATH = TEST_DB_DIR / "test_movieai.db"
 os.environ["DATABASE_PATH"] = str(TEST_DB_PATH)
 
 from fastapi.testclient import TestClient
@@ -52,6 +56,10 @@ def guard_test_db():
     import backend.app.infrastructure.database.models  # noqa: F401
 
     engine = create_engine(f"sqlite:///{TEST_DB_PATH}")
+    with engine.connect() as conn:
+        conn.execute(text("PRAGMA journal_mode=WAL;"))
+        conn.execute(text("PRAGMA busy_timeout=5000;"))
+        conn.commit()
     Base.metadata.create_all(engine)
 
     # Seed system preset for preset/pipeline tests
@@ -82,10 +90,10 @@ def guard_test_db():
 
     yield
 
-    # Clean up test database after session
-    if TEST_DB_PATH.exists():
+    # Clean up isolated test database directory after session
+    if TEST_DB_DIR.exists():
         try:
-            TEST_DB_PATH.unlink()
+            shutil.rmtree(TEST_DB_DIR, ignore_errors=True)
         except Exception:
             pass
 

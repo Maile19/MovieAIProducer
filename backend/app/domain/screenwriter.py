@@ -17,13 +17,13 @@ import os
 import random
 import re
 import time
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, Field, field_validator
 
 from backend.app.core.config import get_settings
-from backend.app.domain.catalog import LIGHTING_MATRIX, STYLE_CATALOG
+from backend.app.domain.catalog import LIGHTING_MATRIX, STYLE_CATALOG, validate_matrix_code
 from backend.app.domain.director_rag import DirectorRAGClient
 from backend.app.services.screenwriter_rag import ScreenwriterRAGClient
 
@@ -51,8 +51,9 @@ STYLE_TAXONOMY_FAMILIES: dict[str, dict[str, Any]] = {
         "name": "Stylized 3D & 2.5D Animation",
         "style_codes": ["#Style 06", "#Style 09", "#Style 10", "#Style 11"],
         "forbidden_negative_tokens": [
-            "cartoonish 3d", "cartoonish 3d render", "3d render", "cgi render", "stylized 3d",
-            "3d animation", "pixar", "dreamworks", "arcane", "hextech", "subsurface scattering",
+            "cartoonish 3d", "cartoonish 3d render", "3d render look", "3d render", "cgi render",
+            "stylized 3d", "3d animation", "3d cartoon", "cartoon", "illustration", "anime",
+            "pixar", "dreamworks", "arcane", "hextech", "subsurface scattering",
             "cgi", "computer graphics", "3d model", "animation",
         ],
     },
@@ -62,6 +63,7 @@ STYLE_TAXONOMY_FAMILIES: dict[str, dict[str, Any]] = {
         "forbidden_negative_tokens": [
             "clay textures", "clay", "plasticine", "stop-motion", "stop motion", "miniature",
             "armature", "fingerprint", "felt", "puppet", "hand-crafted miniature", "stepped motion",
+            "cartoon", "illustration", "3d cartoon", "anime", "3d render look",
         ],
     },
     "anime_2d": {
@@ -71,6 +73,7 @@ STYLE_TAXONOMY_FAMILIES: dict[str, dict[str, Any]] = {
             "anime cel shading", "anime", "cel shading", "cel-shading", "hand-drawn",
             "2d animation", "line art", "manga", "watercolor", "ghibli", "graphic novel",
             "sketch", "comic book art", "2d", "ink wash", "ink line art",
+            "cartoon", "illustration",
         ],
     },
 }
@@ -105,6 +108,8 @@ def sanitize_negative_prompts_for_style(
             has_conflict = False
             for fb in forbidden:
                 if fb in t_lower:
+                    if family == "anime_2d" and fb == "cartoon" and "3d" in t_lower:
+                        continue
                     has_conflict = True
                     break
             if not has_conflict:
@@ -1105,6 +1110,268 @@ OUTPUT SCHEMA (Return strictly this JSON object):
         expected_role = current_role if preserve_role else "SUPPORTING"
         return self._normalize_single_character(raw_json, context, default_role=expected_role)
 
+    async def generate_world_prop_variations(
+        self,
+        context: ProjectNarrativeContext,
+        item_type: Literal["environment", "prop"],
+        code: str,
+        current_item: dict[str, Any] | None = None,
+        additional_notes: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Generate 3 distinct selectable variations for a single environment or prop.
+
+        Uses the Polya AI Director RAG bridge (8765, strict 1.5s timeout) for cinematic
+        grounding, then the Screenwriter LLM for creative divergence. Any RAG/LLM failure
+        degrades gracefully to a style-family-aware procedural 3-variation fallback so the
+        endpoint always returns exactly 3 selectable options.
+        """
+        resolved_type: Literal["environment", "prop"] = (
+            "prop" if str(item_type).lower().strip() == "prop" else "environment"
+        )
+        default_code = "#Env 01" if resolved_type == "environment" else "#Prop 01"
+        resolved_code = (code or default_code).strip() or default_code
+        item = dict(current_item or {})
+        item_name = str(item.get("name") or "").strip()
+
+        rag_result = await DirectorRAGClient.retrieve(
+            scene_beat=(
+                f"{context.title} {resolved_type} variation for {resolved_code}"
+                f"{f' ({item_name})' if item_name else ''}: {additional_notes or context.genre_tone}"
+            ),
+            style_code=context.master_style_code,
+            engine="9router",
+            top_k=3,
+        )
+        rag_blocks = [
+            str(rag_result.get("director_context") or "").strip()[:700],
+            DirectorRAGClient.format_treatment_grammar(rag_result),
+            DirectorRAGClient.format_act_context(rag_result),
+        ]
+        rag_block = "\n".join(b for b in rag_blocks if b).strip()
+
+        fallback = self._procedural_world_prop_variations(
+            context=context,
+            item_type=resolved_type,
+            code=resolved_code,
+            current_item=item,
+        )
+
+        labels = [
+            ("Atmospheric / Moody", "atmospheric_moody"),
+            ("Architectural / Grand Scale", "architectural_grand_scale"),
+            ("Tactile / Intimate Detail", "tactile_intimate_detail"),
+        ]
+
+        if resolved_type == "environment":
+            schema_block = """Each variation MUST contain:
+- code: the exact provided environment code
+- name: evocative, distinct environment name
+- lighting_code: canonical '#Light 01'..'#Light 14'
+- visual_description: architecture, spatial scale, materials, atmosphere, airborne particles
+- ambient_foley: room tone, reverb, spatial Foley bed
+- label: the variation label provided
+- rationale: one sentence explaining the dramatic intent"""
+        else:
+            schema_block = """Each variation MUST contain:
+- code: the exact provided prop code
+- name: distinct, story-critical hero prop name
+- dramatic_significance: exact narrative function across the arc
+- visual_details: materials, craftsmanship, wear, patina, tactile interaction
+- label: the variation label provided
+- rationale: one sentence explaining the dramatic intent"""
+
+        user_prompt = f"""SINGLE-ITEM VARIATION BRIEF (Polya AI Director)
+- Project: {context.title}
+- Synopsis: {context.synopsis[:600]}
+- Genre / Tone: {context.genre_tone}
+- Master Style: {context.master_style_code} ({context.style_name})
+- Aesthetic Directives: {context.aesthetic_directives}
+- Color Grade Emulation: {context.color_grade_emulation}
+- World Setting: {context.world_setting}
+- Item Type: {resolved_type}
+- Item Code: {resolved_code}
+- Current Saved Item (JSON): {json.dumps(item, ensure_ascii=False)[:900] if item else "None"}
+- Showrunner Notes: {additional_notes or "None"}
+
+{rag_block}
+
+Produce exactly THREE distinct selectable variations, each following one creative axis:
+1. Atmospheric / Moody — weather, haze, emotional temperature, dramatic shadows.
+2. Architectural / Grand Scale — monumental geometry, scale, spatial drama.
+3. Tactile / Intimate Detail — materiality, wear, close-up textures, human-scale detail.
+
+{schema_block}
+
+OUTPUT SCHEMA (STRICT valid JSON only):
+{{
+  "variations": [
+    {{"label": "Atmospheric / Moody", "variation_id": "v1", "rationale": "..." }},
+    {{"label": "Architectural / Grand Scale", "variation_id": "v2", "rationale": "..." }},
+    {{"label": "Tactile / Intimate Detail", "variation_id": "v3", "rationale": "..." }}
+  ]
+}}"""
+
+        messages = [
+            {"role": "system", "content": POLYA_AI_DIRECTOR_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        try:
+            raw_json = await self._call_llm(messages)
+            raw_variations = raw_json.get("variations") if isinstance(raw_json, dict) else None
+            if not isinstance(raw_variations, list):
+                raw_variations = []
+        except Exception as exc:
+            logger.warning(
+                "Polya AI Director variation LLM failed (%s). Using style-family procedural fallback.",
+                exc,
+            )
+            raw_variations = []
+
+        normalized: list[dict[str, Any]] = []
+        for idx, (label, slug) in enumerate(labels):
+            raw_item = raw_variations[idx] if idx < len(raw_variations) and isinstance(raw_variations[idx], dict) else {}
+            fallback_item = fallback[idx]
+            variation_id = f"{resolved_code.lower().replace(' ', '_').replace('#', '')}_{slug}"
+
+            if resolved_type == "environment":
+                raw_light = str(raw_item.get("lighting_code") or "").strip()
+                try:
+                    valid_light = validate_matrix_code("light", raw_light) or fallback_item["lighting_code"]
+                except ValueError:
+                    valid_light = fallback_item["lighting_code"]
+                normalized.append({
+                    "variation_id": variation_id,
+                    "label": label,
+                    "rationale": str(raw_item.get("rationale") or fallback_item["rationale"]).strip(),
+                    "code": resolved_code,
+                    "name": str(raw_item.get("name") or fallback_item["name"]).strip(),
+                    "lighting_code": valid_light,
+                    "visual_description": str(
+                        raw_item.get("visual_description") or fallback_item["visual_description"]
+                    ).strip(),
+                    "ambient_foley": str(raw_item.get("ambient_foley") or fallback_item["ambient_foley"]).strip(),
+                })
+            else:
+                normalized.append({
+                    "variation_id": variation_id,
+                    "label": label,
+                    "rationale": str(raw_item.get("rationale") or fallback_item["rationale"]).strip(),
+                    "code": resolved_code,
+                    "name": str(raw_item.get("name") or fallback_item["name"]).strip(),
+                    "dramatic_significance": str(
+                        raw_item.get("dramatic_significance") or fallback_item["dramatic_significance"]
+                    ).strip(),
+                    "visual_details": str(
+                        raw_item.get("visual_details") or fallback_item["visual_details"]
+                    ).strip(),
+                })
+
+        return normalized
+
+    def _procedural_world_prop_variations(
+        self,
+        context: ProjectNarrativeContext,
+        item_type: Literal["environment", "prop"],
+        code: str,
+        current_item: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Style-family-aware deterministic 3-variation fallback used when RAG/LLM is unavailable."""
+        item = current_item or {}
+        family = get_style_family(context.master_style_code)
+        base_name = str(item.get("name") or "").strip()
+        style_label = context.style_name or context.master_style_code
+
+        family_textures: dict[str, str] = {
+            "photorealistic": "practical cinematic materials, physically accurate specular response, authentic set-dressing wear",
+            "stylized_3d": "stylized sculpted geometry, ray-traced global illumination, exaggerated tactile material response",
+            "stop_motion": "handcrafted miniature materials, visible fingerprint textures, articulated puppet-scale construction",
+            "anime_2d": "hand-painted cel textures, graphic line-art contours, layered atmospheric matte painting",
+        }
+        texture = family_textures.get(family, family_textures["photorealistic"])
+        light_codes: dict[str, list[str]] = {
+            "photorealistic": ["#Light 01", "#Light 04", "#Light 05"],
+            "stylized_3d": ["#Light 06", "#Light 10", "#Light 12"],
+            "stop_motion": ["#Light 05", "#Light 13", "#Light 07"],
+            "anime_2d": ["#Light 02", "#Light 06", "#Light 04"],
+        }
+        lights = light_codes.get(family, light_codes["photorealistic"])
+
+        if item_type == "environment":
+            architecture = str(item.get("architecture") or "").strip()
+            atmosphere = str(item.get("atmosphere") or "").strip()
+            audio = str(item.get("audio") or item.get("lighting_and_audio") or "").strip()
+            root = base_name or f"{context.world_setting or 'Cinematic'} Location"
+            return [
+                {
+                    "rationale": f"Leans into atmosphere and emotional temperature for {style_label}.",
+                    "name": f"{root} — Atmospheric Approach",
+                    "lighting_code": lights[0],
+                    "visual_description": (
+                        f"{atmosphere or 'Dense atmospheric perspective, suspended particulates, shifting weather'} "
+                        f"Grounding the location in {texture}."
+                    ),
+                    "ambient_foley": audio or "Low ambient wind bed, distant spatial reverb, fine particulate hiss.",
+                },
+                {
+                    "rationale": f"Emphasizes monumental architecture and spatial drama for {style_label}.",
+                    "name": f"{root} — Grand Architectural Elevation",
+                    "lighting_code": lights[1],
+                    "visual_description": (
+                        f"{architecture or 'Monumental structural geometry, deep forced perspective, imposing vertical scale'} "
+                        f"Executed with {texture}."
+                    ),
+                    "ambient_foley": "Cavernous room tone, long tail reverb, structural creaks and low-frequency rumble.",
+                },
+                {
+                    "rationale": f"Focuses on intimate material detail and tactile close-up texture for {style_label}.",
+                    "name": f"{root} — Intimate Tactile Detail",
+                    "lighting_code": lights[2],
+                    "visual_description": (
+                        f"Macro-level surface detail: {texture}, weathered edges, hand-worn contact points and micro-grain."
+                    ),
+                    "ambient_foley": "Close-perspective Foley, fabric rustle, granular surface contact, intimate breath-level room tone.",
+                },
+            ]
+
+        material = str(
+            item.get("material_and_wear") or item.get("material") or item.get("description") or ""
+        ).strip()
+        significance = str(
+            item.get("narrative_utility") or item.get("weight") or ""
+        ).strip()
+        action = str(item.get("action") or "").strip()
+        root_prop = base_name or f"Signature {code} Artifact"
+        return [
+            {
+                "rationale": f"Frames the prop as an emotionally charged atmospheric relic in {style_label}.",
+                "name": f"{root_prop} — Weathered Relic",
+                "dramatic_significance": significance or "Carries the emotional history of the world; a quiet witness to loss and resolve.",
+                "visual_details": (
+                    f"{material or 'Deep patina, oxidized edges, accumulated grime'} "
+                    f"with {texture}; {action or 'handled with reverent weight'}."
+                ),
+            },
+            {
+                "rationale": f"Elevates the prop into a monumental ceremonial centerpiece for {style_label}.",
+                "name": f"{root_prop} — Ceremonial Centerpiece",
+                "dramatic_significance": significance or "A public symbol of authority and destiny, displayed before crowds and rivals.",
+                "visual_details": (
+                    f"Overscaled ceremonial construction, engraved iconography, polished focal surfaces; "
+                    f"{material or 'inlaid metal and carved stone'} rendered with {texture}."
+                ),
+            },
+            {
+                "rationale": f"Grounds the prop in intimate human tactility and close-up physical detail for {style_label}.",
+                "name": f"{root_prop} — Intimate Tactile Detail",
+                "dramatic_significance": significance or "Reveals character through touch: grip wear, nervous handling, personal inscription.",
+                "visual_details": (
+                    f"Macro detail of grip wear, fingerprint polish, repaired fractures and personal inscriptions; "
+                    f"{material or 'worn organic and forged surfaces'} finished with {texture}."
+                ),
+            },
+        ]
+
     # --------------------------------------------------------------------------
     # Normalizers & Guardrails
     # --------------------------------------------------------------------------
@@ -1678,6 +1945,16 @@ OUTPUT SCHEMA (Return strictly this JSON object):
             for l in LIGHTING_MATRIX
         )
 
+        # Retrieve Visual Grammar & Lighting Spec
+        rag_result = await DirectorRAGClient.retrieve(
+            scene_beat=f"{context.title} world-building: {context.synopsis[:100]}",
+            style_code=context.master_style_code,
+            engine="9router",
+            top_k=3
+        )
+        visual_grammar = DirectorRAGClient.format_treatment_grammar(rag_result)
+        lighting_spec = DirectorRAGClient.format_act_context(rag_result)
+
         user_prompt = f"""PROJECT PRODUCTION BIBLE & NARRATIVE CONTEXT:
 - Film Title: {context.title}
 - Core Synopsis & Premise:
@@ -1692,6 +1969,9 @@ OUTPUT SCHEMA (Return strictly this JSON object):
 - World Setting: {context.world_setting}
 - Production Continuity Rules: {', '.join(context.continuity_rules) if context.continuity_rules else 'Standard Cinematic Rules'}
 - Additional Showrunner Notes: {additional_notes or 'None'}
+
+{visual_grammar}
+{lighting_spec}
 
 REGISTERED CHARACTER CAST ({len(context.cast_characters)} Characters):
 {cast_str}
@@ -2340,6 +2620,16 @@ OUTPUT SCHEMA (Return STRICT valid JSON only):
             )
         props_str = "\n".join(prop_lines) if prop_lines else (f"- Hero Props Summary: {context.props_summary}" if context.props_summary else "No registered hero props yet.")
 
+        # Retrieve Visual Grammar & Lighting Spec
+        rag_result = await DirectorRAGClient.retrieve(
+            scene_beat=f"{context.title} continuity: {context.synopsis[:100]}",
+            style_code=context.master_style_code,
+            engine="9router",
+            top_k=3
+        )
+        visual_grammar = DirectorRAGClient.format_treatment_grammar(rag_result)
+        lighting_spec = DirectorRAGClient.format_act_context(rag_result)
+
         user_prompt = f"""PROJECT PRODUCTION BIBLE & NARRATIVE CONTEXT:
 - Film Title: {context.title}
 - Core Synopsis & Premise:
@@ -2353,6 +2643,9 @@ OUTPUT SCHEMA (Return STRICT valid JSON only):
 {dna_str}
 - World Setting: {context.world_setting}
 - Additional Showrunner Notes: {additional_notes or 'None'}
+
+{visual_grammar}
+{lighting_spec}
 
 REGISTERED CHARACTER CAST ({len(context.cast_characters)} Characters):
 {cast_str}

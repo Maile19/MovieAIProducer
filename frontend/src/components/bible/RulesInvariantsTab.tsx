@@ -21,6 +21,73 @@ import {
 } from "lucide-react";
 import { api, RulesGenerationMeta } from "@/lib/api";
 
+interface RulesPresetPack {
+  id: string;
+  name: string;
+  description: string;
+  laws: string[];
+  negatives: string[];
+}
+
+const RULES_PRESET_PACKS: RulesPresetPack[] = [
+  {
+    id: "axis_eyeline",
+    name: "180° Axis & Eyeline Discipline",
+    description: "Protects spatial orientation and eyeline truth across every cut.",
+    laws: [
+      "Maintain the 180-degree rule: the camera never crosses the action axis within a continuous scene.",
+      "Eyelines must match the established screen direction and horizon height across all reverse angles.",
+      "Screen direction of travel is preserved between shots unless an on-screen turn motivates the change.",
+    ],
+    negatives: [
+      "crossing the line, flipped screen direction, mismatched eyelines",
+      "mirrored faces, flipped text or signage, teleporting props between cuts",
+    ],
+  },
+  {
+    id: "biometric_wardrobe",
+    name: "Biometric & Wardrobe Lock",
+    description: "Locks facial identity, hair, scars, and costume state to the character DNA.",
+    laws: [
+      "Facial structure, eye color, hairline, and signature scars remain identical in every shot and state.",
+      "Wardrobe, accessories, and damage state follow the approved #State progression without unexplained changes.",
+      "Left/right asymmetric features stay on the correct side in all mirrored or profile framing.",
+    ],
+    negatives: [
+      "changing eye color, morphing facial structure, inconsistent hairstyle",
+      "costume color drift, disappearing accessories, extra or missing fingers",
+    ],
+  },
+  {
+    id: "optical_film",
+    name: "Optical Physics & Film Emulation",
+    description: "Holds lens character, grain, halation, and grade consistent with the Look-Dev preset.",
+    laws: [
+      "Lens focal length and distortion characteristics stay consistent within each scene block.",
+      "Film grain, halation, and highlight rolloff match the approved Look-Dev preset.",
+      "Color temperature and grade remain locked to the master palette unless motivated by a lighting change.",
+    ],
+    negatives: [
+      "digital over-sharpening, plastic AI skin, waxy texture, excessive HDR",
+      "inconsistent grain, mismatched halation, sudden color shift, warped perspective",
+    ],
+  },
+  {
+    id: "world_prop_physics",
+    name: "World Physics & Prop Continuity",
+    description: "Enforces prop state, motivated light, weather, and period accuracy.",
+    laws: [
+      "Hero prop condition, wear, and ownership state carry forward exactly between scenes.",
+      "Every key light source is motivated by an on-set practical or established celestial source.",
+      "Weather, time of day, and environmental particulate continuity persist across adjacent scenes.",
+    ],
+    negatives: [
+      "anachronistic modern objects, floating or duplicated props, unmotivated light sources",
+      "weather discontinuity, sudden set-dressing changes, physically impossible reflections",
+    ],
+  },
+];
+
 interface RulesInvariantsTabProps {
   worldRules: Record<string, any>;
   isLocked?: boolean;
@@ -146,6 +213,25 @@ export default function RulesInvariantsTab({
   const handleRemoveNegative = (index: number) => {
     if (isLocked) return;
     setPromptNegatives((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const mergeUnique = (existing: string[], additions: string[]) => {
+    const seen = new Set(existing.map((item) => item.trim().toLowerCase()));
+    const merged = [...existing];
+    additions.forEach((item) => {
+      const key = item.trim().toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        merged.push(item);
+      }
+    });
+    return merged;
+  };
+
+  const handleApplyPresetPack = (pack: RulesPresetPack) => {
+    if (isLocked) return;
+    setContinuityLaws((prev) => mergeUnique(prev, pack.laws));
+    setPromptNegatives((prev) => mergeUnique(prev, pack.negatives));
   };
 
   // Refinement 2: Instant React State Synchronization from POST response
@@ -326,6 +412,51 @@ export default function RulesInvariantsTab({
         <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs flex items-center gap-2 font-mono">
           <AlertCircle className="w-4 h-4 shrink-0" />
           <span className="break-words leading-relaxed">{errorMsg}</span>
+        </div>
+      )}
+
+      {/* =========================================================================
+       * Preset Packs: One-Click Rule & Negative Bundles
+       * ========================================================================= */}
+      {!isLocked && (
+        <div className="p-4 rounded-xl bg-panel border border-border space-y-3">
+          <div className="flex items-center justify-between">
+            <label className="font-cinzel text-xs font-bold uppercase tracking-wider text-obsidian-primary flex items-center gap-1.5">
+              <Layers className="w-4 h-4 text-amber-400" />
+              <span>Continuity Preset Packs</span>
+            </label>
+            <span className="text-[10px] font-mono text-obsidian-muted">
+              Merges into current rules (no overwrite)
+            </span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+            {RULES_PRESET_PACKS.map((pack) => (
+              <button
+                key={pack.id}
+                type="button"
+                onClick={() => handleApplyPresetPack(pack)}
+                className="text-left p-3 rounded-lg bg-canvas border border-border hover:border-amber-500/40 transition-all space-y-1.5"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-cinzel text-[11px] font-bold text-obsidian-primary">
+                    {pack.name}
+                  </span>
+                  <Plus className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                </div>
+                <p className="text-[10px] font-mono text-obsidian-muted leading-relaxed">
+                  {pack.description}
+                </p>
+                <div className="flex flex-wrap gap-1 pt-0.5">
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-bold">
+                    +{pack.laws.length} laws
+                  </span>
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-rose-500/10 border border-rose-500/20 text-rose-400 font-bold">
+                    +{pack.negatives.length} exclusions
+                  </span>
+                </div>
+              </button>
+            ))}
+          </div>
         </div>
       )}
 

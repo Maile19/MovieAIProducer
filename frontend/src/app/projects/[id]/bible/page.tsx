@@ -352,6 +352,7 @@ export default function ProductionBiblePage() {
         <div>
           {activeTab === "visual_dna" && (
             <VisualDnaTab
+              projectId={projectId}
               styleParameters={bible?.style_parameters || {}}
               isLocked={isLocked}
               onSave={handleSaveStyleParameters}

@@ -29,6 +29,8 @@ import {
   XCircle,
   ShieldCheck,
   ShieldAlert,
+  RotateCcw,
+  AlertCircle,
 } from "lucide-react";
 import { Character, SheetPromptItem, Project, api, FlowProxyStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -359,6 +361,15 @@ export default function CharacterMatrixTab({
   const [activePromptModalSlot, setActivePromptModalSlot] = useState<string | null>(null);
   const [copiedPromptSlot, setCopiedPromptSlot] = useState<string | null>(null);
   const [copiedModalField, setCopiedModalField] = useState<string | null>(null);
+
+  // Editable per-slot prompt overrides
+  const [isEditingSlotPrompt, setIsEditingSlotPrompt] = useState(false);
+  const [promptDraft, setPromptDraft] = useState<{ positive: string; negative: string }>({
+    positive: "",
+    negative: "",
+  });
+  const [isSavingPromptOverride, setIsSavingPromptOverride] = useState(false);
+  const [promptOverrideError, setPromptOverrideError] = useState<string | null>(null);
 
   // Per-slot upload states
   const [uploadingSlots, setUploadingSlots] = useState<Record<string, boolean>>({});
@@ -1169,6 +1180,60 @@ export default function CharacterMatrixTab({
       setIsLoadingPrompts(false);
     }
   }, []);
+
+  const openPromptModal = (slot: string) => {
+    setActivePromptModalSlot(slot);
+    setIsEditingSlotPrompt(false);
+    setPromptOverrideError(null);
+    setPromptDraft({ positive: "", negative: "" });
+  };
+
+  const beginPromptEdit = (slot: string) => {
+    const item = sheetPrompts[slot];
+    setPromptDraft({
+      positive: item?.effective_prompt || item?.positive_prompt || "",
+      negative: item?.effective_negative_prompt || item?.negative_prompt || "",
+    });
+    setPromptOverrideError(null);
+    setIsEditingSlotPrompt(true);
+  };
+
+  const handleSavePromptOverride = async (slot: string) => {
+    if (!projectId || !selectedChar?.id) return;
+    setIsSavingPromptOverride(true);
+    setPromptOverrideError(null);
+    try {
+      await api.bible.saveSheetOverride(projectId, selectedChar.id, slot, {
+        prompt_override: promptDraft.positive.trim() || null,
+        negative_prompt_override: promptDraft.negative.trim() || null,
+      });
+      await fetchPrompts(selectedChar.id);
+      setIsEditingSlotPrompt(false);
+    } catch (err: any) {
+      setPromptOverrideError(err?.message || "Failed to save prompt override.");
+    } finally {
+      setIsSavingPromptOverride(false);
+    }
+  };
+
+  const handleClearPromptOverride = async (slot: string) => {
+    if (!projectId || !selectedChar?.id) return;
+    setIsSavingPromptOverride(true);
+    setPromptOverrideError(null);
+    try {
+      await api.bible.saveSheetOverride(projectId, selectedChar.id, slot, {
+        prompt_override: null,
+        negative_prompt_override: null,
+      });
+      await fetchPrompts(selectedChar.id);
+      setIsEditingSlotPrompt(false);
+      setPromptDraft({ positive: "", negative: "" });
+    } catch (err: any) {
+      setPromptOverrideError(err?.message || "Failed to clear prompt override.");
+    } finally {
+      setIsSavingPromptOverride(false);
+    }
+  };
 
   // In-flight active jobs rehydration on mount / character switch
   const rehydrateInFlightJobs = useCallback(
@@ -2319,7 +2384,7 @@ export default function CharacterMatrixTab({
 
             <button
               type="button"
-              onClick={() => setActivePromptModalSlot(cfg.slot)}
+              onClick={() => openPromptModal(cfg.slot)}
               className="py-1.5 px-1.5 rounded-lg bg-black/40 hover:bg-black/70 border border-border/80 hover:border-amber-500/40 text-obsidian-secondary hover:text-amber-400 font-semibold flex items-center justify-center gap-1 transition-colors"
               title="View full prompt breakdown, aspect ratio & camera directives"
             >
@@ -3122,7 +3187,7 @@ export default function CharacterMatrixTab({
                       </span>
                       <button
                         type="button"
-                        onClick={() => setActivePromptModalSlot(st.state_code)}
+                        onClick={() => openPromptModal(st.state_code)}
                         className="p-1 rounded hover:bg-elevated text-obsidian-muted hover:text-amber-400 transition-colors"
                         title={`Lihat master prompt & directives untuk ${st.state_code}`}
                       >
@@ -4290,8 +4355,42 @@ export default function CharacterMatrixTab({
                   {copiedModalField === "neg" ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                   <span>{copiedModalField === "neg" ? "Copied ✓" : "Negative Only"}</span>
                 </button>
+                {!isLocked && !isEditingSlotPrompt && (
+                  <button
+                    type="button"
+                    onClick={() => beginPromptEdit(activePromptModalSlot)}
+                    className="px-2.5 py-1 rounded-lg bg-canvas hover:bg-elevated border border-amber-500/40 text-amber-400 text-xs flex items-center gap-1.5 transition-colors"
+                  >
+                    <Edit className="w-3.5 h-3.5" />
+                    <span>{sheetPrompts[activePromptModalSlot]?.has_override ? "Edit Override" : "Customize Prompt"}</span>
+                  </button>
+                )}
+                {!isLocked && sheetPrompts[activePromptModalSlot]?.has_override && (
+                  <button
+                    type="button"
+                    onClick={() => handleClearPromptOverride(activePromptModalSlot)}
+                    disabled={isSavingPromptOverride}
+                    className="px-2.5 py-1 rounded-lg bg-canvas hover:bg-elevated border border-border text-obsidian-muted hover:text-rose-400 text-xs flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Reset</span>
+                  </button>
+                )}
               </div>
             </div>
+
+            {sheetPrompts[activePromptModalSlot]?.has_override && (
+              <div className="px-3 py-1.5 bg-amber-500/10 border-b border-amber-500/30 text-[10px] font-mono text-amber-300">
+                Custom prompt override active for this slot. Reset to restore the compiled master prompt.
+              </div>
+            )}
+
+            {promptOverrideError && (
+              <div className="px-3 py-1.5 bg-rose-500/10 border-b border-rose-500/30 text-[10px] font-mono text-rose-400 flex items-center gap-1.5">
+                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                <span>{promptOverrideError}</span>
+              </div>
+            )}
 
             {/* Scrollable Modal Content */}
             <div className="p-4 space-y-4 overflow-y-auto max-h-[calc(90vh-140px)] scrollbar-thin">
@@ -4306,26 +4405,78 @@ export default function CharacterMatrixTab({
                   <div className="space-y-1.5">
                     <div className="flex items-center justify-between">
                       <label className="text-[10px] text-amber-400 font-bold uppercase tracking-wider">
-                        Positive Master Prompt (Project-Synced &amp; DNA Seed Locked)
+                        {isEditingSlotPrompt ? "Positive Prompt Override" : "Positive Master Prompt (Project-Synced & DNA Seed Locked)"}
                       </label>
                       <span className="text-[10px] text-obsidian-muted">
-                        {sheetPrompts[activePromptModalSlot]?.positive_prompt?.length || 0} chars
+                        {isEditingSlotPrompt
+                          ? `${promptDraft.positive.length} chars`
+                          : `${sheetPrompts[activePromptModalSlot]?.positive_prompt?.length || 0} chars`}
                       </span>
                     </div>
-                    <div className="p-3 rounded-xl bg-canvas border border-border text-obsidian-primary text-[11px] leading-relaxed whitespace-pre-wrap select-all font-mono">
-                      {sheetPrompts[activePromptModalSlot]?.positive_prompt || "Generating prompt..."}
-                    </div>
+                    {isEditingSlotPrompt ? (
+                      <textarea
+                        value={promptDraft.positive}
+                        onChange={(e) => setPromptDraft((prev) => ({ ...prev, positive: e.target.value }))}
+                        rows={10}
+                        className="w-full p-3 rounded-xl bg-canvas border border-amber-500/40 text-obsidian-primary text-[11px] leading-relaxed font-mono focus:border-amber-500 focus:outline-none resize-y"
+                      />
+                    ) : (
+                      <div className="p-3 rounded-xl bg-canvas border border-border text-obsidian-primary text-[11px] leading-relaxed whitespace-pre-wrap select-all font-mono">
+                        {sheetPrompts[activePromptModalSlot]?.effective_prompt ||
+                          sheetPrompts[activePromptModalSlot]?.positive_prompt ||
+                          "Generating prompt..."}
+                      </div>
+                    )}
                   </div>
 
                   {/* Negative Prompt */}
                   <div className="space-y-1.5">
                     <label className="text-[10px] text-rose-400 font-bold uppercase tracking-wider">
-                      Negative Prompt
+                      {isEditingSlotPrompt ? "Negative Prompt Override" : "Negative Prompt"}
                     </label>
-                    <div className="p-2.5 rounded-xl bg-canvas border border-border text-obsidian-secondary text-[11px] leading-relaxed whitespace-pre-wrap select-all font-mono">
-                      {sheetPrompts[activePromptModalSlot]?.negative_prompt}
-                    </div>
+                    {isEditingSlotPrompt ? (
+                      <textarea
+                        value={promptDraft.negative}
+                        onChange={(e) => setPromptDraft((prev) => ({ ...prev, negative: e.target.value }))}
+                        rows={4}
+                        className="w-full p-2.5 rounded-xl bg-canvas border border-rose-500/40 text-obsidian-secondary text-[11px] leading-relaxed font-mono focus:border-rose-500 focus:outline-none resize-y"
+                      />
+                    ) : (
+                      <div className="p-2.5 rounded-xl bg-canvas border border-border text-obsidian-secondary text-[11px] leading-relaxed whitespace-pre-wrap select-all font-mono">
+                        {sheetPrompts[activePromptModalSlot]?.effective_negative_prompt ||
+                          sheetPrompts[activePromptModalSlot]?.negative_prompt}
+                      </div>
+                    )}
                   </div>
+
+                  {isEditingSlotPrompt && (
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsEditingSlotPrompt(false);
+                          setPromptOverrideError(null);
+                        }}
+                        disabled={isSavingPromptOverride}
+                        className="px-3 py-1.5 rounded-lg bg-canvas border border-border text-obsidian-muted hover:text-obsidian-primary text-xs font-bold disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSavePromptOverride(activePromptModalSlot)}
+                        disabled={isSavingPromptOverride}
+                        className="px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-canvas text-xs font-bold flex items-center gap-1.5 disabled:opacity-50"
+                      >
+                        {isSavingPromptOverride ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Check className="w-3.5 h-3.5" />
+                        )}
+                        <span>Save Override</span>
+                      </button>
+                    </div>
+                  )}
 
                   {/* Technical Specifications */}
                   <div className="p-3 rounded-xl bg-canvas border border-border grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">

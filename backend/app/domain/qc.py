@@ -49,6 +49,8 @@ class QCEvaluationEngine:
 
     @staticmethod
     def audit_scene(
+        # Flag temporal jitter: #Speed 04/05 or #Cam 22/25/26
+        # Flag face consistency: #Cam 08/09/16
         scene: Any,
         shots: list[Any],
         characters: list[Any] | None = None,

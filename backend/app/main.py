@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -18,6 +19,32 @@ from backend.app.infrastructure.database import (
     create_session_factory,
     dispose_database_engine,
 )
+from backend.app.infrastructure.database.base import Base
+import backend.app.infrastructure.database.models  # noqa: F401  (register ORM metadata)
+
+
+def _ensure_sqlite_schema_sync(connection) -> None:
+    """Create missing tables and idempotently add late-added columns on existing SQLite DBs.
+
+    This guard is strictly additive: it never drops or truncates tables/data. It protects
+    older production databases from ORM failures when a new mapped column (e.g.
+    ``CharacterModel.sheet_overrides``) was added without a prior migration.
+    """
+    Base.metadata.create_all(connection)
+
+    inspector = sa_inspect(connection)
+    if "characters" not in inspector.get_table_names():
+        return
+
+    columns = {col["name"] for col in inspector.get_columns("characters")}
+    if "sheet_overrides" not in columns:
+        connection.execute(
+            text(
+                "ALTER TABLE characters "
+                "ADD COLUMN sheet_overrides JSON NOT NULL DEFAULT '{}'"
+            )
+        )
+
 
 def create_app() -> FastAPI:
     settings = get_settings()
@@ -48,6 +75,11 @@ def create_app() -> FastAPI:
         # Bootstrap and verify database connectivity using active engine
         async with db_engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
+
+        # Additive schema guard for existing SQLite databases (never wipes data).
+        if "sqlite" in settings.async_database_url:
+            async with db_engine.begin() as connection:
+                await connection.run_sync(_ensure_sqlite_schema_sync)
 
         logger.info(
             "application_started",

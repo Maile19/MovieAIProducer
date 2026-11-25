@@ -3,12 +3,13 @@ from typing import Any
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.deps import get_current_user, get_session
+from backend.app.domain.catalog import validate_matrix_code
 from backend.app.infrastructure.database.models.auth import UserModel
 from backend.app.infrastructure.database.models.story import SceneModel, ShotModel
 
@@ -34,6 +35,21 @@ class ShotCreateRequest(BaseModel):
     transition_type: str = Field(default="NONE", description="NONE, J_CUT, L_CUT, HARD_CUT")
     status: str = Field(default="PLANNED", description="PLANNED, COMPILED, GENERATING, APPROVED")
 
+    @field_validator(
+        "camera_code",
+        "lens_code",
+        "comp_code",
+        "light_code",
+        "act_code",
+        "speed_code",
+        "composition_code",
+        "lighting_code",
+        "action_code",
+    )
+    @classmethod
+    def _validate_shot_matrix_codes(cls, value: str | None, info: ValidationInfo) -> str | None:
+        return validate_matrix_code(info.field_name or "", value)
+
 
 class ShotUpdateRequest(BaseModel):
     shot_number: int | None = None
@@ -54,6 +70,21 @@ class ShotUpdateRequest(BaseModel):
     status: str | None = None
     custom_background: str | None = None
     reset_background_override: bool | None = None
+
+    @field_validator(
+        "camera_code",
+        "lens_code",
+        "comp_code",
+        "light_code",
+        "act_code",
+        "speed_code",
+        "composition_code",
+        "lighting_code",
+        "action_code",
+    )
+    @classmethod
+    def _validate_shot_update_matrix_codes(cls, value: str | None, info: ValidationInfo) -> str | None:
+        return validate_matrix_code(info.field_name or "", value)
 
 
 class SetCustomBackgroundRequest(BaseModel):

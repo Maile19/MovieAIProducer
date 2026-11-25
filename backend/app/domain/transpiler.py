@@ -1,8 +1,8 @@
 """Live Prompt Transpiler for Generative Cinematic Engines.
 
 Translates Hollywood 12-Step creative matrices and MPB DNA variables into
-precise, platform-optimized prompt specifications for Google Veo, Kling AI,
-Runway Gen-3, OpenAI Sora, and local ComfyUI.
+style-family-safe, spec-hydrated prompt specifications for Google Veo, Flow,
+Kling AI, Seedance, Runway Gen-3, OpenAI Sora, 9Router, FLUX.1, SD 3.5, and ComfyUI.
 """
 
 import asyncio
@@ -18,15 +18,69 @@ from backend.app.domain.catalog import (
     STYLE_CATALOG,
 )
 from backend.app.domain.director_rag import DirectorRAGClient
+from backend.app.domain.screenwriter import (
+    get_style_family,
+    sanitize_negative_prompts_for_style,
+)
 from backend.app.services.screenwriter_rag import ScreenwriterRAGClient
+
+
+def _lookup_item(catalog: list[dict[str, str]], code: str) -> dict[str, str]:
+    """Return matching matrix entry dict or empty dict."""
+    for item in catalog:
+        if item.get("code") == code:
+            return item
+    return {}
 
 
 def _lookup_name(catalog: list[dict[str, str]], code: str) -> str:
     """Helper to lookup name or designation from code."""
-    for item in catalog:
-        if item.get("code") == code:
-            return item.get("name") or item.get("cue") or code
-    return code
+    item = _lookup_item(catalog, code)
+    return item.get("name") or item.get("cue") or code
+
+
+def _style_medium_tags(
+    style_family: str,
+    style_name: str,
+    aesthetic_directives: str,
+    color_grade_emulation: str,
+) -> dict[str, str]:
+    """Build style-family-authentic lead and finish phrases without cross-medium conflicts."""
+    details = "; ".join(b for b in (aesthetic_directives.strip(), color_grade_emulation.strip()) if b)
+    detail_suffix = f" ({details})" if details else ""
+
+    if style_family == "anime_2d":
+        return {
+            "lead_still": "2D animated cinema keyframe",
+            "lead_photo": f"2D animated illustration in {style_name} style",
+            "finish_film": f"2D {style_name} production cel aesthetic, crisp linework{detail_suffix}",
+            "finish_texture": f"hand-crafted 2D animation surface fidelity, clean ink and color{detail_suffix}",
+            "finish_kling": f"crisp 2D animation linework, luminous cel shading, authentic {style_name} palette",
+        }
+    if style_family == "stylized_3d":
+        return {
+            "lead_still": "Stylized 3D animated cinema keyframe",
+            "lead_photo": f"Stylized 3D animated render in {style_name} style",
+            "finish_film": f"Stylized 3D {style_name} feature production rendering, clean global illumination{detail_suffix}",
+            "finish_texture": f"sculpted stylized 3D PBR shading, cohesive volumetric lighting{detail_suffix}",
+            "finish_kling": f"hyper-detailed stylized 3D surface shaders, raytraced highlights, {style_name} color harmony",
+        }
+    if style_family == "stop_motion":
+        return {
+            "lead_still": "Handcrafted stop-motion miniature keyframe",
+            "lead_photo": f"Stop-motion miniature studio capture in {style_name} style",
+            "finish_film": f"Tactile {style_name} plasticine and miniature stage production, stepped 12fps charm{detail_suffix}",
+            "finish_texture": f"authentic handmade clay, felt, and miniature wood textures, macro stage depth{detail_suffix}",
+            "finish_kling": f"tactile handcrafted miniature materiality, physical stage spotlights, {style_name} palette",
+        }
+
+    return {
+        "lead_still": "Cinematic keyframe film still",
+        "lead_photo": "Cinematic photograph",
+        "finish_film": "35mm motion picture film stock, anamorphic bokeh, photorealistic, 8k uhd, master color grade",
+        "finish_texture": "Photorealistic textures, natural skin details, volumetric lighting, award-winning cinematography",
+        "finish_kling": "8k resolution, authentic surface textures, raytraced reflections, professional color grading",
+    }
 
 
 class LivePromptTranspiler:
@@ -74,13 +128,45 @@ class LivePromptTranspiler:
             or preset_cfg.get("world_rules", {}).get("visual_non_verbal_mode", {}).get("enabled", False)
         )
 
-        style_name = _lookup_name(STYLE_CATALOG, style_code)
+        style_item = _lookup_item(STYLE_CATALOG, style_code)
+        style_name = style_item.get("name") or style_code
+        style_family = str(style_item.get("family") or get_style_family(style_code) or "photorealistic")
+
+        eff_aesthetic = aesthetic_directives.strip() or str(style_item.get("aesthetic_directives") or "").strip()
+        eff_color_grade = color_grade_emulation.strip() or str(style_item.get("color_grade_emulation") or "").strip()
+        if style_family != "photorealistic":
+            eff_aesthetic = (
+                eff_aesthetic.replace("photorealistic god rays", "luminous atmospheric god rays")
+                .replace("photorealistic", "stylized luminous")
+                .replace("Photorealistic", "Stylized luminous")
+            )
+
         camera_name = _lookup_name(CAMERA_MATRIX, camera_code)
-        lens_name = _lookup_name(LENS_MATRIX, lens_code)
+        lens_item = _lookup_item(LENS_MATRIX, lens_code)
+        lens_name = lens_item.get("name") or lens_code
+        lens_physics = (lens_item.get("optical_physics") or "").strip()
+        lens_field = (lens_item.get("visual_field") or "").strip()
+
         comp_name = _lookup_name(COMPOSITION_MATRIX, comp_code)
-        light_name = _lookup_name(LIGHTING_MATRIX, light_code)
-        act_name = _lookup_name(ACTING_MATRIX, act_code)
+
+        light_item = _lookup_item(LIGHTING_MATRIX, light_code)
+        light_name = light_item.get("name") or light_code
+        light_specs = (light_item.get("technical_specifications") or "").strip()
+
+        act_item = _lookup_item(ACTING_MATRIX, act_code)
+        act_name = act_item.get("cue") or act_item.get("name") or act_code
+        act_micro = (act_item.get("micro_expressions") or "").strip()
+
         speed_name = _lookup_name(SPEED_MATRIX, speed_code)
+
+        # Full 7-layer technical spec hydration
+        lens_spec_bits = [b for b in (lens_physics, lens_field) if b]
+        lens_spec = f"{lens_name} ({lens_code}; {' '.join(lens_spec_bits[:1])})" if lens_spec_bits else f"{lens_name} ({lens_code})"
+        if lens_field and lens_field not in lens_spec:
+            lens_spec = f"{lens_spec.rstrip(')')}; {lens_field})"
+
+        light_spec = f"{light_name} ({light_code}; {light_specs})" if light_specs else f"{light_name} ({light_code})"
+        act_spec = f"{act_name} — {act_micro}" if act_micro else act_name
 
         char_label = character_name.strip()
         base_char = character_dna.strip()
@@ -100,15 +186,19 @@ class LivePromptTranspiler:
             char_part += f", expression/emotion: {emotional_anchor}"
         if state_code:
             char_part += f" ({state_code})"
+        # Always hydrate somatic ACTING_MATRIX cues when a valid act_code is supplied
+        if act_item:
+            char_part += f", somatic performance: {act_spec}"
 
         beat_parts = [p.strip() for p in (slugline, narrative_goal, action_description) if p and p.strip()]
-        action_part = "; ".join(beat_parts) if beat_parts else f"performing with {act_name}"
+        action_part = "; ".join(beat_parts) if beat_parts else f"performing with {act_spec}"
         if non_verbal and "slapstick" not in action_part.lower():
             action_part += " (expressive non-verbal physical staging)"
 
         env_part = env_dna or (slugline.strip() if slugline.strip() else "cinematic environment")
-        style_detail_bits = [b for b in (aesthetic_directives.strip(), color_grade_emulation.strip()) if b]
+        style_detail_bits = [b for b in (eff_aesthetic, eff_color_grade) if b]
         style_suffix = f" ({'; '.join(style_detail_bits)})" if style_detail_bits else ""
+        medium = _style_medium_tags(style_family, style_name, eff_aesthetic, eff_color_grade)
 
         fg_bg_parts = []
         if fg_description:
@@ -125,16 +215,20 @@ class LivePromptTranspiler:
             effective_transition = transition_type
 
         if target in ("veo", "google_veo", "google_flow", "flow"):
-            # Google Veo / Google Flow: Rich descriptive cinematic phrasing
+            cadence_tail = (
+                "Ultra-high definition, cohesive film grain, 24fps master print."
+                if style_family == "photorealistic"
+                else f"Master production fidelity, {medium['finish_texture']}."
+            )
             positive = (
                 f"Cinematic movie shot in {aspect_ratio}. "
-                f"Camera: {camera_name} ({camera_code}), {lens_name} ({lens_code}), composition: {comp_name} ({comp_code}). "
+                f"Camera: {camera_name} ({camera_code}), {lens_spec}, composition: {comp_name} ({comp_code}). "
                 f"Subject: {char_part}, {action_part}. "
                 f"Environment: {env_part}. "
-                f"Lighting: {light_name} ({light_code}). "
+                f"Lighting: {light_spec}. "
                 f"Motion dynamics: {speed_name} ({speed_code}), {fg_bg_text}. "
                 f"Visual Style: {style_name} ({style_code}){style_suffix}. "
-                f"Ultra-high definition, cohesive film grain, 24fps master print."
+                f"{cadence_tail}"
             )
             negative = (
                 "low quality, blurry, distorted hands, extra limbs, watermark, "
@@ -145,22 +239,21 @@ class LivePromptTranspiler:
         elif target in ("seedance", "seedance_1.0", "bytedance_seedance"):
             positive = (
                 f"Seedance motion sequence ({aspect_ratio}, 24fps): {style_name} ({style_code}){style_suffix}. "
-                f"Camera blocking: {camera_name}, {lens_name}, {comp_name}. "
+                f"Camera blocking: {camera_name}, {lens_spec}, {comp_name}. "
                 f"Character continuity: {char_part}. Action beat: {action_part}. "
-                f"Setting: {env_part}. Illumination: {light_name}. Tempo: {speed_name}. {fg_bg_text}."
+                f"Setting: {env_part}. Illumination: {light_spec}. Tempo: {speed_name}. {fg_bg_text}."
             )
             negative = "flicker, identity drift, warped limbs, blurry motion, watermark, text"
             engine = "seedance_1.0_pro"
 
         elif target in ("kling", "kling_ai", "kling_1.5", "kling_2.0"):
-            # Kling AI: Emphasizes photorealism, physical dynamics, and clear styling
             positive = (
                 f"Masterpiece cinematic capture, {style_name} ({style_code}){style_suffix}. "
-                f"{camera_name}, {lens_name}, {comp_name}. "
+                f"{camera_name}, {lens_spec}, {comp_name}. "
                 f"{char_part}, {action_part}. "
-                f"Set in {env_part}, lit by {light_name}. "
+                f"Set in {env_part}, lit by {light_spec}. "
                 f"{speed_name} speed profile. {fg_bg_text}. "
-                f"8k resolution, authentic surface textures, raytraced reflections, professional color grading."
+                f"{medium['finish_kling']}."
             )
             negative = (
                 "deformed, blurry, low resolution, overexposed, bad anatomy, "
@@ -169,17 +262,21 @@ class LivePromptTranspiler:
             engine = "kling_v1.5_pro"
 
         elif target in ("runway", "runway_gen3", "gen3"):
-            # Runway Gen-3 Alpha: Directorial structured tags
+            runway_tail = (
+                "Seamless continuous motion, cinematic Hollywood grading, award-winning cinematography."
+                if style_family == "photorealistic"
+                else f"Seamless continuous motion, {medium['finish_texture']}."
+            )
             positive = (
                 f"[Camera Movement]: {camera_name}. "
-                f"[Lens & Composition]: {lens_name}, {comp_name}. "
+                f"[Lens & Composition]: {lens_spec}, {comp_name}. "
                 f"[Subject]: {char_part}. "
                 f"[Action]: {action_part}. "
-                f"[Lighting]: {light_name}. "
+                f"[Lighting]: {light_spec}. "
                 f"[Environment]: {env_part}. "
                 f"[Layers & Motion]: {speed_name}, {fg_bg_text}. "
-                f"[Aesthetic Style]: {style_name}. "
-                f"Seamless continuous motion, cinematic Hollywood grading, award-winning cinematography."
+                f"[Aesthetic Style]: {style_name}{style_suffix}. "
+                f"{runway_tail}"
             )
             negative = (
                 "distorted, flickering frames, low fidelity, static poses, artificial gloss, "
@@ -188,14 +285,13 @@ class LivePromptTranspiler:
             engine = "runway_gen3_alpha"
 
         elif target in ("sora", "openai_sora"):
-            # OpenAI Sora: Literary cinematography and spatial awareness
             positive = (
                 f"Cinematic video in {aspect_ratio} widescreen. "
-                f"Captured on {lens_name} with {camera_name}, utilizing {comp_name}. "
+                f"Captured on {lens_spec} with {camera_name}, utilizing {comp_name}. "
                 f"Inside {env_part}, {char_part} {action_part}. "
-                f"Atmospheric illumination created by {light_name}. "
+                f"Atmospheric illumination created by {light_spec}. "
                 f"Depth is articulated with {fg_bg_text}, paced at {speed_name}. "
-                f"Art direction governed by {style_name} with organic lens flare and tactile world fidelity."
+                f"Art direction governed by {style_name}{style_suffix} with cohesive world fidelity."
             )
             negative = (
                 "blurry, rubbery bodies, morphing architecture, unnatural gravity, "
@@ -204,20 +300,21 @@ class LivePromptTranspiler:
             engine = "openai_sora_v1"
 
         elif target in ("9router", "nine_router", "9router_ai", "gemini_image", "multimodel"):
-            # 9Router Multi-Model Combo Target: High prompt adherence for multimodal and image generation
             positive = (
-                f"Cinematic keyframe film still in {aspect_ratio} aspect ratio. "
-                f"Visual Style: {style_name} ({style_code}). "
-                f"Optics: {lens_name} ({lens_code}) paired with {camera_name} ({camera_code}), framed in {comp_name} ({comp_code}). "
+                f"{medium['lead_still']} in {aspect_ratio} aspect ratio. "
+                f"Visual Style: {style_name} ({style_code}){style_suffix}. "
+                f"Optics: {lens_spec} paired with {camera_name} ({camera_code}), framed in {comp_name} ({comp_code}). "
                 f"Subject: {char_part}, {action_part}. "
                 f"Scene Environment: {env_part}. "
-                f"Lighting Setup: {light_name} ({light_code}). "
+                f"Lighting Setup: {light_spec}. "
                 f"Spatial Dynamics: {speed_name} ({speed_code}), {fg_bg_text}. "
-                f"35mm motion picture film stock, anamorphic bokeh, photorealistic, 8k uhd, master color grade."
+                f"{medium['finish_film']}."
             )
             negative = (
                 "blurry, low quality, oversaturated, deformed anatomy, extra limbs, bad eyes, "
-                "CGI render artifacts, plastic skin, 3d cartoon, text, watermark, signature, cropped"
+                "CGI render artifacts, plastic skin, "
+                f"{'3d cartoon, ' if style_family == 'photorealistic' else ''}"
+                "text, watermark, signature, cropped"
             )
             if model and model.strip():
                 clean_model = model.strip().replace("/", "_").replace("-", "_").replace(".", "_")
@@ -226,11 +323,16 @@ class LivePromptTranspiler:
                 engine = "9router_multimodel_v1"
 
         elif target in ("sd35", "sd35_large", "huggingface", "sd35_large_hf"):
-            # Hugging Face Stable Diffusion 3.5 Large
+            sd_lead = "cinematic film still" if style_family == "photorealistic" else medium["lead_still"].lower()
+            sd_tail = (
+                "35mm film grain, masterpiece, 8k uhd, photorealistic, cinematic composition"
+                if style_family == "photorealistic"
+                else f"masterpiece, {medium['finish_film']}, balanced composition"
+            )
             positive = (
-                f"cinematic film still, {style_name}, shot on {lens_name}, {camera_name}, {comp_name}, "
-                f"{char_part}, {action_part}, {env_part}, dramatic {light_name}, "
-                f"{fg_bg_text}, 35mm film grain, masterpiece, 8k uhd, photorealistic, cinematic composition"
+                f"{sd_lead}, {style_name}{style_suffix}, {lens_spec}, {camera_name}, {comp_name}, "
+                f"{char_part}, {action_part}, {env_part}, dramatic {light_spec}, "
+                f"{fg_bg_text}, {sd_tail}"
             )
             negative = (
                 "blurry, distorted, oversaturated, deformed, bad anatomy, lowres, text, watermark, "
@@ -239,13 +341,12 @@ class LivePromptTranspiler:
             engine = "sd35_large_hf"
 
         elif target in ("flux", "flux_dev", "flux_schnell"):
-            # FLUX.1 Flow Transformer
             positive = (
-                f"Cinematic photograph, {aspect_ratio}. {style_name}. "
+                f"{medium['lead_photo']}, {aspect_ratio}. {style_name}{style_suffix}. "
                 f"{char_part}, {action_part}. Setting: {env_part}. "
-                f"Lighting: {light_name}. Shot on {lens_name}, {camera_name}. "
+                f"Lighting: {light_spec}. Optics: {lens_spec}, {camera_name}. "
                 f"Composition: {comp_name}. {fg_bg_text}. "
-                f"Photorealistic textures, natural skin details, volumetric lighting, award-winning cinematography."
+                f"{medium['finish_texture']}."
             )
             negative = (
                 "ugly, deformed, noisy, blurry, distorted, out of focus, low quality"
@@ -253,11 +354,15 @@ class LivePromptTranspiler:
             engine = "flux.1_dev"
 
         else:
-            # Default / ComfyUI / Local reference
+            comfy_tail = (
+                "masterpiece, 8k uhd, photorealistic, cinematic lighting"
+                if style_family == "photorealistic"
+                else f"masterpiece, {medium['finish_texture']}"
+            )
             positive = (
-                f"cinematic shot, {style_name}, {camera_name}, {lens_name}, {comp_name}, "
-                f"{char_part}, {action_part}, {env_part}, {light_name}, {speed_name}, "
-                f"{fg_bg_text}, masterpiece, 8k uhd, photorealistic, cinematic lighting"
+                f"cinematic shot, {style_name}{style_suffix}, {camera_name}, {lens_spec}, {comp_name}, "
+                f"{char_part}, {action_part}, {env_part}, {light_spec}, {speed_name}, "
+                f"{fg_bg_text}, {comfy_tail}"
             )
             negative = (
                 "lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, "
@@ -265,7 +370,7 @@ class LivePromptTranspiler:
             )
             engine = "comfyui_wan2.1_t2v_14b"
 
-        # Invalidate/enrich with preset modifiers if provided
+        # Enrich with preset modifiers if provided
         pos_mod = preset_cfg.get("positive_prompt_modifiers", "")
         neg_add = preset_cfg.get("negative_prompt_additions", "")
 
@@ -274,7 +379,6 @@ class LivePromptTranspiler:
         if neg_add and neg_add not in negative:
             negative = f"{negative}, {neg_add}"
 
-        # Cleanly read project negative_prompts / prompt_negatives if passed
         proj_negs = (
             preset_cfg.get("negative_prompts")
             or preset_cfg.get("prompt_negatives")
@@ -288,6 +392,18 @@ class LivePromptTranspiler:
                 proj_neg_str = str(proj_negs).strip()
             if proj_neg_str and proj_neg_str not in negative:
                 negative = f"{negative}, {proj_neg_str}" if negative else proj_neg_str
+
+        family_neg_exclusions = {
+            "anime_2d": "photorealistic, live-action, RAW photo, skin pores, real-world film still, 3d CGI render",
+            "stylized_3d": "photorealistic, live-action, RAW photo, DSLR skin pores, real-world film still",
+            "stop_motion": "photorealistic, live-action, RAW photo, DSLR skin pores, smooth glossy 3d CGI",
+        }.get(style_family, "")
+        if family_neg_exclusions and family_neg_exclusions not in negative:
+            negative = f"{negative}, {family_neg_exclusions}" if negative else family_neg_exclusions
+
+        # Sanitize EVERY engine negative prompt via the 4-family style taxonomy
+        sanitized_negs = sanitize_negative_prompts_for_style([negative], style_code)
+        negative = ", ".join(sanitized_negs)
 
         norm_transition = (effective_transition or "NONE").upper().strip()
         raw_transition = (transition_type or "NONE").upper().strip()
@@ -317,6 +433,7 @@ class LivePromptTranspiler:
 
         metadata = {
             "target_engine": engine,
+            "style_family": style_family,
             "aspect_ratio": aspect_ratio,
             "model": model,
             "selected_model": model,
@@ -465,6 +582,7 @@ class LivePromptTranspiler:
         base["metadata"]["screenwriter_cues"] = sw_cues_text or None
         base["metadata"]["continuity_sources"] = {
             "style_code": style_code,
+            "style_family": base["metadata"]["style_family"],
             "character_name": character_name or None,
             "state_code": state_code,
             "has_character_dna": bool(character_dna.strip()),
@@ -474,7 +592,18 @@ class LivePromptTranspiler:
         }
 
         compiled_engines: dict[str, dict[str, str]] = {}
-        for eng_key in ("google_flow", "veo", "kling", "seedance", "runway", "sora", "comfyui", "9router"):
+        for eng_key in (
+            "google_flow",
+            "veo",
+            "kling",
+            "seedance",
+            "runway",
+            "sora",
+            "comfyui",
+            "9router",
+            "flux",
+            "sd35",
+        ):
             eng_res = LivePromptTranspiler.transpile(
                 provider_target=eng_key,
                 style_code=style_code,

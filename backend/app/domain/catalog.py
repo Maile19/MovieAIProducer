@@ -10,108 +10,126 @@ STYLE_CATALOG: list[dict[str, str]] = [
     {
         "code": "#Style 01",
         "name": "Transformers / Michael Bay",
+        "family": "photorealistic",
         "aesthetic_directives": "High-contrast anamorphic flare, metallic sheen, low-angle hero rotation, saturated golden hour, debris-laden air.",
         "color_grade_emulation": "Teal and orange color grade, Kodak 5219 film stock, heavy tungsten edge lighting.",
     },
     {
         "code": "#Style 02",
         "name": "Hollywood IMAX 70mm",
+        "family": "photorealistic",
         "aesthetic_directives": "Pristine ultra-high resolution, deep dynamic range, lifelike skin pores, massive spatial depth, crisp shadow detail.",
         "color_grade_emulation": "Naturalistic color timing, 65mm sensor reproduction, zero artificial vignette.",
     },
     {
         "code": "#Style 03",
         "name": "Bollywood Grand",
+        "family": "photorealistic",
         "aesthetic_directives": "Opulent color saturation, theatrical wind machines, sweeping crane movements, warm golden light, rich textile textures.",
         "color_grade_emulation": "Saturated jewel tones (crimson, emerald, gold), high-key fill, warm diffusion filtering.",
     },
     {
         "code": "#Style 04",
         "name": "Xianxia / Chinese Historical",
+        "family": "photorealistic",
         "aesthetic_directives": "Ethereal mist, floating silk physics, pastel atmospheric scattering, elegant swordplay choreography, tranquil balance.",
         "color_grade_emulation": "Desaturated ink-wash wash, jade and porcelain tones, soft high-key diffusion.",
     },
     {
         "code": "#Style 05",
         "name": "K-Drama High-End",
+        "family": "photorealistic",
         "aesthetic_directives": "Flawless porcelain skin tones, soft-focus shallow depth, gentle naturalistic backlighting, melancholic cityscapes.",
         "color_grade_emulation": "Pastel cyan and warm peach grading, creamy bokeh highlights, pristine commercial gloss.",
     },
     {
         "code": "#Style 06",
         "name": "Donghua 3D",
+        "family": "stylized_3d",
         "aesthetic_directives": "Hyper-detailed stylized 3D animation, photorealistic particle effects, dynamic magical illumination, stylized anime proportions.",
         "color_grade_emulation": "Vibrant saturated neon and spiritual hues, sharp specular highlights, clean CGI rendering.",
     },
     {
         "code": "#Style 07",
         "name": "Epic High Fantasy",
+        "family": "photorealistic",
         "aesthetic_directives": "Weathered leather, authentic chainmail reflection, ancient moss-covered masonry, sweeping Nordic landscape horizons.",
         "color_grade_emulation": "Desaturated earthen tones, muted greens, cold steel blues, overcast northern European lighting.",
     },
     {
         "code": "#Style 08",
         "name": "Sinema Nusantara",
+        "family": "photorealistic",
         "aesthetic_directives": "Tropical humidity haze, warm bamboo and teak wood textures, practical oil-lamp glows, earthy tactile realism.",
         "color_grade_emulation": "Organic sepia and deep tropical greens, warm tungsten shadows, authentic South East Asian realism.",
     },
     {
         "code": "#Style 09",
         "name": "Pixar / Disney 3D Animation",
+        "family": "stylized_3d",
         "aesthetic_directives": "Exaggerated emotive facial shapes, subsurface scattering on skin, rich whimsical lighting, charming physical squash-and-stretch.",
         "color_grade_emulation": "Warm primary color harmonies, velvety shadows, clean ray-traced global illumination.",
     },
     {
         "code": "#Style 10",
         "name": "DreamWorks / Illumination",
+        "family": "stylized_3d",
         "aesthetic_directives": "Snappy comedic character timing, expressive cartoon eyes, tactile stylized materials, punchy visual gags.",
         "color_grade_emulation": "High-contrast vibrant saturated primaries, crisp rim highlights, energetic bounce lighting.",
     },
     {
         "code": "#Style 11",
         "name": "Arcane (2.5D Steampunk)",
+        "family": "stylized_3d",
         "aesthetic_directives": "Painterly brushstroke textures mapped onto dynamic 3D geometry, graphic novel outlines, gritty steampunk industrialism.",
         "color_grade_emulation": "Monochromatic grime punctuated by glowing neon purples and hextech blues, rough oil-paint finishes.",
     },
     {
         "code": "#Style 12",
         "name": "Unreal Engine 5 Metahuman",
+        "family": "photorealistic",
         "aesthetic_directives": "Real-time raytracing, nanite micro-polygon geometry, lumen dynamic global illumination, flawless synthetic human fidelity.",
         "color_grade_emulation": "Neutral digital calibration, physical camera sensor emulation, precise roughness map reflections.",
     },
     {
         "code": "#Style 13",
         "name": "Stop-Motion Animation",
+        "family": "stop_motion",
         "aesthetic_directives": "Tactile plasticine / clay textures, visible fingerprint impressions, armature joint tension, 12 fps stepped motion cadence.",
         "color_grade_emulation": "Studio miniature warm spotlights, macro depth of field falloff, physical miniature set materials.",
     },
     {
         "code": "#Style 14",
         "name": "Classic 2D Cartoon",
+        "family": "anime_2d",
         "aesthetic_directives": "Hand-drawn cel animation, ink line art with variable weighting, flat color fills, vintage multi-plane camera parallax.",
         "color_grade_emulation": "1990s retro animation palette, soft paper texture overlay, zero 3D shading artifacts.",
     },
     {
         "code": "#Style 15",
         "name": "Anime (Shinkai / Ufotable)",
+        "family": "anime_2d",
         "aesthetic_directives": "Hyper-detailed sky cloud formations, photorealistic god rays, radiant lens flares, expressive hand-drawn emotional eyes.",
         "color_grade_emulation": "Luminous ultramarine blues, sunset magentas, glistening water reflections, cinematic anime polish.",
     },
     {
         "code": "#Style 16",
         "name": "Studio Ghibli",
+        "family": "anime_2d",
         "aesthetic_directives": "Lush watercolor nature backgrounds, painterly flora, whimsical wind gusts, gentle nostalgic warmth, hand-painted cels.",
         "color_grade_emulation": "Earthy greens, gentle cerulean blues, soft eggshell whites, warm childhood nostalgia grading.",
     },
     {
         "code": "#Style 17",
         "name": "Dark Graphic Novel",
+        "family": "anime_2d",
         "aesthetic_directives": "Heavy black ink shadows (chiaroscuro), stark angular silhouettes, stylized rain downpours, hard-boiled detective noir.",
         "color_grade_emulation": "High-contrast monochrome black-and-white accented by single spot colors (blood red, toxic yellow).",
     },
     {
         "code": "#Style 18",
         "name": "Vintage Film (1970s Technicolor)",
+        "family": "photorealistic",
         "aesthetic_directives": "Organic heavy grain structure, chromatic aberration around frame perimeters, faded dye couplers, authentic gate weave.",
         "color_grade_emulation": "Warm faded yellows, sepia skin tones, cyan shadows, authentic 35mm archival print texture.",
     },
@@ -338,3 +356,62 @@ def get_full_matrix_catalog() -> dict[str, list[dict[str, Any]]]:
         "compositions": COMPOSITION_MATRIX,
         "speeds": SPEED_MATRIX,
     }
+
+
+_LAYER_CATALOG_MAP: dict[str, list[dict[str, str]]] = {
+    "style": STYLE_CATALOG,
+    "style_code": STYLE_CATALOG,
+    "camera": CAMERA_MATRIX,
+    "camera_code": CAMERA_MATRIX,
+    "cam": CAMERA_MATRIX,
+    "lens": LENS_MATRIX,
+    "lens_code": LENS_MATRIX,
+    "comp": COMPOSITION_MATRIX,
+    "comp_code": COMPOSITION_MATRIX,
+    "composition": COMPOSITION_MATRIX,
+    "composition_code": COMPOSITION_MATRIX,
+    "light": LIGHTING_MATRIX,
+    "light_code": LIGHTING_MATRIX,
+    "lighting": LIGHTING_MATRIX,
+    "lighting_code": LIGHTING_MATRIX,
+    "act": ACTING_MATRIX,
+    "act_code": ACTING_MATRIX,
+    "action": ACTING_MATRIX,
+    "action_code": ACTING_MATRIX,
+    "speed": SPEED_MATRIX,
+    "speed_code": SPEED_MATRIX,
+}
+
+_LAYER_VALID_CODES: dict[str, set[str]] = {
+    layer_key: {item["code"] for item in entries if item.get("code")}
+    for layer_key, entries in _LAYER_CATALOG_MAP.items()
+}
+
+_LAYER_CANONICAL_LOOKUP: dict[str, dict[str, str]] = {
+    layer_key: {item["code"].lower(): item["code"] for item in entries if item.get("code")}
+    for layer_key, entries in _LAYER_CATALOG_MAP.items()
+}
+
+
+def validate_matrix_code(layer: str, code: str | None) -> str | None:
+    """Validate and canonicalize a matrix code against catalog.py.
+
+    Accepts None or empty string cleanly for partial updates; raises ValueError on malformed codes.
+    """
+    if code is None:
+        return None
+    cleaned = code.strip()
+    if not cleaned:
+        return ""
+    norm_layer = (layer or "").strip().lower()
+    canonical_map = _LAYER_CANONICAL_LOOKUP.get(norm_layer)
+    valid_codes = _LAYER_VALID_CODES.get(norm_layer)
+    if canonical_map is None or valid_codes is None:
+        raise ValueError(f"Unknown matrix layer '{layer}'")
+    canonical = canonical_map.get(cleaned.lower())
+    if canonical is None:
+        ordered = sorted(valid_codes)
+        raise ValueError(
+            f"Invalid {layer} matrix code '{code}'. Expected canonical code ({ordered[0]}..{ordered[-1]})."
+        )
+    return canonical
