@@ -8,8 +8,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.deps import get_current_user, get_session
+from backend.app.domain.continuity import ContinuityAuditEngine
 from backend.app.domain.qc import QCEvaluationEngine
-from backend.app.infrastructure.database.models.auth import UserModel
+from backend.app.infrastructure.database.models.auth import ProjectMemberModel, UserModel
 from backend.app.infrastructure.database.models.character import CharacterModel, CharacterStateModel
 from backend.app.infrastructure.database.models.pipeline import QCReportModel
 from backend.app.infrastructure.database.models.project import MasterProductionBibleModel, ProjectModel
@@ -121,6 +122,100 @@ async def _execute_scene_audit(scene_id: str, session: AsyncSession) -> dict[str
         bible=bible,
         total_acts=total_acts,
     )
+
+
+class ContinuityAuditRequest(BaseModel):
+    scene_id: str | None = Field(default=None, description="Optional scene UUID scope within this project")
+    act_number: int | None = Field(default=None, ge=1, le=5, description="Optional act number filter (1-5)")
+    strict_mode: bool = Field(default=False, description="Escalate HIGH->FAIL and MEDIUM->WARN")
+
+
+async def _load_project_with_access(
+    project_id: str,
+    current_user: UserModel,
+    session: AsyncSession,
+) -> ProjectModel:
+    try:
+        p_uuid = uuid.UUID(project_id)
+        stmt = select(ProjectModel).where(ProjectModel.id == p_uuid)
+    except ValueError:
+        stmt = select(ProjectModel).where(ProjectModel.slug == project_id)
+
+    project = (await session.execute(stmt)).scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if project.owner_id == current_user.id or current_user.role == "SUPERADMIN":
+        return project
+
+    member = (
+        await session.execute(
+            select(ProjectMemberModel).where(
+                (ProjectMemberModel.project_id == project.id)
+                & (ProjectMemberModel.user_id == current_user.id)
+            )
+        )
+    ).scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=403, detail="Not authorized for this project")
+    return project
+
+
+@router.post("/projects/{project_id}/continuity-audit", status_code=status.HTTP_200_OK)
+async def audit_project_continuity(
+    project_id: str,
+    payload: ContinuityAuditRequest = ContinuityAuditRequest(),
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Run deterministic cross-scene and cross-shot Continuity Audit (ADR-0009)."""
+    project = await _load_project_with_access(project_id, current_user, session)
+    _, bible, chars, states_by_char = await _load_project_qc_context(project.id, session)
+
+    scenes = list(
+        (
+            await session.execute(
+                select(SceneModel)
+                .where(SceneModel.project_id == project.id)
+                .order_by(SceneModel.act_number.asc(), SceneModel.scene_number.asc())
+            )
+        ).scalars().all()
+    )
+
+    scene_filter_id: str | None = None
+    if payload.scene_id:
+        try:
+            sc_uuid = uuid.UUID(payload.scene_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Scene not found")
+        if not any(sc.id == sc_uuid for sc in scenes):
+            raise HTTPException(status_code=404, detail="Scene not found in this project")
+        scene_filter_id = str(sc_uuid)
+
+    shots_by_scene: dict[Any, list[Any]] = {}
+    if scenes:
+        scene_ids = [s.id for s in scenes]
+        all_shots = (
+            await session.execute(
+                select(ShotModel).where(ShotModel.scene_id.in_(scene_ids)).order_by(ShotModel.shot_number.asc())
+            )
+        ).scalars().all()
+        for sh in all_shots:
+            shots_by_scene.setdefault(sh.scene_id, []).append(sh)
+
+    result = ContinuityAuditEngine.audit_project(
+        project_id=str(project.id),
+        scenes=scenes,
+        shots_by_scene=shots_by_scene,
+        characters=chars,
+        states_by_char=states_by_char,
+        project=project,
+        bible=bible,
+        scene_id_filter=scene_filter_id,
+        act_number_filter=payload.act_number,
+        strict_mode=payload.strict_mode,
+    )
+    return {"status": "success", "data": result}
 
 
 @router.post("/qc/audit-scene/{scene_id}", status_code=status.HTTP_200_OK)

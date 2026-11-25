@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
-from typing import Any
+from typing import Any, Literal
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -16,6 +16,7 @@ from backend.app.domain.catalog import validate_matrix_code
 from backend.app.domain.screenwriter import (
     _STYLE_FAMILY_OPTICS_DEFAULTS,
     PolyaScreenwriterEngine,
+    ProjectNarrativeContext,
     extract_project_narrative_context,
     get_act_bounds,
     get_style_family,
@@ -23,7 +24,7 @@ from backend.app.domain.screenwriter import (
     _determine_scene_duration,
 )
 from backend.app.domain.story_writer import StagedStoryWriter
-from backend.app.infrastructure.database.models.auth import UserModel
+from backend.app.infrastructure.database.models.auth import ProjectMemberModel, UserModel
 from backend.app.infrastructure.database.models.character import (
     CharacterModel,
     CharacterStateModel,
@@ -77,6 +78,16 @@ class DirectorPolishRequest(BaseModel):
     @classmethod
     def _validate_polish_matrix_codes(cls, value: str | None, info: ValidationInfo) -> str | None:
         return validate_matrix_code(info.field_name or "", value)
+
+
+class DirectorAdvisorRequest(BaseModel):
+    shot_id: str | None = Field(default=None, description="Optional target shot UUID inside this scene")
+    focus: Literal["staging", "optics", "lighting", "continuity", "all"] = Field(
+        default="all",
+        description="Advisory axis focus",
+    )
+    intent_notes: str | None = Field(default=None, description="Optional showrunner intent notes")
+    include_rag: bool = Field(default=True, description="Include Polia Director RAG (8765) context")
 
 
 class SceneAutoSplitRequest(BaseModel):
@@ -1571,6 +1582,165 @@ async def calibrate_scene_dialogue(
       await session.rollback()
 
     return {"data": result_data}
+
+
+async def _resolve_project_with_access(
+    project_id: str,
+    current_user: UserModel,
+    session: AsyncSession,
+) -> ProjectModel:
+    project = await _resolve_project(project_id, session)
+    if project.owner_id == current_user.id or current_user.role == "SUPERADMIN":
+        return project
+    member = (
+        await session.execute(
+            select(ProjectMemberModel).where(
+                (ProjectMemberModel.project_id == project.id)
+                & (ProjectMemberModel.user_id == current_user.id)
+            )
+        )
+    ).scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=403, detail="Not authorized for this project")
+    return project
+
+
+@router.post("/projects/{project_id}/scenes/{scene_id}/director-advisor", status_code=status.HTTP_200_OK)
+async def advise_scene_director(
+    project_id: str,
+    scene_id: str,
+    payload: DirectorAdvisorRequest = DirectorAdvisorRequest(),
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Non-destructive Polya AI Director Advisor per scene or shot (style + Bible + Director RAG)."""
+    project = await _resolve_project_with_access(project_id, current_user, session)
+
+    try:
+        s_uuid = uuid.UUID(scene_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Scene not found")
+
+    scene = (
+        await session.execute(
+            select(SceneModel).where(SceneModel.id == s_uuid, SceneModel.project_id == project.id)
+        )
+    ).scalar_one_or_none()
+    if not scene:
+        raise HTTPException(status_code=404, detail="Scene not found in this project")
+
+    shots = list(
+        (
+            await session.execute(
+                select(ShotModel).where(ShotModel.scene_id == scene.id).order_by(ShotModel.shot_number.asc())
+            )
+        ).scalars().all()
+    )
+
+    target_shot_dict: dict[str, Any] | None = None
+    if payload.shot_id:
+        try:
+            sh_uuid = uuid.UUID(payload.shot_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Shot not found")
+        matched_shot = next((sh for sh in shots if sh.id == sh_uuid), None)
+        if not matched_shot:
+            raise HTTPException(status_code=404, detail="Shot not found in this scene")
+        target_shot_dict = {
+            "id": str(matched_shot.id),
+            "shot_number": matched_shot.shot_number,
+            "duration_seconds": matched_shot.duration_seconds,
+            "camera_code": matched_shot.camera_code,
+            "lens_code": matched_shot.lens_code,
+            "comp_code": matched_shot.comp_code,
+            "light_code": matched_shot.light_code,
+            "act_code": matched_shot.act_code,
+            "speed_code": matched_shot.speed_code,
+            "dialogue": matched_shot.dialogue,
+            "transition_type": matched_shot.transition_type,
+        }
+
+    bible = (
+        await session.execute(
+            select(MasterProductionBibleModel)
+            .where(MasterProductionBibleModel.project_id == project.id)
+            .order_by(MasterProductionBibleModel.version.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    chars_data, _, _ = await _load_cast_with_states(project.id, session)
+
+    try:
+        context = extract_project_narrative_context(project, bible=bible, characters=chars_data)
+    except ValueError:
+        settings = project.settings if isinstance(project.settings, dict) else {}
+        bible_styles = bible.style_parameters if (bible and isinstance(bible.style_parameters, dict)) else {}
+        bible_rules = bible.world_rules if (bible and isinstance(bible.world_rules, dict)) else {}
+        style_code = (
+            bible_styles.get("master_style_code")
+            or project.target_style_code
+            or "#Style 01"
+        )
+        context = ProjectNarrativeContext(
+            project_id=str(project.id),
+            title=project.title or "Untitled Production",
+            synopsis=str(settings.get("synopsis") or scene.narrative_goal or "Cinematic film production"),
+            genre_tone=str(settings.get("genre") or settings.get("tone") or "Cinematic Drama"),
+            master_style_code=style_code,
+            style_name=style_code,
+            aesthetic_directives=str(bible_styles.get("render_pipeline") or ""),
+            color_grade_emulation=str(bible_styles.get("color_grade_emulation") or ""),
+            world_setting=str(
+                bible_rules.get("world_setting")
+                or settings.get("world_setting")
+                or parse_structured_slugline(scene.slugline).get("location")
+                or "Cinematic Set"
+            ),
+            cast_characters=chars_data,
+            environments=bible_rules.get("environments") if isinstance(bible_rules.get("environments"), list) else [],
+            props=bible_rules.get("props") if isinstance(bible_rules.get("props"), list) else [],
+            continuity_rules=bible_rules.get("continuity_rules") if isinstance(bible_rules.get("continuity_rules"), list) else [],
+        )
+
+    shots_dicts = [
+        {
+            "id": str(sh.id),
+            "shot_number": sh.shot_number,
+            "duration_seconds": sh.duration_seconds,
+            "camera_code": sh.camera_code,
+            "lens_code": sh.lens_code,
+            "comp_code": sh.comp_code,
+            "light_code": sh.light_code,
+            "act_code": sh.act_code,
+            "speed_code": sh.speed_code,
+            "dialogue": sh.dialogue,
+            "transition_type": sh.transition_type,
+        }
+        for sh in shots
+    ]
+
+    writer = PolyaScreenwriterEngine()
+    advisory = await writer.advise_scene_direction(
+        context=context,
+        scene={
+            "id": str(scene.id),
+            "act_number": scene.act_number,
+            "scene_number": scene.scene_number,
+            "slugline": scene.slugline,
+            "narrative_goal": scene.narrative_goal,
+            "duration_target": scene.duration_target,
+        },
+        shots=shots_dicts,
+        target_shot=target_shot_dict,
+        focus=payload.focus,
+        intent_notes=payload.intent_notes,
+        include_rag=payload.include_rag,
+    )
+
+    return {
+        "status": "success",
+        "data": advisory,
+    }
 
 
 @router.post("/scenes/{scene_id}/director-polish", status_code=status.HTTP_200_OK)

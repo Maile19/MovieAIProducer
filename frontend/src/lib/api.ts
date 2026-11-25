@@ -376,6 +376,78 @@ export interface DirectorPolishResult {
   message: string;
 }
 
+export interface DirectorAdvisorRecommendation {
+  recommendation_id: string;
+  axis: string;
+  title: string;
+  rationale: string;
+  camera_code: string;
+  lens_code: string;
+  comp_code: string;
+  light_code: string;
+  act_code: string;
+  speed_code: string;
+  transition_type: string;
+  continuity_warnings: string[];
+}
+
+export interface DirectorAdvisorResult {
+  project_id: string;
+  scene_id: string;
+  shot_id?: string | null;
+  style_code: string;
+  style_family: string;
+  source: "llm_rag" | "heuristic_rag" | string;
+  director_rag_hits: number;
+  bible_anchors: {
+    matched_character?: string | null;
+    active_state_code?: string | null;
+    matched_environment?: string | null;
+    matched_props: string[];
+    applicable_laws: string[];
+  };
+  recommendations: DirectorAdvisorRecommendation[];
+  shot_risk_flags: Array<{ code: string; severity: string; detail: string }>;
+}
+
+export interface ContinuityFinding {
+  finding_id: string;
+  pillar: "character_dna_states" | "world_props_lighting" | "optical_spatial" | "rules_invariants" | string;
+  severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | string;
+  scene_id?: string | null;
+  scene_number?: number | null;
+  act_number?: number | null;
+  shot_id?: string | null;
+  shot_number?: number | null;
+  title: string;
+  detail: string;
+  remediation: string;
+}
+
+export interface ContinuityAuditResult {
+  project_id: string;
+  style_code: string;
+  style_family: string;
+  strict_mode: boolean;
+  continuity_score: number;
+  gate_status: "PASS" | "WARN" | "FAIL" | string;
+  summary: {
+    scenes_audited: number;
+    shots_audited: number;
+    critical_count: number;
+    high_count: number;
+    medium_count: number;
+    low_count: number;
+  };
+  pillar_scores: {
+    character_dna_states: number;
+    world_props_lighting: number;
+    optical_spatial: number;
+    rules_invariants: number;
+  };
+  findings: ContinuityFinding[];
+}
+
 export interface CharacterState {
   id: string;
   character_id: string;
@@ -1658,6 +1730,21 @@ export const api = {
         body: JSON.stringify(payload || {}),
       });
     },
+    directorAdvisor: async (
+      projectId: string,
+      sceneId: string,
+      payload?: {
+        shot_id?: string | null;
+        focus?: "staging" | "optics" | "lighting" | "continuity" | "all";
+        intent_notes?: string | null;
+        include_rag?: boolean;
+      }
+    ): Promise<{ status: string; data: DirectorAdvisorResult }> => {
+      return apiRequest(`/projects/${projectId}/scenes/${sceneId}/director-advisor`, {
+        method: "POST",
+        body: JSON.stringify(payload || {}),
+      });
+    },
     generatePreview: async (
       sceneId: string,
       payload?: {
@@ -2019,6 +2106,19 @@ export const api = {
     },
     getProjectSummary: async (projectId: string): Promise<{ data: ProjectQCSummary }> => {
       return apiRequest<{ data: ProjectQCSummary }>(`/projects/${projectId}/qc/summary`);
+    },
+    continuityAudit: async (
+      projectId: string,
+      payload?: {
+        scene_id?: string | null;
+        act_number?: number | null;
+        strict_mode?: boolean;
+      }
+    ): Promise<{ status: string; data: ContinuityAuditResult }> => {
+      return apiRequest(`/projects/${projectId}/continuity-audit`, {
+        method: "POST",
+        body: JSON.stringify(payload || {}),
+      });
     },
   },
 

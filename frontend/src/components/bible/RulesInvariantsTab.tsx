@@ -20,6 +20,7 @@ import {
   ChevronUp,
 } from "lucide-react";
 import { api, RulesGenerationMeta } from "@/lib/api";
+import ContinuityAuditPanel from "@/components/scenes/ContinuityAuditPanel";
 
 interface RulesPresetPack {
   id: string;
@@ -132,6 +133,7 @@ export default function RulesInvariantsTab({
   const [saveSuccessMsg, setSaveSuccessMsg] = useState(false);
   const [showNotes, setShowNotes] = useState(false);
   const [additionalNotes, setAdditionalNotes] = useState("");
+  const [showContinuityAudit, setShowContinuityAudit] = useState(false);
 
   // Refinement 2: Instant React State Synchronization via useEffect whenever worldRules changes
   useEffect(() => {
@@ -314,6 +316,17 @@ export default function RulesInvariantsTab({
 
         {/* Action Controls */}
         <div className="flex flex-wrap items-center gap-2 shrink-0 pt-1 sm:pt-0">
+          {projectId && (
+            <button
+              type="button"
+              onClick={() => setShowContinuityAudit((v) => !v)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-canvas hover:bg-elevated border border-amber-500/40 text-amber-400 font-mono font-bold text-xs transition-colors shrink-0"
+              title="Audit all storyboard scenes and shots against these Bible rules & invariants"
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span>{showContinuityAudit ? "Hide Continuity Audit" : "Continuity Audit"}</span>
+            </button>
+          )}
           {isLocked ? (
             <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-panel border border-border text-obsidian-muted font-mono text-xs">
               <Lock className="w-3.5 h-3.5 text-amber-500/70" />
@@ -357,6 +370,14 @@ export default function RulesInvariantsTab({
           )}
         </div>
       </div>
+
+      {showContinuityAudit && projectId && (
+        <ContinuityAuditPanel
+          projectId={projectId}
+          onClose={() => setShowContinuityAudit(false)}
+          compact
+        />
+      )}
 
       {/* =========================================================================
        * Context Linked Strip (Full Context Counts matching WorldPropsTab)

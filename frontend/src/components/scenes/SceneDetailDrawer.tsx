@@ -18,8 +18,18 @@ import {
   ExternalLink,
   RefreshCw,
   Wand2,
+  Compass,
 } from "lucide-react";
-import { Scene, api, FlowProxyStatus, DirectorPolishResult, DirectorPolishTake } from "@/lib/api";
+import {
+  Scene,
+  Shot,
+  api,
+  FlowProxyStatus,
+  DirectorPolishResult,
+  DirectorPolishTake,
+  DirectorAdvisorResult,
+  DirectorAdvisorRecommendation,
+} from "@/lib/api";
 import DialogueCalibrator from "./DialogueCalibrator";
 import ShotListManager from "./ShotListManager";
 import QcScorecard from "./QcScorecard";
@@ -58,6 +68,14 @@ export default function SceneDetailDrawer({
   const [isPolishing, setIsPolishing] = useState(false);
   const [polishResult, setPolishResult] = useState<DirectorPolishResult | null>(null);
   const [selectedTakeIndex, setSelectedTakeIndex] = useState<number>(0);
+
+  // Polya AI Director Advisor state
+  const [sceneShots, setSceneShots] = useState<Shot[]>([]);
+  const [advisorShotId, setAdvisorShotId] = useState<string>("");
+  const [advisorFocus, setAdvisorFocus] = useState<"all" | "optics" | "staging" | "lighting" | "continuity">("all");
+  const [isAdvising, setIsAdvising] = useState(false);
+  const [advisorResult, setAdvisorResult] = useState<DirectorAdvisorResult | null>(null);
+  const [applyingRecId, setApplyingRecId] = useState<string | null>(null);
 
   // Visual preview state (Dynamic Provider Switching: Google Flow Free / 9Router / Mock)
   const [previewUrl, setPreviewUrl] = useState<string | null>(scene?.preview_url || null);
@@ -182,12 +200,17 @@ export default function SceneDetailDrawer({
       setPreviewError(null);
       setPolishResult(null);
       setSelectedTakeIndex(0);
+      setAdvisorResult(null);
+      setAdvisorShotId("");
 
       api.scenes
         .listShots(scene.id)
         .then((res) => {
-          const prim = res?.data?.[0];
+          const shotsList = res?.data || [];
+          setSceneShots(shotsList);
+          const prim = shotsList[0];
           if (prim) {
+            setAdvisorShotId(prim.id);
             if (prim.camera_code) setCameraCode(prim.camera_code);
             if (prim.light_code || prim.lighting_code) {
               setLightingCode(prim.light_code || prim.lighting_code || "#Light 01");
@@ -201,9 +224,23 @@ export default function SceneDetailDrawer({
             }
           }
         })
-        .catch(() => {});
+        .catch(() => setSceneShots([]));
     }
   }, [scene]);
+
+  useEffect(() => {
+    if (!scene?.id || shotsRefreshKey === 0) return;
+    api.scenes
+      .listShots(scene.id)
+      .then((res) => {
+        const shotsList = res?.data || [];
+        setSceneShots(shotsList);
+        if (shotsList.length > 0 && !shotsList.some((s) => s.id === advisorShotId)) {
+          setAdvisorShotId(shotsList[0].id);
+        }
+      })
+      .catch(() => {});
+  }, [scene?.id, shotsRefreshKey, advisorShotId]);
 
   useEffect(() => {
     if (!scene?.id || !compilerAccordionOpen) return;
@@ -386,6 +423,65 @@ export default function SceneDetailDrawer({
       showToast("completed", `Take '${selectedTake.label}' diterapkan ke draft; klik Save Changes untuk menyimpan.`);
     }
     setPolishResult(null);
+  };
+
+  const handleAskDirectorAdvisor = async () => {
+    if (!scene) return;
+    try {
+      setIsAdvising(true);
+      const res = await api.scenes.directorAdvisor(scene.project_id, scene.id, {
+        shot_id: advisorShotId || null,
+        focus: advisorFocus,
+        include_rag: true,
+      });
+      if (res?.data) {
+        setAdvisorResult(res.data);
+      }
+    } catch (err: any) {
+      showToast("error", err?.message || "Gagal memuat rekomendasi Director Advisor.");
+    } finally {
+      setIsAdvising(false);
+    }
+  };
+
+  const handleApplyAdvisorOptics = async (rec: DirectorAdvisorRecommendation) => {
+    if (!scene) return;
+    setApplyingRecId(rec.recommendation_id);
+    const targetShotId = advisorShotId || sceneShots[0]?.id || "";
+    try {
+      if (targetShotId) {
+        await api.scenes.updateShot(targetShotId, {
+          camera_code: rec.camera_code,
+          lens_code: rec.lens_code,
+          comp_code: rec.comp_code,
+          light_code: rec.light_code,
+          act_code: rec.act_code,
+          speed_code: rec.speed_code,
+          transition_type: rec.transition_type,
+        });
+      } else {
+        await api.scenes.update(scene.id, {
+          camera_code: rec.camera_code,
+          lighting_code: rec.light_code,
+          transition_type: rec.transition_type,
+        });
+      }
+      if (!targetShotId || targetShotId === sceneShots[0]?.id) {
+        setCameraCode(rec.camera_code);
+        setLightingCode(rec.light_code);
+        setTransitionType(rec.transition_type);
+      }
+      setShotsRefreshKey((k) => k + 1);
+      onSceneUpdated({ silent: true });
+      showToast(
+        "completed",
+        `Optics '${rec.title}' diterapkan (${rec.camera_code} · ${rec.lens_code} · ${rec.light_code}).`
+      );
+    } catch (err: any) {
+      showToast("error", err?.message || "Gagal menerapkan optik Director Advisor.");
+    } finally {
+      setApplyingRecId(null);
+    }
   };
 
   const handleGeneratePreview = async () => {
@@ -1226,6 +1322,146 @@ export default function SceneDetailDrawer({
 
         {/* Shot List Manager */}
         <ShotListManager sceneId={scene.id} refreshKey={shotsRefreshKey} onShotsUpdated={onSceneUpdated} />
+
+        {/* Polya AI Director Advisor (Non-Destructive 7-Layer Optical & Continuity Guidance) */}
+        <div className="p-4 rounded-xl bg-panel border border-border space-y-3 font-sans text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Compass className="w-4 h-4 text-amber-500 shrink-0" />
+              <h4 className="font-cinzel text-xs font-bold uppercase tracking-wider text-obsidian-primary">
+                Polya Director Advisor
+              </h4>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5 font-mono">
+              {sceneShots.length > 0 && (
+                <select
+                  value={advisorShotId}
+                  onChange={(e) => setAdvisorShotId(e.target.value)}
+                  className="px-2 py-1 rounded-lg bg-canvas border border-border text-[10px] text-obsidian-primary focus:outline-none focus:border-amber-500"
+                  title="Target shot for optical advisory"
+                >
+                  {sceneShots.map((sh) => (
+                    <option key={sh.id} value={sh.id}>
+                      Shot #{sh.shot_number} ({sh.camera_code})
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              <select
+                value={advisorFocus}
+                onChange={(e) => setAdvisorFocus(e.target.value as any)}
+                className="px-2 py-1 rounded-lg bg-canvas border border-border text-[10px] text-obsidian-primary focus:outline-none focus:border-amber-500"
+              >
+                <option value="all">All Axes</option>
+                <option value="optics">Optics</option>
+                <option value="staging">Staging</option>
+                <option value="lighting">Lighting</option>
+                <option value="continuity">Continuity</option>
+              </select>
+
+              <button
+                type="button"
+                onClick={handleAskDirectorAdvisor}
+                disabled={isAdvising}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-canvas hover:bg-elevated border border-amber-500/40 text-amber-400 text-[10px] font-bold transition-colors disabled:opacity-50"
+              >
+                {isAdvising ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                <span>{isAdvising ? "Advising..." : "Ask Director Advisor"}</span>
+              </button>
+            </div>
+          </div>
+
+          {advisorResult && (
+            <div className="space-y-2.5 font-mono">
+              <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-obsidian-muted">
+                <span className="px-1.5 py-0.5 rounded bg-canvas border border-border text-amber-400">
+                  {advisorResult.source}
+                </span>
+                <span className="px-1.5 py-0.5 rounded bg-canvas border border-border">
+                  RAG Hits: {advisorResult.director_rag_hits}
+                </span>
+                {advisorResult.bible_anchors?.matched_character && (
+                  <span className="px-1.5 py-0.5 rounded bg-canvas border border-border text-cyan-300">
+                    {advisorResult.bible_anchors.matched_character} ({advisorResult.bible_anchors.active_state_code || "#State 01"})
+                  </span>
+                )}
+                {advisorResult.bible_anchors?.matched_environment && (
+                  <span className="px-1.5 py-0.5 rounded bg-canvas border border-border text-emerald-300">
+                    Env: {advisorResult.bible_anchors.matched_environment}
+                  </span>
+                )}
+              </div>
+
+              {advisorResult.shot_risk_flags?.length > 0 && (
+                <div className="p-2 rounded-lg bg-amber-500/10 border border-amber-500/30 space-y-1 text-[10px] text-amber-300">
+                  {advisorResult.shot_risk_flags.map((rf, i) => (
+                    <div key={i}>
+                      <strong>[{rf.code}]</strong> {rf.detail}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="space-y-2">
+                {advisorResult.recommendations.map((rec) => (
+                  <div
+                    key={rec.recommendation_id}
+                    className="p-3 rounded-lg bg-canvas border border-border space-y-2"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <span className="text-[9px] uppercase text-amber-400 font-bold">{rec.axis}</span>
+                        <div className="text-xs font-bold text-obsidian-primary font-sans">{rec.title}</div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleApplyAdvisorOptics(rec)}
+                        disabled={applyingRecId === rec.recommendation_id}
+                        className="px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-600 text-canvas font-bold text-[10px] flex items-center gap-1 shrink-0 disabled:opacity-50"
+                      >
+                        {applyingRecId === rec.recommendation_id ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Check className="w-3 h-3" />
+                        )}
+                        <span>Apply Optics</span>
+                      </button>
+                    </div>
+
+                    <p className="text-[11px] text-obsidian-secondary font-sans leading-relaxed">{rec.rationale}</p>
+
+                    <div className="flex flex-wrap gap-1 text-[9px]">
+                      {[
+                        rec.camera_code,
+                        rec.lens_code,
+                        rec.comp_code,
+                        rec.light_code,
+                        rec.act_code,
+                        rec.speed_code,
+                        rec.transition_type,
+                      ].map((code, idx) => (
+                        <span
+                          key={`${rec.recommendation_id}-${idx}`}
+                          className="px-1.5 py-0.5 rounded bg-panel border border-border text-obsidian-primary"
+                        >
+                          {code}
+                        </span>
+                      ))}
+                    </div>
+
+                    {rec.continuity_warnings?.length > 0 && (
+                      <div className="text-[10px] text-amber-300/90">
+                        Note: {rec.continuity_warnings.join(" ")}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
 
         {/* Live Multi-Platform Prompt Compiler Drawer */}
         <div className="rounded-xl bg-panel border border-border overflow-hidden">

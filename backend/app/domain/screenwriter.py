@@ -4468,3 +4468,301 @@ Return valid JSON in this exact structure:
                 "coverage_style": preset_key,
             })
         return planned
+
+    # ==========================================================================
+    # Polya AI Director Advisor (Non-Destructive Scene/Shot Optical Guidance)
+    # ==========================================================================
+
+    @staticmethod
+    def _coerce_matrix_code(layer: str, candidate: Any, fallback: str) -> str:
+        """Validate a matrix code against catalog.py, falling back cleanly if invalid."""
+        raw = str(candidate or "").strip()
+        if not raw:
+            return fallback
+        try:
+            validated = validate_matrix_code(layer, raw)
+            return validated or fallback
+        except ValueError:
+            return fallback
+
+    async def advise_scene_direction(
+        self,
+        context: ProjectNarrativeContext,
+        scene: dict[str, Any],
+        shots: list[dict[str, Any]] | None = None,
+        target_shot: dict[str, Any] | None = None,
+        focus: str = "all",
+        intent_notes: str | None = None,
+        include_rag: bool = True,
+    ) -> dict[str, Any]:
+        """Generate 3 style-aligned, Bible-anchored directing recommendations per scene or shot.
+
+        Never mutates DB. All returned #Cam/#Lens/#Comp/#Light/#Act/#Speed codes are
+        verified against catalog.py, and RAG/LLM failures degrade cleanly to heuristic_rag.
+        """
+        style_code = context.master_style_code or "#Style 01"
+        style_family = get_style_family(style_code)
+        family_optics = _STYLE_FAMILY_OPTICS_DEFAULTS.get(
+            style_family, _STYLE_FAMILY_OPTICS_DEFAULTS["photorealistic"]
+        )
+        slugline = str(scene.get("slugline") or "")
+        narrative_goal = str(scene.get("narrative_goal") or "").strip()
+        act_number = int(scene.get("act_number") or 1)
+        scene_number = int(scene.get("scene_number") or 1)
+        shots_list = list(shots or [])
+        active_shot = target_shot or (shots_list[0] if shots_list else {})
+        parsed_slug = parse_structured_slugline(slugline)
+
+        # Resolve Bible anchors (character, state, environment, props, laws)
+        scene_text = " ".join(
+            [narrative_goal.lower()]
+            + [str(sh.get("dialogue") or "").lower() for sh in shots_list]
+        )
+        matched_char = None
+        for ch in context.cast_characters:
+            cname = str(ch.get("name") or "").strip()
+            if cname and cname.lower() in scene_text:
+                matched_char = ch
+                break
+        if not matched_char and context.cast_characters:
+            matched_char = context.cast_characters[0]
+
+        active_state_code = None
+        matched_char_name = None
+        if matched_char:
+            matched_char_name = matched_char.get("name")
+            states = matched_char.get("states") or []
+            total_acts = max(4, act_number)
+            target_st_num = self._resolve_act_to_state_number(act_number, total_acts) or 1
+            target_st_code = f"#State 0{target_st_num}"
+            matched_st = next(
+                (s for s in states if str(s.get("state_code", "")).upper() == target_st_code.upper()),
+                states[0] if states else None,
+            )
+            active_state_code = matched_st.get("state_code") if matched_st else target_st_code
+
+        matched_env = None
+        loc_low = parsed_slug["location"].lower()
+        for env in context.environments:
+            ename = str(env.get("name") or "").strip().lower()
+            if ename and loc_low and (ename in loc_low or loc_low in ename):
+                matched_env = env.get("code") or env.get("name")
+                break
+
+        matched_props = [
+            str(p.get("code") or p.get("name"))
+            for p in context.props
+            if str(p.get("name") or "").strip().lower() in scene_text
+        ][:3]
+        applicable_laws = [str(r) for r in context.continuity_rules[:3] if str(r).strip()]
+
+        # Deterministic risk flags on current shots
+        shot_risk_flags: list[dict[str, str]] = []
+        shots_to_inspect = [active_shot] if target_shot else shots_list
+        for sh in shots_to_inspect:
+            if not sh:
+                continue
+            cam = str(sh.get("camera_code") or "").strip()
+            spd = str(sh.get("speed_code") or "").strip()
+            trans = str(sh.get("transition_type") or "NONE").upper().strip()
+            dlg = str(sh.get("dialogue") or "").strip()
+            if spd in ("#Speed 04", "#Speed 05") or cam in ("#Cam 22", "#Cam 25", "#Cam 26"):
+                shot_risk_flags.append({
+                    "code": "TEMPORAL_JITTER_RISK",
+                    "severity": "WARNING",
+                    "detail": f"Current setup ({cam} / {spd}) carries elevated optical flow temporal jitter.",
+                })
+            if cam in ("#Cam 08", "#Cam 09", "#Cam 16"):
+                shot_risk_flags.append({
+                    "code": "FACE_CONSISTENCY_RISK",
+                    "severity": "WARNING",
+                    "detail": f"Camera {cam} stresses facial landmark stability; ensure Card 1/Card 3 anchors are locked.",
+                })
+            if dlg and trans == "NONE":
+                shot_risk_flags.append({
+                    "code": "CUT_BRIDGE_MISSING",
+                    "severity": "INFO",
+                    "detail": "Dialogue present with transition_type='NONE'; recommend J_CUT or L_CUT audio bridge.",
+                })
+
+        # Query Polia AI Director RAG (8765) with graceful fallback
+        if include_rag:
+            try:
+                rag_result = await DirectorRAGClient.retrieve(
+                    scene_beat=f"{slugline}: {narrative_goal} {intent_notes or ''}".strip(),
+                    style_code=style_code,
+                    engine="veo",
+                    top_k=3,
+                )
+            except Exception as exc:
+                logger.info("director_advisor_rag_fallback: %s", exc)
+                rag_result = {"director_context": "", "shots": [], "grammars": []}
+        else:
+            rag_result = {"director_context": "", "shots": [], "grammars": []}
+        rag_hits = len(rag_result.get("shots") or []) + len(rag_result.get("grammars") or [])
+        rag_block = "\n".join(
+            b
+            for b in (
+                DirectorRAGClient.format_act_context(rag_result),
+                DirectorRAGClient.format_treatment_grammar(rag_result),
+            )
+            if b
+        ).strip()
+
+        # Style-family heuristic baselines (3 distinct axes)
+        env_light = None
+        for env in context.environments:
+            if (env.get("code") or env.get("name")) == matched_env:
+                env_light = env.get("lighting_code")
+                break
+        base_light = self._coerce_matrix_code(
+            "light",
+            active_shot.get("light_code") or env_light or family_optics["light_code"],
+            family_optics["light_code"],
+        )
+
+        heuristics: list[dict[str, Any]] = [
+            {
+                "recommendation_id": "rec_1",
+                "axis": "optics" if focus == "all" else focus,
+                "title": f"{context.style_name or style_code} Master Framing & Lens Depth",
+                "rationale": (
+                    f"Frames {parsed_slug['location'] or 'the scene'} cleanly for {style_family} while locking "
+                    f"eyeline and spatial clarity{f' for {matched_char_name}' if matched_char_name else ''}."
+                ),
+                "camera_code": "#Cam 04" if style_family != "anime_2d" else "#Cam 03",
+                "lens_code": "#Lens 01" if style_family == "photorealistic" else "#Lens 02",
+                "comp_code": "#Comp 05",
+                "light_code": base_light,
+                "act_code": family_optics["act_code"],
+                "speed_code": family_optics["speed_code"],
+                "transition_type": "J_CUT",
+                "continuity_warnings": [
+                    f"Preserve {active_state_code or '#State 01'} wardrobe & eyeline axis across reverse cuts."
+                ],
+            },
+            {
+                "recommendation_id": "rec_2",
+                "axis": "staging" if focus == "all" else focus,
+                "title": "Character Subtext & Controlled Micro-Motion",
+                "rationale": (
+                    f"Isolates emotional turn in Scene #{scene_number} without high-jitter camera artifacts, "
+                    f"reinforcing {matched_char_name or 'lead'} continuity."
+                ),
+                "camera_code": "#Cam 02",
+                "lens_code": "#Lens 03",
+                "comp_code": "#Comp 01",
+                "light_code": base_light,
+                "act_code": "#Act 04" if style_family == "photorealistic" else family_optics["act_code"],
+                "speed_code": "#Speed 02",
+                "transition_type": "L_CUT",
+                "continuity_warnings": [
+                    "Maintain Card 1/Card 3 facial proportions; avoid unmotivated 180-degree axis flips."
+                ],
+            },
+            {
+                "recommendation_id": "rec_3",
+                "axis": "lighting" if focus == "all" else focus,
+                "title": "Atmospheric Depth & Motivated Contrast",
+                "rationale": (
+                    f"Enhances spatial separation and tactile materiality in {parsed_slug['location'] or 'set'} "
+                    f"anchored to {context.color_grade_emulation or style_code}."
+                ),
+                "camera_code": "#Cam 07",
+                "lens_code": "#Lens 04",
+                "comp_code": "#Comp 04",
+                "light_code": family_optics["light_code"],
+                "act_code": family_optics["act_code"],
+                "speed_code": "#Speed 03",
+                "transition_type": "HARD_CUT",
+                "continuity_warnings": [
+                    f"Match {parsed_slug['time_of_day'] or 'established'} key light temperature with adjacent scenes."
+                ],
+            },
+        ]
+
+        user_prompt = (
+            "POLYA AI DIRECTOR ADVISOR BRIEF (Non-Destructive 7-Layer Optical & Continuity Guidance)\n"
+            f"- Project: {context.title} ({context.genre_tone})\n"
+            f"- Style: {style_code} ({context.style_name}, family={style_family})\n"
+            f"- Scene #{scene_number} (Act {act_number}): {slugline}\n"
+            f"- Narrative Goal: {narrative_goal or 'Cinematic progression'}\n"
+            f"- Target Shot: {json.dumps(active_shot, ensure_ascii=False)[:500] if active_shot else 'Scene Primary'}\n"
+            f"- Focus: {focus}\n"
+            f"- Director Intent Notes: {intent_notes or 'None'}\n"
+            f"- Bible Anchors: character={matched_char_name}, state={active_state_code}, env={matched_env}, props={matched_props}\n"
+            f"- Continuity Laws: {applicable_laws}\n\n"
+            f"{rag_block}\n\n"
+            "Return STRICT valid JSON with key 'recommendations' (list of exactly 3 objects), each having:\n"
+            "axis, title, rationale, camera_code (#Cam 01-#Cam 34), lens_code (#Lens 01-#Lens 06), "
+            "comp_code (#Comp 01-#Comp 08), light_code (#Light 01-#Light 14), act_code (#Act 01-#Act 24), "
+            "speed_code (#Speed 01-#Speed 05), transition_type ('J_CUT'|'L_CUT'|'HARD_CUT'|'NONE'), "
+            "continuity_warnings (list of short strings)."
+        )
+
+        source = "heuristic_rag"
+        raw_recs: list[dict[str, Any]] = []
+        try:
+            llm_res = await asyncio.wait_for(
+                self._call_llm(
+                    messages=[
+                        {"role": "system", "content": POLYA_AI_DIRECTOR_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    retry_on_parse_error=False,
+                ),
+                timeout=10.0,
+            )
+            if isinstance(llm_res, dict) and isinstance(llm_res.get("recommendations"), list) and llm_res["recommendations"]:
+                raw_recs = [r for r in llm_res["recommendations"] if isinstance(r, dict)]
+                if raw_recs:
+                    source = "llm_rag"
+        except Exception as exc:
+            logger.info("director_advisor_heuristic_fallback: %s", exc)
+
+        valid_cuts = {"NONE", "J_CUT", "L_CUT", "HARD_CUT"}
+        recommendations: list[dict[str, Any]] = []
+        for idx, fb in enumerate(heuristics):
+            item = raw_recs[idx] if idx < len(raw_recs) else {}
+            cut = str(item.get("transition_type") or fb["transition_type"]).upper().strip()
+            if cut not in valid_cuts:
+                cut = fb["transition_type"]
+            raw_warns = item.get("continuity_warnings")
+            warns = (
+                [str(w).strip() for w in raw_warns if str(w).strip()]
+                if isinstance(raw_warns, list) and raw_warns
+                else fb["continuity_warnings"]
+            )
+            recommendations.append({
+                "recommendation_id": fb["recommendation_id"],
+                "axis": str(item.get("axis") or fb["axis"]).strip() or fb["axis"],
+                "title": str(item.get("title") or fb["title"]).strip() or fb["title"],
+                "rationale": str(item.get("rationale") or fb["rationale"]).strip() or fb["rationale"],
+                "camera_code": self._coerce_matrix_code("cam", item.get("camera_code"), fb["camera_code"]),
+                "lens_code": self._coerce_matrix_code("lens", item.get("lens_code"), fb["lens_code"]),
+                "comp_code": self._coerce_matrix_code("comp", item.get("comp_code"), fb["comp_code"]),
+                "light_code": self._coerce_matrix_code("light", item.get("light_code"), fb["light_code"]),
+                "act_code": self._coerce_matrix_code("act", item.get("act_code"), fb["act_code"]),
+                "speed_code": self._coerce_matrix_code("speed", item.get("speed_code"), fb["speed_code"]),
+                "transition_type": cut,
+                "continuity_warnings": warns,
+            })
+
+        return {
+            "project_id": context.project_id,
+            "scene_id": str(scene.get("id") or ""),
+            "shot_id": str(target_shot.get("id")) if target_shot and target_shot.get("id") else None,
+            "style_code": style_code,
+            "style_family": style_family,
+            "source": source,
+            "director_rag_hits": rag_hits,
+            "bible_anchors": {
+                "matched_character": matched_char_name,
+                "active_state_code": active_state_code,
+                "matched_environment": matched_env,
+                "matched_props": matched_props,
+                "applicable_laws": applicable_laws,
+            },
+            "recommendations": recommendations,
+            "shot_risk_flags": shot_risk_flags,
+        }

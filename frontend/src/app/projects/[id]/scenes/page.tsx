@@ -8,6 +8,7 @@ import ActFilterBar, { ActFilterType } from "@/components/scenes/ActFilterBar";
 import SceneCard from "@/components/scenes/SceneCard";
 import SceneDetailDrawer from "@/components/scenes/SceneDetailDrawer";
 import BlueprintModal, { BlueprintConfig } from "@/components/scenes/BlueprintModal";
+import ContinuityAuditPanel from "@/components/scenes/ContinuityAuditPanel";
 import AIRenderProviderCard from "@/components/AIRenderProviderCard";
 import { api, Project, Scene, ProjectQCSummary } from "@/lib/api";
 import {
@@ -21,6 +22,7 @@ import {
   ChevronRight,
   AlertTriangle,
   Sparkles,
+  ShieldCheck,
 } from "lucide-react";
 
 export default function ScenesStoryboardPage() {
@@ -37,6 +39,7 @@ export default function ScenesStoryboardPage() {
   const [isBlueprintModalOpen, setIsBlueprintModalOpen] = useState(false);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [qcSummary, setQcSummary] = useState<ProjectQCSummary | null>(null);
+  const [showContinuityAudit, setShowContinuityAudit] = useState(false);
 
   // Load project & scenes
   const loadScenesData = useCallback(async (options?: { silent?: boolean }) => {
@@ -299,6 +302,14 @@ export default function ScenesStoryboardPage() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2 pt-1 sm:pt-0">
+            <button
+              type="button"
+              onClick={() => setShowContinuityAudit((v) => !v)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-canvas hover:bg-elevated border border-amber-500/40 text-amber-400 text-xs font-medium transition-colors"
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span>{showContinuityAudit ? "Hide Continuity Audit" : "Continuity Audit"}</span>
+            </button>
             <Link
               href={`/projects/${projectId}/studio`}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-canvas hover:bg-elevated border border-border text-obsidian-secondary hover:text-amber-400 text-xs font-medium transition-colors"
@@ -328,6 +339,13 @@ export default function ScenesStoryboardPage() {
          * AI Render Provider Card (Global Acuan SQLite)
          * ========================================================================= */}
         <AIRenderProviderCard projectId={projectId} />
+
+        {showContinuityAudit && (
+          <ContinuityAuditPanel
+            projectId={projectId}
+            onClose={() => setShowContinuityAudit(false)}
+          />
+        )}
 
         {/* =========================================================================
          * Act Filter Bar & Blueprint Generation
