@@ -458,11 +458,16 @@ export interface CharacterState {
   injuries_and_wear?: string;
   expression_anchor?: string;
   image_url?: string | null;
+  resolution_width?: number | null;
+  resolution_height?: number | null;
+  is_2k?: boolean;
+  previous_1k_url?: string | null;
   created_at?: string;
 }
 
 export interface CharacterSheetMeta {
   image_url?: string;
+  previous_1k_url?: string | null;
   prompt?: string;
   negative_prompt?: string;
   anchors_used?: string[];
@@ -472,11 +477,15 @@ export interface CharacterSheetMeta {
   aspect_ratio?: string;
   rendered_at?: string;
   updated_at?: string;
+  upscaled_at?: string;
   source?: "ai_generated" | "manual_upload" | string;
   original_filename?: string;
   file_size?: number;
   width?: number;
   height?: number;
+  resolution_width?: number | null;
+  resolution_height?: number | null;
+  is_2k?: boolean;
   status?: string;
 }
 
@@ -491,6 +500,9 @@ export interface SheetPromptItem {
   dna_seed: number;
   width: number;
   height: number;
+  preset_id?: string | null;
+  routing_mode?: string;
+  layers_applied?: string[];
   compiled_prompt?: string;
   prompt_override?: string | null;
   effective_prompt?: string;
@@ -1377,6 +1389,7 @@ export const api = {
       slot?: "closeup" | "expression" | "front";
       dna_seed: number;
       provider: string;
+      slot_dimensions?: Record<string, { resolution_width?: number; resolution_height?: number; is_2k?: boolean }>;
       message?: string;
     }> => {
       return apiRequest(`/projects/${projectId}/characters/preview`, {
@@ -1396,8 +1409,60 @@ export const api = {
       preview_token: string;
       slot: string;
       image_url: string;
+      resolution_width?: number | null;
+      resolution_height?: number | null;
+      is_2k?: boolean;
     }> => {
       return apiRequest(`/projects/${projectId}/characters/preview/attach`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    upscaleCharacterPreview: async (
+      projectId: string,
+      payload: {
+        preview_token: string;
+        slot: "closeup" | "expression" | "front";
+        name?: string;
+        role?: string;
+        base_visual_prompt?: string;
+        dna_seed?: number;
+        provider_override?: string;
+      }
+    ): Promise<{
+      status: string;
+      preview_token: string;
+      slot: "closeup" | "expression" | "front";
+      image_url: string;
+      previous_1k_url?: string | null;
+      resolution_width: number;
+      resolution_height: number;
+      is_2k: boolean;
+      provider: string;
+      model?: string;
+      message?: string;
+    }> => {
+      return apiRequest(`/projects/${projectId}/characters/preview/upscale`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    revertCharacterPreview: async (
+      projectId: string,
+      payload: {
+        preview_token: string;
+        slot: "closeup" | "expression" | "front";
+      }
+    ): Promise<{
+      status: string;
+      preview_token: string;
+      slot: "closeup" | "expression" | "front";
+      image_url: string;
+      resolution_width: number;
+      resolution_height: number;
+      is_2k: boolean;
+    }> => {
+      return apiRequest(`/projects/${projectId}/characters/preview/revert`, {
         method: "POST",
         body: JSON.stringify(payload),
       });
@@ -1560,6 +1625,56 @@ export const api = {
       return apiRequest<CharacterSheetUploadResponse>(`/characters/${characterId}/upload-sheet`, {
         method: "POST",
         body: formData,
+      });
+    },
+    upscaleCharacterAsset: async (
+      characterId: string,
+      payload: {
+        slot_key?: string;
+        state_id?: string;
+        provider_override?: string;
+        model_override?: string;
+      }
+    ): Promise<{
+      status: string;
+      character_id: string;
+      slot_key: string;
+      state_id?: string | null;
+      image_url: string;
+      previous_1k_url?: string | null;
+      resolution_width: number;
+      resolution_height: number;
+      is_2k: boolean;
+      provider: string;
+      model?: string;
+      auto_routed_from?: string | null;
+      message: string;
+    }> => {
+      return apiRequest(`/bible/characters/${characterId}/upscale-asset`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    revertCharacterAsset: async (
+      characterId: string,
+      payload: {
+        slot_key?: string;
+        state_id?: string;
+      }
+    ): Promise<{
+      status: string;
+      character_id: string;
+      slot_key: string;
+      state_id?: string | null;
+      image_url: string;
+      resolution_width: number;
+      resolution_height: number;
+      is_2k: boolean;
+      message: string;
+    }> => {
+      return apiRequest(`/bible/characters/${characterId}/revert-asset`, {
+        method: "POST",
+        body: JSON.stringify(payload),
       });
     },
   },

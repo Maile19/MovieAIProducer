@@ -31,7 +31,11 @@ from backend.app.infrastructure.sd35_client import (
     ZeroGPUQuotaExceededError,
     get_image_provider,
 )
-from backend.app.api.v1.render_settings import get_project_render_config, decrypt_key
+from backend.app.api.v1.render_settings import (
+    get_project_render_config,
+    decrypt_key,
+    resolve_effective_render_provider,
+)
 from backend.app.infrastructure.universal_image_adapter import (
     UniversalImageAdapter,
     UniversalImageRequest,
@@ -198,33 +202,20 @@ async def generate_scene_preview(
 
     settings = get_settings()
 
-    render_cfg = get_project_render_config(str(scene.project_id))
-    active_prov = render_cfg.get("active_provider_id") if render_cfg else None
-    apply_all = render_cfg.get("apply_to_all_scenes", True) if render_cfg else False
-
-    prov_override = payload.provider if (payload.provider and payload.provider not in ("sd35_large_hf", "default", None)) else None
-    base_url_to_use = None
-    api_key_to_use = None
-
-    if prov_override and render_cfg and prov_override in render_cfg.get("configs", {}):
-        effective_provider = prov_override
-        cfg_override = render_cfg["configs"][prov_override]
-        base_url_to_use = cfg_override.get("baseUrl")
-        model_to_use = payload.model or cfg_override.get("modelId")
-        stored_key = cfg_override.get("apiKey", "")
-        api_key_to_use = decrypt_key(stored_key) if stored_key else ""
-    elif render_cfg and apply_all and active_prov:
-        effective_provider = active_prov
-        model_to_use = payload.model or render_cfg.get("model_id")
-        base_url_to_use = render_cfg.get("base_url")
-        api_key_to_use = render_cfg.get("api_key")
-    else:
-        effective_provider = (payload.provider or settings.image_provider_default).lower()
-        if effective_provider == "sd35_large_hf":
-            effective_provider = "9router"
-        model_to_use = payload.model
-        base_url_to_use = None
-        api_key_to_use = None
+    resolved_render = resolve_effective_render_provider(
+        project_id=str(scene.project_id),
+        requested_provider=payload.provider,
+        requested_model=payload.model,
+        ignored_override_values=("sd35_large_hf", "default", None),
+        default_provider=settings.image_provider_default,
+    )
+    effective_provider = resolved_render["provider_id"]
+    model_to_use = resolved_render["model_id"]
+    base_url_to_use = resolved_render["base_url"]
+    api_key_to_use = resolved_render["api_key"]
+    use_universal_adapter = resolved_render["use_universal_adapter"]
+    if not use_universal_adapter and effective_provider == "sd35_large_hf":
+        effective_provider = "9router"
 
     # Load primary shot, bible, and cast character + act-mapped #State DNA before compiling prompt
     primary_shot_stmt = select(ShotModel).where(ShotModel.scene_id == scene.id).order_by(ShotModel.shot_number.asc())
@@ -364,7 +355,7 @@ async def generate_scene_preview(
             },
         }
 
-    if render_cfg and (apply_all or prov_override):
+    if use_universal_adapter:
         adapter = UniversalImageAdapter()
         req = UniversalImageRequest(
             provider_id=effective_provider,
@@ -544,33 +535,20 @@ async def generate_project_concept_preview(
 
     settings = get_settings()
 
-    render_cfg = get_project_render_config(str(project.id))
-    active_prov = render_cfg.get("active_provider_id") if render_cfg else None
-    apply_all = render_cfg.get("apply_to_all_scenes", True) if render_cfg else False
-
-    prov_override = payload.provider if (payload.provider and payload.provider not in ("sd35_large_hf", "default", None)) else None
-    base_url_to_use = None
-    api_key_to_use = None
-
-    if prov_override and render_cfg and prov_override in render_cfg.get("configs", {}):
-        effective_provider = prov_override
-        cfg_override = render_cfg["configs"][prov_override]
-        base_url_to_use = cfg_override.get("baseUrl")
-        model_to_use = payload.model or cfg_override.get("modelId")
-        stored_key = cfg_override.get("apiKey", "")
-        api_key_to_use = decrypt_key(stored_key) if stored_key else ""
-    elif render_cfg and apply_all and active_prov:
-        effective_provider = active_prov
-        model_to_use = payload.model or render_cfg.get("model_id")
-        base_url_to_use = render_cfg.get("base_url")
-        api_key_to_use = render_cfg.get("api_key")
-    else:
-        effective_provider = (payload.provider or settings.image_provider_default).lower()
-        if effective_provider == "sd35_large_hf":
-            effective_provider = "9router"
-        model_to_use = payload.model
-        base_url_to_use = None
-        api_key_to_use = None
+    resolved_render = resolve_effective_render_provider(
+        project_id=str(project.id),
+        requested_provider=payload.provider,
+        requested_model=payload.model,
+        ignored_override_values=("sd35_large_hf", "default", None),
+        default_provider=settings.image_provider_default,
+    )
+    effective_provider = resolved_render["provider_id"]
+    model_to_use = resolved_render["model_id"]
+    base_url_to_use = resolved_render["base_url"]
+    api_key_to_use = resolved_render["api_key"]
+    use_universal_adapter = resolved_render["use_universal_adapter"]
+    if not use_universal_adapter and effective_provider == "sd35_large_hf":
+        effective_provider = "9router"
 
     # Build prompt if not overridden
     prompt = payload.prompt
@@ -605,7 +583,7 @@ async def generate_project_concept_preview(
     width, height = _resolve_preview_resolution(payload.aspect_ratio)
     steps = payload.steps or settings.sd35_default_steps
 
-    if render_cfg and (apply_all or prov_override):
+    if use_universal_adapter:
         adapter = UniversalImageAdapter()
         req = UniversalImageRequest(
             provider_id=effective_provider,
@@ -745,33 +723,20 @@ async def generate_shot_preview(
 
     settings = get_settings()
 
-    render_cfg = get_project_render_config(str(scene.project_id)) if scene else None
-    active_prov = render_cfg.get("active_provider_id") if render_cfg else None
-    apply_all = render_cfg.get("apply_to_all_scenes", True) if render_cfg else False
-
-    prov_override = payload.provider if (payload.provider and payload.provider not in ("sd35_large_hf", "default", None)) else None
-    base_url_to_use = None
-    api_key_to_use = None
-
-    if prov_override and render_cfg and prov_override in render_cfg.get("configs", {}):
-        effective_provider = prov_override
-        cfg_override = render_cfg["configs"][prov_override]
-        base_url_to_use = cfg_override.get("baseUrl")
-        model_to_use = payload.model or cfg_override.get("modelId")
-        stored_key = cfg_override.get("apiKey", "")
-        api_key_to_use = decrypt_key(stored_key) if stored_key else ""
-    elif render_cfg and apply_all and active_prov:
-        effective_provider = active_prov
-        model_to_use = payload.model or render_cfg.get("model_id")
-        base_url_to_use = render_cfg.get("base_url")
-        api_key_to_use = render_cfg.get("api_key")
-    else:
-        effective_provider = (payload.provider or settings.image_provider_default).lower()
-        if effective_provider == "sd35_large_hf":
-            effective_provider = "9router"
-        model_to_use = payload.model
-        base_url_to_use = None
-        api_key_to_use = None
+    resolved_render = resolve_effective_render_provider(
+        project_id=str(scene.project_id) if scene else None,
+        requested_provider=payload.provider,
+        requested_model=payload.model,
+        ignored_override_values=("sd35_large_hf", "default", None),
+        default_provider=settings.image_provider_default,
+    )
+    effective_provider = resolved_render["provider_id"]
+    model_to_use = resolved_render["model_id"]
+    base_url_to_use = resolved_render["base_url"]
+    api_key_to_use = resolved_render["api_key"]
+    use_universal_adapter = resolved_render["use_universal_adapter"]
+    if not use_universal_adapter and effective_provider == "sd35_large_hf":
+        effective_provider = "9router"
 
     # Load Character + act-mapped #State DNA before compiling shot prompt
     lead_char = None
@@ -921,7 +886,7 @@ async def generate_shot_preview(
             },
         }
 
-    if render_cfg and (apply_all or prov_override):
+    if use_universal_adapter:
         adapter = UniversalImageAdapter()
         req = UniversalImageRequest(
             provider_id=effective_provider,

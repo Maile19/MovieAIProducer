@@ -2,6 +2,7 @@ import asyncio
 import base64
 from datetime import datetime, timezone
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -11,10 +12,15 @@ import uuid
 
 import httpx
 import jwt
+from PIL import Image
 from pydantic import BaseModel, Field
 import structlog
 
 from backend.app.core.config import get_settings
+from backend.app.domain.character_prompt_compiler import (
+    fold_negative_bans_into_positive,
+    resolve_provider_dimensions,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -29,6 +35,9 @@ class UniversalImageRequest(BaseModel):
     height: Optional[int] = None
     seed: Optional[int] = None
     reference_image_paths: Optional[List[str]] = None
+    strength: Optional[float] = None
+    filename_suffix: Optional[str] = None
+    style_code: Optional[str] = None
     enable_fallback: bool = True
     base_url_override: Optional[str] = None
     api_key_override: Optional[str] = None
@@ -43,6 +52,7 @@ class UniversalImageResult(BaseModel):
     model_id: str
     width: int
     height: int
+    is_2k: bool = False
     seed: Optional[int] = None
     fallback_used: bool = False
     fallback_reason: Optional[str] = None
@@ -50,19 +60,223 @@ class UniversalImageResult(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
-def _resolve_dimensions(aspect_ratio: str, width: Optional[int], height: Optional[int]) -> tuple[int, int]:
-    if width and height:
-        return width, height
+# Auditable provider capability table grounded in actual adapter protocol implementations
+PROVIDER_2K_CAPABILITIES: dict[str, dict[str, Any]] = {
+    "seedream-5-5": {
+        "native_2k": True,
+        "image_reference": True,
+        "separate_negative": True,
+        "direct_http_api": True,
+        "notes": "BytePlus ModelArk /images/generations accepts 2K size and base64 image reference.",
+    },
+    "flux": {
+        "native_2k": True,
+        "image_reference": True,
+        "separate_negative": False,
+        "direct_http_api": True,
+        "notes": "BFL REST API accepts 2K width/height and input_image/image_prompt reference; negative folded into positive.",
+    },
+    "gemini-direct": {
+        "native_2k": True,
+        "image_reference": True,
+        "separate_negative": False,
+        "direct_http_api": True,
+        "notes": "Gemini generateContent accepts inlineData reference & imageConfig.imageSize='2K'; imagen-* :predict lacks inline ref.",
+    },
+    "nano-banana-2-1": {
+        "native_2k": True,
+        "image_reference": True,
+        "separate_negative": False,
+        "direct_http_api": True,
+        "notes": "Uses Gemini generateContent protocol with inlineData reference & imageConfig.imageSize='2K'.",
+    },
+    "nano-banana-2.1": {
+        "native_2k": True,
+        "image_reference": True,
+        "separate_negative": False,
+        "direct_http_api": True,
+        "notes": "Alias for nano-banana-2-1.",
+    },
+    "9router": {
+        "native_2k": False,
+        "image_reference": False,
+        "separate_negative": True,
+        "direct_http_api": True,
+        "notes": "Local OpenAI-compatible gateway capped at 1K (1024x1024) without image reference forwarding.",
+    },
+    "ag_gemini_flash": {
+        "native_2k": False,
+        "image_reference": False,
+        "separate_negative": True,
+        "direct_http_api": True,
+        "notes": "Routed via 9Router (1K capped, no image reference).",
+    },
+    "google-flow": {
+        "native_2k": False,
+        "image_reference": True,
+        "separate_negative": False,
+        "direct_http_api": False,
+        "notes": "Playwright worker (flow_image_worker.py) uploads reference & downloads =s0 without explicit 2K API control.",
+    },
+    "google_flow": {
+        "native_2k": False,
+        "image_reference": True,
+        "separate_negative": False,
+        "direct_http_api": False,
+        "notes": "Alias for google-flow.",
+    },
+    "qwen-image-3": {
+        "native_2k": True,
+        "image_reference": False,
+        "separate_negative": True,
+        "direct_http_api": True,
+        "notes": "DashScope text2image/image-synthesis supports 2K size but lacks reference image input in adapter.",
+    },
+    "adobe-firefly-4": {
+        "native_2k": True,
+        "image_reference": False,
+        "separate_negative": False,
+        "direct_http_api": True,
+        "notes": "Adobe Firefly v3 /images/generate supports 2K size but lacks reference image input in adapter.",
+    },
+    "sd35_large_hf": {
+        "native_2k": False,
+        "image_reference": False,
+        "separate_negative": True,
+        "direct_http_api": True,
+        "notes": "HF Gradio SD3.5 Large strictly clamped to [512, 1024] with no image_reference.",
+    },
+    "gpt-2-6": {
+        "native_2k": False,
+        "image_reference": False,
+        "separate_negative": True,
+        "direct_http_api": True,
+        "notes": "OpenAI /images/generations capped at 1K square and no image_reference wiring.",
+    },
+}
+
+AUTO_ROUTE_2K_PRIORITY: tuple[str, ...] = (
+    "seedream-5-5",
+    "flux",
+    "gemini-direct",
+    "nano-banana-2-1",
+)
+
+
+def get_provider_2k_capability(
+    provider_id: Optional[str],
+    model_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Return actual 2K + image_reference capabilities for the given provider/model."""
+    norm = (provider_id or "").strip().lower()
+    if norm == "google_flow":
+        norm = "google-flow"
+    elif norm == "nano-banana-2.1":
+        norm = "nano-banana-2-1"
+
+    base = dict(
+        PROVIDER_2K_CAPABILITIES.get(
+            norm,
+            {
+                "native_2k": False,
+                "image_reference": False,
+                "separate_negative": True,
+                "direct_http_api": True,
+                "notes": "Provider lacks verified native 2K + image_reference support in adapter.",
+            },
+        )
+    )
+    if norm in ("gemini-direct", "nano-banana-2-1") and model_id and model_id.strip().lower().startswith("imagen-"):
+        base["native_2k"] = False
+        base["image_reference"] = False
+        base["notes"] = "Imagen :predict endpoint does not support inline reference image or explicit 2K pixels."
+    return base
+
+
+def supports_native_2k_upscale(
+    provider_id: Optional[str],
+    model_id: Optional[str] = None,
+) -> tuple[bool, str]:
+    """Check whether provider/model supports direct HTTP native 2K + image_reference upscale."""
+    cap = get_provider_2k_capability(provider_id, model_id=model_id)
+    if cap["native_2k"] and cap["image_reference"] and cap["direct_http_api"]:
+        return True, cap["notes"]
+    missing = []
+    if not cap["direct_http_api"]:
+        missing.append("direct HTTP 2K API")
+    if not cap["native_2k"]:
+        missing.append("native 2K resolution (>=1920px)")
+    if not cap["image_reference"]:
+        missing.append("image_reference refinement input")
+    return False, f"{provider_id or 'unknown'} does not support {', '.join(missing)}. ({cap['notes']})"
+
+
+def _resolve_dimensions(
+    aspect_ratio: str,
+    width: Optional[int],
+    height: Optional[int],
+    provider_id: Optional[str] = None,
+) -> tuple[int, int]:
     ar = (aspect_ratio or "16:9").strip()
-    if ar == "1:1":
-        return 1024, 1024
+    if width and height:
+        w, h = width, height
+    elif ar == "1:1":
+        w, h = 1024, 1024
     elif ar == "9:16":
-        return 576, 1024
+        w, h = 576, 1024
     else:  # 16:9 default
-        return 1024, 576
+        w, h = 1024, 576
+
+    if provider_id:
+        return resolve_provider_dimensions(provider_id, w, h, ar)
+    return w, h
 
 
-def _save_raw_image(raw_bytes: bytes, provider_id: str, storage_path: Path, public_prefix: str) -> tuple[str, str, str]:
+def _encode_first_reference(
+    reference_image_paths: Optional[List[str]],
+) -> Optional[tuple[str, str, str]]:
+    """Return (base64_str, mime_type, data_uri) for the first valid reference image on disk."""
+    if not reference_image_paths:
+        return None
+    for ref_path in reference_image_paths:
+        if not ref_path:
+            continue
+        p = Path(ref_path)
+        if not (p.exists() and p.is_file() and p.stat().st_size > 0):
+            continue
+        raw = p.read_bytes()
+        mime = "image/png"
+        if raw.startswith(b"\xff\xd8\xff"):
+            mime = "image/jpeg"
+        elif raw.startswith(b"RIFF") and len(raw) >= 12 and raw[8:12] == b"WEBP":
+            mime = "image/webp"
+        elif p.suffix.lower() in (".jpg", ".jpeg"):
+            mime = "image/jpeg"
+        elif p.suffix.lower() == ".webp":
+            mime = "image/webp"
+        b64 = base64.b64encode(raw).decode("utf-8")
+        return b64, mime, f"data:{mime};base64,{b64}"
+    return None
+
+
+def _inspect_image_dimensions(raw_bytes: bytes, fallback_w: int, fallback_h: int) -> tuple[int, int]:
+    """Read real pixel dimensions via Pillow without resampling."""
+    try:
+        with Image.open(io.BytesIO(raw_bytes)) as img:
+            return img.size
+    except Exception:
+        return fallback_w, fallback_h
+
+
+def _save_raw_image(
+    raw_bytes: bytes,
+    provider_id: str,
+    storage_path: Path,
+    public_prefix: str,
+    filename_suffix: Optional[str] = None,
+    fallback_width: int = 0,
+    fallback_height: int = 0,
+) -> tuple[str, str, str, int, int]:
     storage_path.mkdir(parents=True, exist_ok=True)
     mime_type = "image/webp"
     ext = "webp"
@@ -77,13 +291,28 @@ def _save_raw_image(raw_bytes: bytes, provider_id: str, storage_path: Path, publ
         mime_type = "image/webp"
         ext = "webp"
 
-    sha = hashlib.sha256(raw_bytes).hexdigest()[:8]
-    filename = f"{provider_id}_{uuid.uuid4().hex[:8]}_{sha}.{ext}"
+    out_bytes = raw_bytes
+    if filename_suffix:
+        ext = "png"
+        mime_type = "image/png"
+        if not raw_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            try:
+                with Image.open(io.BytesIO(raw_bytes)) as img:
+                    buf = io.BytesIO()
+                    img.convert("RGB").save(buf, format="PNG")
+                    out_bytes = buf.getvalue()
+            except Exception:
+                pass
+
+    actual_w, actual_h = _inspect_image_dimensions(out_bytes, fallback_width, fallback_height)
+    sha = hashlib.sha256(out_bytes).hexdigest()[:8]
+    suffix_part = filename_suffix or ""
+    filename = f"{provider_id}_{uuid.uuid4().hex[:8]}_{sha}{suffix_part}.{ext}"
     target_path = storage_path / filename
-    target_path.write_bytes(raw_bytes)
+    target_path.write_bytes(out_bytes)
 
     local_url = f"{public_prefix.rstrip('/')}/{filename}"
-    return str(target_path), local_url, mime_type
+    return str(target_path), local_url, mime_type, actual_w, actual_h
 
 
 def _resolve_kling_token(api_key: str) -> str:
@@ -271,7 +500,9 @@ class UniversalImageAdapter:
     async def generate_image(self, request: UniversalImageRequest) -> UniversalImageResult:
         """Route generation request to appropriate protocol handler with auto-fallback to 9Router."""
         provider_id = (request.provider_id or "gemini-direct").strip()
-        width, height = _resolve_dimensions(request.aspect_ratio, request.width, request.height)
+        width, height = _resolve_dimensions(
+            request.aspect_ratio, request.width, request.height, provider_id=provider_id
+        )
 
         try:
             if provider_id in ("gemini-direct", "nano-banana-2-1", "nano-banana-2.1"):
@@ -323,6 +554,11 @@ class UniversalImageAdapter:
             raise ValueError("API Key is required for Gemini Direct API.")
 
         raw_bytes: Optional[bytes] = None
+        effective_prompt = fold_negative_bans_into_positive(
+            req.prompt,
+            req.negative_prompt,
+            style_code=req.style_code,
+        )
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_seconds)) as client:
             # Protocol A: Imagen Models (:predict)
@@ -330,7 +566,7 @@ class UniversalImageAdapter:
                 predict_url = f"{base_url}/models/{model_id}:predict?key={api_key}"
                 ar = req.aspect_ratio if req.aspect_ratio in ("16:9", "1:1", "9:16") else "16:9"
                 payload = {
-                    "instances": [{"prompt": req.prompt}],
+                    "instances": [{"prompt": effective_prompt}],
                     "parameters": {
                         "sampleCount": 1,
                         "aspectRatio": ar,
@@ -348,7 +584,7 @@ class UniversalImageAdapter:
             # Protocol B: Gemini Multimodal Content Generation
             else:
                 gen_url = f"{base_url}/models/{model_id}:generateContent?key={api_key}"
-                parts: list[dict[str, Any]] = [{"text": req.prompt}]
+                parts: list[dict[str, Any]] = [{"text": effective_prompt}]
 
                 # Include visual anchor reference images if provided
                 if req.reference_image_paths:
@@ -363,11 +599,19 @@ class UniversalImageAdapter:
                                 }
                             })
 
+                gen_config: dict[str, Any] = {
+                    "responseModalities": ["TEXT", "IMAGE"],
+                }
+                if max(width, height) >= 1536:
+                    ar = req.aspect_ratio if req.aspect_ratio in ("1:1", "16:9", "3:4", "9:16", "4:3") else "1:1"
+                    gen_config["imageConfig"] = {
+                        "aspectRatio": ar,
+                        "imageSize": "2K",
+                    }
+
                 payload = {
                     "contents": [{"parts": parts}],
-                    "generationConfig": {
-                        "responseModalities": ["TEXT", "IMAGE"],
-                    },
+                    "generationConfig": gen_config,
                 }
                 res = await client.post(gen_url, json=payload)
                 if res.status_code != 200:
@@ -391,16 +635,23 @@ class UniversalImageAdapter:
                         f"Gemini model '{model_id}' returned text only without image data{detail}. Falling back."
                     )
 
-        local_path, local_url, mime_type = _save_raw_image(
-            raw_bytes, req.provider_id, self.storage_path, self.public_url_prefix
+        local_path, local_url, mime_type, actual_w, actual_h = _save_raw_image(
+            raw_bytes,
+            req.provider_id,
+            self.storage_path,
+            self.public_url_prefix,
+            filename_suffix=req.filename_suffix,
+            fallback_width=width,
+            fallback_height=height,
         )
         return UniversalImageResult(
             local_path=local_path,
             local_url=local_url,
             provider_id=req.provider_id,
             model_id=model_id,
-            width=width,
-            height=height,
+            width=actual_w,
+            height=actual_h,
+            is_2k=max(actual_w, actual_h) >= 1920,
             seed=req.seed,
             mime_type=mime_type,
         )
@@ -456,8 +707,9 @@ class UniversalImageAdapter:
                 raise RuntimeError(f"Failed to download Ideogram image: HTTP {dl.status_code}")
             raw_bytes = dl.content
 
-        local_path, local_url, mime_type = _save_raw_image(
-            raw_bytes, "ideogram", self.storage_path, self.public_url_prefix
+        local_path, local_url, mime_type, actual_w, actual_h = _save_raw_image(
+            raw_bytes, "ideogram", self.storage_path, self.public_url_prefix,
+            filename_suffix=req.filename_suffix, fallback_width=width, fallback_height=height,
         )
         return UniversalImageResult(
             local_path=local_path,
@@ -465,8 +717,9 @@ class UniversalImageAdapter:
             remote_url=img_url,
             provider_id="ideogram-4-0",
             model_id=model_id,
-            width=width,
-            height=height,
+            width=actual_w,
+            height=actual_h,
+            is_2k=max(actual_w, actual_h) >= 1920,
             seed=req.seed,
             mime_type=mime_type,
         )
@@ -538,8 +791,9 @@ class UniversalImageAdapter:
                 raise RuntimeError(f"Failed to download Leonardo image: HTTP {dl.status_code}")
             raw_bytes = dl.content
 
-        local_path, local_url, mime_type = _save_raw_image(
-            raw_bytes, "leonardo", self.storage_path, self.public_url_prefix
+        local_path, local_url, mime_type, actual_w, actual_h = _save_raw_image(
+            raw_bytes, "leonardo", self.storage_path, self.public_url_prefix,
+            filename_suffix=req.filename_suffix, fallback_width=width, fallback_height=height,
         )
         return UniversalImageResult(
             local_path=local_path,
@@ -547,8 +801,9 @@ class UniversalImageAdapter:
             remote_url=image_url,
             provider_id="leonardo-phoenix",
             model_id=model_id,
-            width=width,
-            height=height,
+            width=actual_w,
+            height=actual_h,
+            is_2k=max(actual_w, actual_h) >= 1920,
             seed=req.seed,
             mime_type=mime_type,
         )
@@ -608,8 +863,9 @@ class UniversalImageAdapter:
                 raise RuntimeError(f"Failed to download Luma image: HTTP {dl.status_code}")
             raw_bytes = dl.content
 
-        local_path, local_url, mime_type = _save_raw_image(
-            raw_bytes, "luma", self.storage_path, self.public_url_prefix
+        local_path, local_url, mime_type, actual_w, actual_h = _save_raw_image(
+            raw_bytes, "luma", self.storage_path, self.public_url_prefix,
+            filename_suffix=req.filename_suffix, fallback_width=width, fallback_height=height,
         )
         return UniversalImageResult(
             local_path=local_path,
@@ -617,8 +873,9 @@ class UniversalImageAdapter:
             remote_url=image_url,
             provider_id="luma-uni-1",
             model_id=model_id,
-            width=width,
-            height=height,
+            width=actual_w,
+            height=actual_h,
+            is_2k=max(actual_w, actual_h) >= 1920,
             seed=req.seed,
             mime_type=mime_type,
         )
@@ -688,8 +945,9 @@ class UniversalImageAdapter:
                 raise RuntimeError(f"Failed to download Kling image: HTTP {dl.status_code}")
             raw_bytes = dl.content
 
-        local_path, local_url, mime_type = _save_raw_image(
-            raw_bytes, "kling", self.storage_path, self.public_url_prefix
+        local_path, local_url, mime_type, actual_w, actual_h = _save_raw_image(
+            raw_bytes, "kling", self.storage_path, self.public_url_prefix,
+            filename_suffix=req.filename_suffix, fallback_width=width, fallback_height=height,
         )
         return UniversalImageResult(
             local_path=local_path,
@@ -697,8 +955,9 @@ class UniversalImageAdapter:
             remote_url=image_url,
             provider_id="kling-image-4-0",
             model_id=model_id,
-            width=width,
-            height=height,
+            width=actual_w,
+            height=actual_h,
+            is_2k=max(actual_w, actual_h) >= 1920,
             seed=req.seed,
             mime_type=mime_type,
         )
@@ -749,8 +1008,9 @@ class UniversalImageAdapter:
                 raise RuntimeError(f"Failed to download Adobe Firefly image: HTTP {dl.status_code}")
             raw_bytes = dl.content
 
-        local_path, local_url, mime_type = _save_raw_image(
-            raw_bytes, "adobe-firefly", self.storage_path, self.public_url_prefix
+        local_path, local_url, mime_type, actual_w, actual_h = _save_raw_image(
+            raw_bytes, "adobe-firefly", self.storage_path, self.public_url_prefix,
+            filename_suffix=req.filename_suffix, fallback_width=width, fallback_height=height,
         )
         return UniversalImageResult(
             local_path=local_path,
@@ -758,8 +1018,9 @@ class UniversalImageAdapter:
             remote_url=image_url,
             provider_id="adobe-firefly-4",
             model_id=model_id,
-            width=width,
-            height=height,
+            width=actual_w,
+            height=actual_h,
+            is_2k=max(actual_w, actual_h) >= 1920,
             seed=req.seed,
             mime_type=mime_type,
         )
@@ -789,6 +1050,13 @@ class UniversalImageAdapter:
         if req.seed is not None:
             payload["seed"] = req.seed
 
+        # Attach reference image for BytePlus Seedream 5.5 / reference-capable OpenAI-compatible models
+        ref_data = _encode_first_reference(req.reference_image_paths)
+        if ref_data and req.provider_id.strip().lower() in ("seedream-5-5",):
+            _, _, data_uri = ref_data
+            payload["image"] = data_uri
+            payload["sequential_image_generation"] = "disabled"
+
         raw_bytes: Optional[bytes] = None
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_seconds)) as client:
@@ -816,16 +1084,23 @@ class UniversalImageAdapter:
         if not raw_bytes:
             raise RuntimeError(f"Could not retrieve raster image from {req.provider_id}")
 
-        local_path, local_url, mime_type = _save_raw_image(
-            raw_bytes, req.provider_id, self.storage_path, self.public_url_prefix
+        local_path, local_url, mime_type, actual_w, actual_h = _save_raw_image(
+            raw_bytes,
+            req.provider_id,
+            self.storage_path,
+            self.public_url_prefix,
+            filename_suffix=req.filename_suffix,
+            fallback_width=width,
+            fallback_height=height,
         )
         return UniversalImageResult(
             local_path=local_path,
             local_url=local_url,
             provider_id=req.provider_id,
             model_id=model_id,
-            width=width,
-            height=height,
+            width=actual_w,
+            height=actual_h,
+            is_2k=max(actual_w, actual_h) >= 1920,
             seed=req.seed,
             mime_type=mime_type,
         )
@@ -897,8 +1172,9 @@ class UniversalImageAdapter:
 
             raw_bytes = dl_res.content
 
-        local_path, local_url, mime_type = _save_raw_image(
-            raw_bytes, "qwen-image", self.storage_path, self.public_url_prefix
+        local_path, local_url, mime_type, actual_w, actual_h = _save_raw_image(
+            raw_bytes, "qwen-image", self.storage_path, self.public_url_prefix,
+            filename_suffix=req.filename_suffix, fallback_width=width, fallback_height=height,
         )
         return UniversalImageResult(
             local_path=local_path,
@@ -906,8 +1182,9 @@ class UniversalImageAdapter:
             remote_url=image_url,
             provider_id="qwen-image-3",
             model_id=model_id,
-            width=width,
-            height=height,
+            width=actual_w,
+            height=actual_h,
+            is_2k=max(actual_w, actual_h) >= 1920,
             seed=req.seed,
             mime_type=mime_type,
         )
@@ -922,13 +1199,33 @@ class UniversalImageAdapter:
         if not api_key:
             raise ValueError("BFL API Key is required for FLUX.")
 
-        endpoint = f"https://api.bfl.ai/v1/{model_id}"
+        base_url = (req.base_url_override or "https://api.bfl.ai/v1").rstrip("/")
+        endpoint = f"{base_url}/{model_id}"
         headers = {"x-key": api_key, "Content-Type": "application/json"}
-        payload = {
-            "prompt": req.prompt,
+        effective_prompt = fold_negative_bans_into_positive(
+            req.prompt,
+            req.negative_prompt,
+            style_code=req.style_code,
+        )
+        payload: dict[str, Any] = {
+            "prompt": effective_prompt,
             "width": width,
             "height": height,
         }
+        if req.seed is not None:
+            payload["seed"] = req.seed
+
+        ref_data = _encode_first_reference(req.reference_image_paths)
+        if ref_data:
+            b64_ref, _, _ = ref_data
+            if "kontext" in model_id.lower():
+                payload["input_image"] = b64_ref
+                payload["aspect_ratio"] = req.aspect_ratio or "1:1"
+            else:
+                payload["image_prompt"] = b64_ref
+                # Conservative low-drift fidelity (default ~0.65 image prompt strength)
+                strength_val = req.strength if req.strength is not None else 0.35
+                payload["image_prompt_strength"] = round(max(0.55, min(0.85, 1.0 - strength_val)), 2)
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_seconds)) as client:
             sub = await client.post(endpoint, headers=headers, json=payload)
@@ -942,7 +1239,7 @@ class UniversalImageAdapter:
             image_url: Optional[str] = None
             for _ in range(40):
                 await asyncio.sleep(2.0)
-                chk = await client.get(f"https://api.bfl.ai/v1/get_result?id={task_id}", headers=headers)
+                chk = await client.get(f"{base_url}/get_result?id={task_id}", headers=headers)
                 if chk.status_code == 200:
                     cdata = chk.json()
                     status = cdata.get("status")
@@ -960,8 +1257,14 @@ class UniversalImageAdapter:
                 raise RuntimeError(f"Failed to download FLUX image: HTTP {dl.status_code}")
             raw_bytes = dl.content
 
-        local_path, local_url, mime_type = _save_raw_image(
-            raw_bytes, "flux", self.storage_path, self.public_url_prefix
+        local_path, local_url, mime_type, actual_w, actual_h = _save_raw_image(
+            raw_bytes,
+            "flux",
+            self.storage_path,
+            self.public_url_prefix,
+            filename_suffix=req.filename_suffix,
+            fallback_width=width,
+            fallback_height=height,
         )
         return UniversalImageResult(
             local_path=local_path,
@@ -969,8 +1272,9 @@ class UniversalImageAdapter:
             remote_url=image_url,
             provider_id="flux",
             model_id=model_id,
-            width=width,
-            height=height,
+            width=actual_w,
+            height=actual_h,
+            is_2k=max(actual_w, actual_h) >= 1920,
             seed=req.seed,
             mime_type=mime_type,
         )
@@ -997,21 +1301,22 @@ class UniversalImageAdapter:
         reason: str,
     ) -> UniversalImageResult:
         """Automated failover to 9Router when primary provider hits rate limit or errors."""
+        safe_w, safe_h = resolve_provider_dimensions("9router", width, height, req.aspect_ratio)
         fallback_req = UniversalImageRequest(
             provider_id="9router",
             model_id="ag/gemini-3.8-flash",
             prompt=req.prompt,
             negative_prompt=req.negative_prompt,
             aspect_ratio=req.aspect_ratio,
-            width=width,
-            height=height,
+            width=safe_w,
+            height=safe_h,
             seed=req.seed,
             base_url_override=self.settings.effective_ninerouter_base_url,
             api_key_override=self.settings.effective_ninerouter_api_key,
             enable_fallback=False,
         )
 
-        res = await self._generate_openai_compatible(fallback_req, width, height)
+        res = await self._generate_openai_compatible(fallback_req, safe_w, safe_h)
         res.fallback_used = True
         res.fallback_reason = reason
         return res

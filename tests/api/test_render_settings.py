@@ -548,3 +548,95 @@ def test_protocol_handlers(tmp_path):
         assert res.provider_id == "adobe-firefly-4"
         assert res.remote_url == "https://mock.adobe/firefly.png"
 
+
+def test_resolve_effective_render_provider_precedence_and_aliases(client):
+    from backend.app.api.v1.render_settings import resolve_effective_render_provider
+
+    proj_id = "test-precedence-proj-001"
+    configs = {
+        "google-flow": {
+            "baseUrl": "https://labs.google/fx/api",
+            "apiKey": "",
+            "modelId": "flow-imagen-anchor-pro",
+        },
+        "gpt-2-6": {
+            "baseUrl": "https://api.openai.com/v1",
+            "apiKey": "sk-proj-openai-secret",
+            "modelId": "gpt-image-2.6",
+        },
+        "9router": {
+            "baseUrl": "http://127.0.0.1:8080/v1",
+            "apiKey": "sk-9router-local",
+            "modelId": "ag/gemini-3.8-flash",
+        },
+    }
+
+    # 1. Global apply_to_all_scenes=True must defeat stale '9router' + 'ag/gemini-3.8-flash'
+    client.put(
+        f"/api/v1/projects/{proj_id}/render-provider",
+        json={
+            "activeProviderId": "gpt-2-6",
+            "applyToAllScenes": True,
+            "configs": configs,
+            "freePortals": [],
+        },
+    )
+    resolved_global = resolve_effective_render_provider(
+        project_id=proj_id,
+        requested_provider="9router",
+        requested_model="ag/gemini-3.8-flash",
+        ignored_override_values=("ag_gemini_flash", "default", None),
+    )
+    assert resolved_global["provider_id"] == "gpt-2-6"
+    assert resolved_global["model_id"] == "gpt-image-2.6"
+    assert resolved_global["api_key"] == "sk-proj-openai-secret"
+    assert resolved_global["use_universal_adapter"] is True
+
+    # 2. Global google-flow must also match google_flow alias without leaking 9router model
+    client.put(
+        f"/api/v1/projects/{proj_id}/render-provider",
+        json={
+            "activeProviderId": "google-flow",
+            "applyToAllScenes": True,
+            "configs": configs,
+            "freePortals": [],
+        },
+    )
+    resolved_flow = resolve_effective_render_provider(
+        project_id=proj_id,
+        requested_provider="9router",
+        requested_model="ag/gemini-3.8-flash",
+        ignored_override_values=("sd35_large_hf", "default", None),
+    )
+    assert resolved_flow["provider_id"] == "google-flow"
+    assert resolved_flow["model_id"] == "flow-imagen-anchor-pro"
+
+    # Same-provider alias ('google_flow') preserves explicit model override if supplied
+    resolved_flow_same = resolve_effective_render_provider(
+        project_id=proj_id,
+        requested_provider="google_flow",
+        requested_model="flow-custom-model",
+    )
+    assert resolved_flow_same["provider_id"] == "google-flow"
+    assert resolved_flow_same["model_id"] == "flow-custom-model"
+
+    # 3. When apply_to_all_scenes=False, explicit per-request provider override is honored
+    client.put(
+        f"/api/v1/projects/{proj_id}/render-provider",
+        json={
+            "activeProviderId": "google-flow",
+            "applyToAllScenes": False,
+            "configs": configs,
+            "freePortals": [],
+        },
+    )
+    resolved_override = resolve_effective_render_provider(
+        project_id=proj_id,
+        requested_provider="gpt-2-6",
+        requested_model=None,
+    )
+    assert resolved_override["provider_id"] == "gpt-2-6"
+    assert resolved_override["model_id"] == "gpt-image-2.6"
+    assert resolved_override["use_universal_adapter"] is True
+
+

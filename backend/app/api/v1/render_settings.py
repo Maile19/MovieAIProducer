@@ -88,6 +88,31 @@ def decrypt_key(stored_key: str) -> str:
         return ""
 
 
+def normalize_provider_id(provider_id: Optional[str]) -> Optional[str]:
+    """Normalize provider ID aliases (e.g. google_flow <-> google-flow) for consistent comparisons."""
+    if not provider_id:
+        return None
+    clean = provider_id.strip().lower()
+    if clean == "google_flow":
+        return "google-flow"
+    return clean
+
+
+def _lookup_provider_config(
+    configs: Dict[str, Any], provider_id: Optional[str]
+) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Find matching key and config dict in provider_configs_json, handling alias variants."""
+    if not provider_id or not isinstance(configs, dict):
+        return None, None
+    if provider_id in configs:
+        return provider_id, configs[provider_id]
+    norm_target = normalize_provider_id(provider_id)
+    for key, cfg in configs.items():
+        if normalize_provider_id(key) == norm_target:
+            return key, cfg
+    return None, None
+
+
 def get_project_render_config(project_id: str) -> Optional[dict]:
     """Retrieve project render configuration with active provider, decrypted API key, and settings."""
     try:
@@ -106,7 +131,8 @@ def get_project_render_config(project_id: str) -> Optional[dict]:
             raw_configs = {}
 
         active_prov = row["active_provider_id"]
-        cfg = raw_configs.get(active_prov, {})
+        _, cfg = _lookup_provider_config(raw_configs, active_prov)
+        cfg = cfg or {}
         stored_key = cfg.get("apiKey", "")
         decrypted_key = decrypt_key(stored_key) if stored_key else ""
         return {
@@ -122,6 +148,81 @@ def get_project_render_config(project_id: str) -> Optional[dict]:
     except Exception as e:
         logger.warning("failed_reading_project_render_config", project_id=project_id, error=str(e))
         return None
+
+
+def resolve_effective_render_provider(
+    project_id: Optional[str],
+    requested_provider: Optional[str],
+    requested_model: Optional[str] = None,
+    ignored_override_values: tuple[Optional[str], ...] = ("default", None),
+    default_provider: str = "9router",
+    default_model: Optional[str] = None,
+) -> dict[str, Any]:
+    """Resolve effective render provider & model respecting global apply_to_all_scenes precedence.
+
+    When project_render_settings has apply_to_all_scenes=True and an active_provider_id,
+    the saved global provider takes precedence over stale/implicit per-request provider values
+    (e.g. a frontend sending '9router' with 'ag/gemini-3.8-flash').
+    """
+    render_cfg = get_project_render_config(str(project_id)) if project_id else None
+    active_prov_id = render_cfg.get("active_provider_id") if render_cfg else None
+    apply_all = bool(render_cfg.get("apply_to_all_scenes", True)) if render_cfg else False
+
+    req_prov_clean = requested_provider.strip() if isinstance(requested_provider, str) and requested_provider.strip() else None
+    ignored_norms = {normalize_provider_id(v) for v in ignored_override_values if v is not None}
+    req_prov_norm = normalize_provider_id(req_prov_clean)
+    is_ignored_req = (req_prov_clean is None) or (req_prov_clean in ignored_override_values) or (req_prov_norm in ignored_norms)
+
+    if render_cfg and apply_all and active_prov_id:
+        # Global Acuan is locked across the project; only reuse requested_model if the request
+        # actually targeted the same provider (or omitted provider).
+        same_provider = (req_prov_clean is None) or (req_prov_norm == normalize_provider_id(active_prov_id))
+        model_to_use = (requested_model if same_provider and requested_model else None) or render_cfg.get("model_id")
+        return {
+            "provider_id": active_prov_id,
+            "model_id": model_to_use,
+            "base_url": render_cfg.get("base_url"),
+            "api_key": render_cfg.get("api_key"),
+            "use_universal_adapter": True,
+            "render_cfg": render_cfg,
+            "apply_all": True,
+        }
+
+    if render_cfg and not is_ignored_req:
+        matched_key, cfg_override = _lookup_provider_config(render_cfg.get("configs", {}), req_prov_clean)
+        if cfg_override is not None and matched_key is not None:
+            stored_key = cfg_override.get("apiKey", "")
+            return {
+                "provider_id": matched_key,
+                "model_id": requested_model or cfg_override.get("modelId"),
+                "base_url": cfg_override.get("baseUrl"),
+                "api_key": decrypt_key(stored_key) if stored_key else "",
+                "use_universal_adapter": True,
+                "render_cfg": render_cfg,
+                "apply_all": apply_all,
+            }
+
+    if render_cfg and active_prov_id:
+        return {
+            "provider_id": active_prov_id,
+            "model_id": requested_model or render_cfg.get("model_id"),
+            "base_url": render_cfg.get("base_url"),
+            "api_key": render_cfg.get("api_key"),
+            "use_universal_adapter": True,
+            "render_cfg": render_cfg,
+            "apply_all": apply_all,
+        }
+
+    fallback_prov = (req_prov_clean or default_provider).lower().strip()
+    return {
+        "provider_id": fallback_prov,
+        "model_id": requested_model or default_model,
+        "base_url": None,
+        "api_key": None,
+        "use_universal_adapter": False,
+        "render_cfg": render_cfg,
+        "apply_all": False,
+    }
 
 
 def mask_key(key: str) -> str:

@@ -16,6 +16,7 @@ Idempotent: Safe to re-run without duplicate creation.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 from datetime import datetime, timezone
 import json
@@ -1101,7 +1102,10 @@ SCENES_RAW_DATA = [
 # SEED WORKFLOW
 # ==============================================================================
 
-async def seed_production() -> tuple[ProjectModel, bool]:
+DEFAULT_OWNER_EMAIL = "nurkholisah2409@gmail.com"
+
+
+async def seed_production(owner_email: str = DEFAULT_OWNER_EMAIL) -> tuple[ProjectModel, bool]:
     """Execute the idempotent seeding transaction."""
     settings = get_settings()
     engine = create_database_engine(settings.async_database_url)
@@ -1110,7 +1114,8 @@ async def seed_production() -> tuple[ProjectModel, bool]:
     try:
         async with session_factory() as session:
             # Step 1: Owner Binding (Primary Admin User)
-            stmt_user = select(UserModel).where(UserModel.email == "needgenius19@gmail.com")
+            normalized_email = owner_email.strip().lower()
+            stmt_user = select(UserModel).where(func.lower(UserModel.email) == normalized_email)
             owner_user = (await session.execute(stmt_user)).scalar_one_or_none()
 
             if not owner_user:
@@ -1505,7 +1510,14 @@ async def verify_production(project_id: uuid.UUID) -> None:
 
 
 def main() -> None:
-    project, is_new = asyncio.run(seed_production())
+    parser = argparse.ArgumentParser(description="Seed THE FINAL OBSERVER project.")
+    parser.add_argument(
+        "--owner-email",
+        default=DEFAULT_OWNER_EMAIL,
+        help=f"Owner email address (default: {DEFAULT_OWNER_EMAIL})",
+    )
+    args = parser.parse_args()
+    project, is_new = asyncio.run(seed_production(owner_email=args.owner_email))
     asyncio.run(verify_production(project.id))
 
 

@@ -157,7 +157,7 @@ def test_eight_sheet_matrix_hierarchy_and_sequential_anchoring():
     assert card_expr["ref_candidates"][0][1] == "/api/v1/assets/previews/char_closeup_master.png"
     assert "3-column by 2-row grid" in card_expr["positive_prompt"]
     assert "#D4D4D4" not in card_expr["positive_prompt"]
-    assert "5500K neutral daylight studio softboxes" in card_expr["positive_prompt"]
+    assert "butterfly/clamshell studio lighting" in card_expr["positive_prompt"]
 
     # 2. Card 3: Full Body Front (Anchored strictly to Card 1 Close-Up)
     card_front = compile_sheet_prompt(char, proj, bible, "front")
@@ -168,7 +168,7 @@ def test_eight_sheet_matrix_hierarchy_and_sequential_anchoring():
     assert card_front["ref_candidates"][0][0] == "Card 1 Character Close-Up"
     assert card_front["ref_candidates"][0][1] == "/api/v1/assets/previews/char_closeup_master.png"
     assert "#D4D4D4" not in card_front["positive_prompt"]
-    assert "5500K neutral daylight studio softboxes" in card_front["positive_prompt"]
+    assert "butterfly/clamshell studio lighting" in card_front["positive_prompt"]
 
     # 3. Card 4: Side Profile (Anchored strictly to Card 1 Close-Up & Card 3 Full Body Front)
     card_side = compile_sheet_prompt(char, proj, bible, "side")
@@ -184,7 +184,7 @@ def test_eight_sheet_matrix_hierarchy_and_sequential_anchoring():
         assert card["ref_candidates"][0][0] == "Card 1 Character Close-Up"
         assert card["ref_candidates"][1][0] == "Card 3 Full Body Front"
         assert "#D4D4D4" not in card["positive_prompt"]
-        assert "5500K neutral daylight studio softboxes" in card["positive_prompt"]
+        assert "butterfly/clamshell studio lighting" in card["positive_prompt"]
 
     # 5. Slot ordering in get_character_sheet_prompts
     slots = ["closeup", "expression", "front", "side", "three_quarter", "back", "tpose", "action"]
@@ -263,8 +263,8 @@ def test_slot_1_closeup_refinements_and_chaining():
     )
     card1_a = compile_sheet_prompt(char_a, proj, bible, "closeup")
     assert card1_a["slot"] == "closeup"
-    assert card1_a["recommended_aspect_ratio"] == "3:4"
-    assert card1_a["width"] == 768
+    assert card1_a["recommended_aspect_ratio"] == "1:1"
+    assert card1_a["width"] == 1024
     assert card1_a["height"] == 1024
     assert card1_a["ref_candidates"] == []
     # Verify no name, bracket headers, bullets, or hex codes leaked into positive prompt
@@ -272,12 +272,13 @@ def test_slot_1_closeup_refinements_and_chaining():
     assert "Elena Rostova" not in pos_prompt, "Character name must be stripped to prevent ethnic/name bias"
     assert "[FACIAL GEOMETRY]" not in pos_prompt, "Bracket headers must be stripped"
     assert "•" not in pos_prompt, "Bullet characters must be stripped"
-    assert "#D4D4D4" not in pos_prompt, "Literal hex code must not appear in positive prompt body for Imagen 3"
-    # Verify affirmative prose directives
-    assert "Unretouched RAW photographic studio casting portrait" in pos_prompt
-    assert "Tight head-and-shoulders close-up framed cleanly" in pos_prompt
-    assert "5500K neutral daylight studio softboxes" in pos_prompt
-    assert "100mm macro-portrait prime lens at f/5.6" in pos_prompt
+    assert "#D4D4D4" not in pos_prompt, "Literal hex code must not appear in positive prompt body"
+    # Verify frozen Layer 1 + Layer 2 + Layer 3 directives
+    assert "Hyper-realistic raw studio portrait photograph" in pos_prompt
+    assert "dead-center symmetrical straight-on frontal close-up headshot" in pos_prompt
+    assert "Soft diffused overhead-front octabox key light (butterfly/clamshell studio lighting)" in pos_prompt
+    assert "85mm portrait lens at f/4.5, ISO 100" in pos_prompt
+    assert "100mm macro-portrait" not in pos_prompt
     assert "a simple neutral charcoal-gray crewneck collar" in pos_prompt
     # Verify negative prompt isolation
     assert card1_a["negative_prompt"] != ""
@@ -906,6 +907,246 @@ def test_frontend_batch_downstream_orchestrator_guardrails():
     # 7. Zero forbidden words leakage
     assert "polia" not in frontend_code.lower()
     assert "hermes" not in frontend_code.lower()
+
+
+def test_global_render_provider_overrides_stale_9router_payload(client: TestClient, auth_headers: dict[str, str]):
+    """
+    Verify that when Save Global Provider sets activeProviderId='google-flow' or 'gpt-2-6'
+    with applyToAllScenes=True, a stale client payload sending provider='9router' and
+    model='ag/gemini-3.8-flash' MUST NOT override the saved global provider.
+    """
+    from unittest.mock import AsyncMock
+    from backend.app.infrastructure.universal_image_adapter import UniversalImageResult
+
+    proj_resp = client.post(
+        "/api/v1/projects",
+        json={"title": "Global Provider Sync Proj", "settings": {"synopsis": "Testing global provider precedence."}},
+        headers=auth_headers,
+    )
+    assert proj_resp.status_code == 201
+    project_id = proj_resp.json()["data"]["id"]
+
+    char_resp = client.post(
+        f"/api/v1/projects/{project_id}/characters",
+        json={
+            "name": "Captain Aria",
+            "role": "PROTAGONIST",
+            "base_prompt": "Cinematographic portrait of a female aerospace commander",
+            "dna_seed": 424242,
+        },
+        headers=auth_headers,
+    )
+    assert char_resp.status_code == 201
+    char_id = char_resp.json()["data"]["id"]
+
+    base_configs = {
+        "google-flow": {
+            "baseUrl": "https://labs.google/fx/api",
+            "apiKey": "",
+            "modelId": "flow-imagen-anchor-pro",
+        },
+        "gpt-2-6": {
+            "baseUrl": "https://api.openai.com/v1",
+            "apiKey": "sk-proj-test-openai-key",
+            "modelId": "gpt-image-2.6",
+        },
+        "9router": {
+            "baseUrl": "http://127.0.0.1:8080/v1",
+            "apiKey": "sk-9router-test",
+            "modelId": "ag/gemini-3.8-flash",
+        },
+    }
+
+    # Case A: Global provider = 'google-flow' with applyToAllScenes=True + stale '9router' payload
+    put_flow = client.put(
+        f"/api/v1/projects/{project_id}/render-provider",
+        json={
+            "activeProviderId": "google-flow",
+            "applyToAllScenes": True,
+            "configs": base_configs,
+            "freePortals": [],
+        },
+    )
+    assert put_flow.status_code == 200
+
+    with patch("backend.app.api.v1.bible._assert_socks5_healthy_for_flow", new_callable=AsyncMock):
+        res_flow = client.post(
+            f"/api/v1/characters/{char_id}/generate-asset",
+            json={
+                "target_type": "sheet",
+                "angle": "closeup",
+                "provider": "9router",
+                "model": "ag/gemini-3.8-flash",
+                "aspect_ratio": "3:4",
+            },
+            headers=auth_headers,
+        )
+    assert res_flow.status_code == 200
+    flow_data = res_flow.json()
+    assert flow_data["status"] == "queued"
+    assert flow_data["provider"] == "google_flow"
+
+    # Case B: Global provider = 'gpt-2-6' with applyToAllScenes=True + stale '9router' payload
+    put_gpt = client.put(
+        f"/api/v1/projects/{project_id}/render-provider",
+        json={
+            "activeProviderId": "gpt-2-6",
+            "applyToAllScenes": True,
+            "configs": base_configs,
+            "freePortals": [],
+        },
+    )
+    assert put_gpt.status_code == 200
+
+    captured_requests = []
+
+    async def fake_generate_image(req):
+        captured_requests.append(req)
+        return UniversalImageResult(
+            local_path="data/assets/previews/gpt_mock.png",
+            local_url="/api/v1/assets/previews/gpt_mock.png",
+            provider_id="gpt-2-6",
+            model_id=req.model_id or "gpt-image-2.6",
+            width=768,
+            height=1024,
+            seed=req.seed,
+        )
+
+    with patch("backend.app.api.v1.bible.UniversalImageAdapter") as MockAdapterCls:
+        MockAdapterCls.return_value.generate_image = AsyncMock(side_effect=fake_generate_image)
+        res_gpt = client.post(
+            f"/api/v1/characters/{char_id}/generate-asset",
+            json={
+                "target_type": "sheet",
+                "angle": "closeup",
+                "provider": "9router",
+                "model": "ag/gemini-3.8-flash",
+                "aspect_ratio": "3:4",
+            },
+            headers=auth_headers,
+        )
+    assert res_gpt.status_code == 200
+    gpt_data = res_gpt.json()
+    assert gpt_data["provider"] == "gpt-2-6"
+    assert gpt_data["model"] == "gpt-image-2.6"
+    assert len(captured_requests) == 1
+    assert captured_requests[0].provider_id == "gpt-2-6"
+    assert captured_requests[0].model_id == "gpt-image-2.6"
+    assert captured_requests[0].api_key_override == "sk-proj-test-openai-key"
+
+
+def test_global_render_provider_overrides_stale_9router_in_all_preview_endpoints(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    """
+    Verify all 3 locations in previews.py (scene preview, project concept preview, shot preview)
+    respect applyToAllScenes=True and activeProviderId='gpt-2-6' even when a stale
+    provider='9router' + model='ag/gemini-3.8-flash' payload is sent.
+    """
+    from unittest.mock import AsyncMock
+    from backend.app.infrastructure.universal_image_adapter import UniversalImageResult
+
+    proj_resp = client.post(
+        "/api/v1/projects",
+        json={"title": "Previews Global Sync", "settings": {"synopsis": "Testing 3 preview endpoints."}},
+        headers=auth_headers,
+    )
+    assert proj_resp.status_code == 201
+    project_id = proj_resp.json()["data"]["id"]
+
+    scene_resp = client.post(
+        f"/api/v1/projects/{project_id}/scenes",
+        json={
+            "act_number": 1,
+            "scene_number": 1,
+            "slugline": "INT. OBSERVATORY - NIGHT",
+            "narrative_goal": "Captain Aria inspects star charts",
+        },
+        headers=auth_headers,
+    )
+    assert scene_resp.status_code == 201
+    scene_id = scene_resp.json()["data"]["id"]
+
+    shot_resp = client.post(
+        f"/api/v1/scenes/{scene_id}/shots",
+        json={
+            "shot_number": 1,
+            "camera_code": "#Cam 01",
+            "lens_code": "#Lens 01",
+            "comp_code": "#Comp 01",
+            "light_code": "#Light 01",
+            "duration_seconds": 4.0,
+        },
+        headers=auth_headers,
+    )
+    assert shot_resp.status_code == 201
+    shot_id = shot_resp.json()["data"]["id"]
+
+    put_res = client.put(
+        f"/api/v1/projects/{project_id}/render-provider",
+        json={
+            "activeProviderId": "gpt-2-6",
+            "applyToAllScenes": True,
+            "configs": {
+                "gpt-2-6": {
+                    "baseUrl": "https://api.openai.com/v1",
+                    "apiKey": "sk-proj-global-preview-key",
+                    "modelId": "gpt-image-2.6",
+                },
+                "9router": {
+                    "baseUrl": "http://127.0.0.1:8080/v1",
+                    "apiKey": "sk-9router-stale",
+                    "modelId": "ag/gemini-3.8-flash",
+                },
+            },
+            "freePortals": [],
+        },
+    )
+    assert put_res.status_code == 200
+
+    captured = []
+
+    async def fake_generate(req):
+        captured.append(req)
+        return UniversalImageResult(
+            local_path="data/assets/previews/gpt_scene.png",
+            local_url="/api/v1/assets/previews/gpt_scene.png",
+            provider_id="gpt-2-6",
+            model_id=req.model_id or "gpt-image-2.6",
+            width=1024,
+            height=576,
+            seed=req.seed,
+        )
+
+    stale_body = {
+        "prompt": "Cinematic wide shot inside observatory",
+        "aspect_ratio": "16:9",
+        "provider": "9router",
+        "model": "ag/gemini-3.8-flash",
+    }
+
+    with patch("backend.app.api.v1.previews.UniversalImageAdapter") as MockAdapterCls:
+        MockAdapterCls.return_value.generate_image = AsyncMock(side_effect=fake_generate)
+
+        r1 = client.post(f"/api/v1/scenes/{scene_id}/generate-preview", json=stale_body, headers=auth_headers)
+        assert r1.status_code == 200
+        assert r1.json()["data"]["provider"] == "gpt-2-6"
+
+        r2 = client.post(f"/api/v1/projects/{project_id}/generate-preview", json=stale_body, headers=auth_headers)
+        assert r2.status_code == 200
+        assert r2.json()["data"]["provider"] == "gpt-2-6"
+
+        r3 = client.post(f"/api/v1/shots/{shot_id}/generate-preview", json=stale_body, headers=auth_headers)
+        assert r3.status_code == 200
+        assert r3.json()["data"]["provider"] == "gpt-2-6"
+
+    assert len(captured) == 3
+    for req in captured:
+        assert req.provider_id == "gpt-2-6"
+        assert req.model_id == "gpt-image-2.6"
+        assert req.api_key_override == "sk-proj-global-preview-key"
+
+
 
 
 

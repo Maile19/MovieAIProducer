@@ -159,10 +159,11 @@ def test_compile_sheet_prompt_four_families_and_rag_cues():
         )
         return compile_sheet_prompt(char, proj, bible, slot="closeup", director_rag_cues=cues)
 
-    # Photorealistic #Style 02
+    # Photorealistic #Style 02 (Card 1 uses CASTING_CLOSEUP_REALISTIC_V1 and skips shot-template RAG cues)
     s02 = run_sheet("#Style 02", cues="IMAX 70mm silver halide texture")
-    assert "Unretouched RAW photographic studio casting portrait" in s02["positive_prompt"]
-    assert "IMAX 70mm silver halide texture" in s02["positive_prompt"]
+    assert "Hyper-realistic raw studio portrait photograph" in s02["positive_prompt"]
+    assert "85mm portrait lens at f/4.5" in s02["positive_prompt"]
+    assert "IMAX 70mm silver halide texture" not in s02["positive_prompt"]
     assert "(#D4D4D4)" not in s02["positive_prompt"]
 
     # Stylized 3D: Pixar (#Style 09), Donghua (#Style 06), Arcane (#Style 11)

@@ -29,6 +29,18 @@ except Exception:
 from backend.app.api.deps import get_current_user, get_session
 from backend.app.core.config import get_settings
 from backend.app.domain.catalog import STYLE_CATALOG
+from backend.app.domain.character_prompt_compiler import (
+    CASTING_CLOSEUP_PRESET_ID,
+    DirectorCharacterDynamicSlots,
+    UPSCALE_2K_LOCK_PREFIX,
+    build_deterministic_dynamic_slots,
+    compile_casting_closeup_prompt,
+    compile_upscale_2k_prompt,
+    get_downstream_frozen_layers,
+    resolve_provider_dimensions,
+    resolve_style_gate,
+    resolve_upscale_2k_target_dimensions,
+)
 from backend.app.domain.director_rag import DirectorRAGClient
 from backend.app.infrastructure.database.models.auth import UserModel
 from backend.app.infrastructure.database.models.character import (
@@ -56,10 +68,17 @@ from backend.app.infrastructure.sd35_client import (
     RateLimitExceededError,
     get_image_provider,
 )
-from backend.app.api.v1.render_settings import get_project_render_config, decrypt_key
+from backend.app.api.v1.render_settings import (
+    _lookup_provider_config,
+    get_project_render_config,
+    decrypt_key,
+    resolve_effective_render_provider,
+)
 from backend.app.infrastructure.universal_image_adapter import (
+    AUTO_ROUTE_2K_PRIORITY,
     UniversalImageAdapter,
     UniversalImageRequest,
+    supports_native_2k_upscale,
 )
 
 router = APIRouter(tags=["Master Production Bible"])
@@ -1114,6 +1133,10 @@ async def list_characters(
                         "expression_anchor": s.expression_anchor,
                         "scene_id": str(s.scene_id) if s.scene_id else None,
                         "image_url": s.image_url,
+                        "resolution_width": (meta.get(f"state_{s.id}") or {}).get("resolution_width"),
+                        "resolution_height": (meta.get(f"state_{s.id}") or {}).get("resolution_height"),
+                        "is_2k": bool((meta.get(f"state_{s.id}") or {}).get("is_2k", False)),
+                        "previous_1k_url": (meta.get(f"state_{s.id}") or {}).get("previous_1k_url"),
                     }
                     for s in states
                 ],
@@ -1158,47 +1181,71 @@ async def create_character(
             temp_dir = Path("./data/assets/temp_previews") / clean_token
 
         if temp_dir.exists():
-            closeup_src = temp_dir / "closeup.png"
-            if closeup_src.exists():
-                closeup_name = f"char_{str(char_id)[:8]}_closeup_{uuid.uuid4().hex[:8]}.png"
-                closeup_dest = perm_storage / closeup_name
-                shutil.copyfile(closeup_src, closeup_dest)
-                closeup_url = f"/api/v1/assets/previews/{closeup_name}"
-                initial_metadata["closeup"] = {
-                    "image_url": closeup_url,
-                    "source": "pre_creation_gatekeeper",
-                    "status": "completed",
-                    "seed": det_seed,
-                    "rendered_at": now.isoformat(),
-                }
+            manifest: dict[str, Any] = {}
+            manifest_path = temp_dir / "preview_manifest.json"
+            if manifest_path.exists():
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except Exception:
+                    manifest = {}
 
-            expr_src = temp_dir / "expression.png"
-            if expr_src.exists():
-                expr_name = f"char_{str(char_id)[:8]}_expression_{uuid.uuid4().hex[:8]}.png"
-                expr_dest = perm_storage / expr_name
-                shutil.copyfile(expr_src, expr_dest)
-                expression_url = f"/api/v1/assets/previews/{expr_name}"
-                initial_metadata["expression"] = {
-                    "image_url": expression_url,
-                    "source": "pre_creation_gatekeeper",
-                    "status": "completed",
-                    "seed": det_seed,
-                    "rendered_at": now.isoformat(),
-                }
+            def _promote_preview_slot(slot_name: str) -> tuple[str | None, dict[str, Any] | None]:
+                slot_info = manifest.get(slot_name) if isinstance(manifest.get(slot_name), dict) else {}
+                active_fname = slot_info.get("active_file") or f"{slot_name}.png"
+                src_file = temp_dir / Path(active_fname).name
+                if not src_file.exists():
+                    src_file = temp_dir / f"{slot_name}.png"
+                if not src_file.exists():
+                    return None, None
 
-            front_src = temp_dir / "front.png"
-            if front_src.exists():
-                front_name = f"char_{str(char_id)[:8]}_front_{uuid.uuid4().hex[:8]}.png"
-                front_dest = perm_storage / front_name
-                shutil.copyfile(front_src, front_dest)
-                front_url = f"/api/v1/assets/previews/{front_name}"
-                initial_metadata["front"] = {
-                    "image_url": front_url,
+                dest_suffix = "_2k" if slot_info.get("is_2k") else ""
+                dest_name = f"char_{str(char_id)[:8]}_{slot_name}_{uuid.uuid4().hex[:8]}{dest_suffix}.png"
+                dest_path = perm_storage / dest_name
+                shutil.copyfile(src_file, dest_path)
+                promoted_url = f"/api/v1/assets/previews/{dest_name}"
+                dims = _read_image_dimensions_from_path(dest_path)
+
+                prev_1k_url = None
+                prev_fname = slot_info.get("previous_1k_file")
+                if prev_fname:
+                    prev_src = temp_dir / Path(prev_fname).name
+                    if prev_src.exists():
+                        prev_dest_name = f"char_{str(char_id)[:8]}_{slot_name}_1k_{uuid.uuid4().hex[:8]}.png"
+                        shutil.copyfile(prev_src, perm_storage / prev_dest_name)
+                        prev_1k_url = f"/api/v1/assets/previews/{prev_dest_name}"
+
+                slot_meta: dict[str, Any] = {
+                    "image_url": promoted_url,
                     "source": "pre_creation_gatekeeper",
                     "status": "completed",
                     "seed": det_seed,
                     "rendered_at": now.isoformat(),
                 }
+                if dims:
+                    slot_meta["width"] = dims[0]
+                    slot_meta["height"] = dims[1]
+                    slot_meta["resolution_width"] = dims[0]
+                    slot_meta["resolution_height"] = dims[1]
+                    slot_meta["is_2k"] = max(dims[0], dims[1]) >= 1920
+                elif slot_info:
+                    slot_meta["resolution_width"] = slot_info.get("resolution_width")
+                    slot_meta["resolution_height"] = slot_info.get("resolution_height")
+                    slot_meta["is_2k"] = bool(slot_info.get("is_2k", False))
+                if prev_1k_url:
+                    slot_meta["previous_1k_url"] = prev_1k_url
+                return promoted_url, slot_meta
+
+            closeup_url, closeup_meta = _promote_preview_slot("closeup")
+            if closeup_meta:
+                initial_metadata["closeup"] = closeup_meta
+
+            expression_url, expr_meta = _promote_preview_slot("expression")
+            if expr_meta:
+                initial_metadata["expression"] = expr_meta
+
+            front_url, front_meta = _promote_preview_slot("front")
+            if front_meta:
+                initial_metadata["front"] = front_meta
 
             # Atomically remove temporary staging directory after promotion
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -2220,6 +2267,49 @@ def _url_to_local_path(url: str | None) -> str | None:
     return None
 
 
+def _read_image_dimensions_from_path(file_path: str | Path | None) -> tuple[int, int] | None:
+    """Read real pixel dimensions (width, height) from disk using PIL.Image."""
+    if not file_path:
+        return None
+    try:
+        p = Path(file_path)
+        if not p.exists() or not p.is_file():
+            return None
+        with Image.open(p) as img:
+            return img.size
+    except Exception:
+        return None
+
+
+def _read_image_dimensions_from_url(url: str | None) -> tuple[int, int] | None:
+    """Resolve URL to local path and read real pixel dimensions via PIL.Image."""
+    local_path = _url_to_local_path(url)
+    return _read_image_dimensions_from_path(local_path)
+
+
+def _normalize_sheet_slot(slot: str | None, default: str = "front") -> str:
+    norm = (slot or default).lower().strip()
+    if norm in ("closeup", "close_up", "headshot", "portrait", "master_closeup", "slot_1"):
+        return "closeup"
+    if norm in ("three_quarter", "3/4", "threequarter", "turnaround_three_quarter"):
+        return "three_quarter"
+    if norm in ("tpose", "sheet_tpose", "t_pose"):
+        return "tpose"
+    if norm in ("action", "sheet_action"):
+        return "action"
+    if norm in ("expression", "sheet_expression"):
+        return "expression"
+    if norm in ("back", "turnaround_back"):
+        return "back"
+    if norm in ("side", "turnaround_side"):
+        return "side"
+    if norm == "state":
+        return "state"
+    if norm in ("front", "turnaround_front"):
+        return "front"
+    return default
+
+
 def cleanup_stale_temp_previews(max_age_seconds: int = 86400):
     """Purge temporary preview folders older than 24 hours."""
     try:
@@ -2849,6 +2939,7 @@ def compile_sheet_prompt(
     prompt_override: str | None = None,
     aspect_ratio: str | None = None,
     director_rag_cues: str = "",
+    director_slots: DirectorCharacterDynamicSlots | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Pure compiler producing project-synced, 4-family style-authentic prompts for Cards 1-8 and dynamic states."""
     norm_slot = (slot or "closeup").lower().strip()
@@ -2913,42 +3004,70 @@ def compile_sheet_prompt(
 
     char_name = character.name.strip() if character.name and character.name.strip() else "the subject"
 
+    # Style Gate & Dynamic Slots (Polia AI Director / deterministic fallback)
+    style_gate = resolve_style_gate(style_code)
+    is_frozen_active = style_gate.routing_mode in ("full", "light_override")
+    cached_slots_dict: dict[str, Any] | None = None
+    if isinstance(director_slots, DirectorCharacterDynamicSlots):
+        cached_slots_dict = director_slots.model_dump()
+    elif isinstance(director_slots, dict):
+        cached_slots_dict = director_slots
+    elif isinstance(getattr(character, "sheet_metadata", None), dict):
+        maybe_cached = character.sheet_metadata.get("director_casting_slots")
+        if isinstance(maybe_cached, dict):
+            cached_slots_dict = maybe_cached
+
+    dynamic_slots = build_deterministic_dynamic_slots(
+        base_prompt=character.base_prompt or "",
+        char_name=character.name,
+        style_code=style_code,
+        cached_slots=cached_slots_dict,
+    )
+    downstream_layers: dict[str, Any] | None = None
+    layers_applied: list[str] = []
+    frozen_negative_override: str | None = None
+
+    if is_frozen_active and slot_key != "closeup":
+        has_state_wear = False
+        if slot_key == "state" and target_state is not None:
+            wear_str = (target_state.injuries_and_wear or "").strip().lower()
+            has_state_wear = bool(wear_str and wear_str not in ("none", "zero defects", "immaculate, zero defects, pristine garment condition"))
+        downstream_layers = get_downstream_frozen_layers(
+            slot_key=slot_key,
+            style_code=style_code,
+            studio_backdrop_tone=dynamic_slots.studio_backdrop_tone,
+            has_injuries_or_wear=has_state_wear,
+        )
+        layers_applied = list(downstream_layers["layers_applied"])
+        eff_lighting = downstream_layers["layer_2"]
+        eff_backdrop = f"seamless matte {dynamic_slots.studio_backdrop_tone} studio backdrop"
+        eff_medium_desc = downstream_layers["layer_1"]
+    else:
+        eff_lighting = fam_spec["lighting"]
+        eff_backdrop = fam_spec["backdrop"]
+        eff_medium_desc = fam_spec["medium_desc"]
+
     # Card Technical Directives & Framing Specifications
     if slot_key == "closeup":
         card_title = "Card 1: Character Close-Up (Master Anchor)"
-        card_aspect = aspect_ratio or "3:4"
-        width, height = (768, 1024)
+        card_aspect = aspect_ratio or "1:1"
         ref_candidates = []
         if getattr(character, "face_ref_asset_id", None):
             ref_candidates.append(("Face Reference Asset", str(character.face_ref_asset_id)))
 
-        if style_family == "photorealistic":
-            if ref_candidates:
-                positive_prompt = (
-                    f"Analyze the reference photograph and strictly preserve the exact person's biometric identity, "
-                    f"bone structure, eye shape, iris color, nose bridge, lip shape, natural skin tone, age, ethnicity, "
-                    f"hair texture, and distinguishing facial marks exactly as they are. Re-render the subject as an "
-                    f"{fam_spec['sheet_header']} close-up framed from the crown of the head to the upper collarbone. "
-                    f"Direct frontal, strict eye-level camera angle with head upright and centered, both ears clearly visible, "
-                    f"a calm neutral resting expression, naturally closed mouth, and direct eye contact with the lens. "
-                    f"Preserve {fam_spec['medium_desc']}. Captured on a 100-megapixel medium-format studio camera with a 100mm macro-portrait prime lens at f/5.6, "
-                    f"delivering edge-to-edge focus and clean iris catchlights. Illuminated by {fam_spec['lighting']}, "
-                    f"isolated cleanly against a {fam_spec['backdrop']}. Dress the upper shoulders in {wardrobe_collar} with the neck fully visible."
-                )
-            else:
-                positive_prompt = (
-                    f"{fam_spec['sheet_header']} of {biometric_profile}. "
-                    f"Tight head-and-shoulders close-up framed cleanly from the top of the head down to the base of the neck "
-                    f"and upper collarbone. Direct frontal view at exact eye-level, head held upright and centered facing straight ahead "
-                    f"with both ears, cheekbones, and jawline equally visible and unobstructed. Completely calm, relaxed neutral "
-                    f"resting expression with naturally closed lips and steady, direct eye contact into the lens. "
-                    f"Surface & style fidelity: {fam_spec['medium_desc']}. "
-                    f"Captured on a 100-megapixel medium-format studio camera with a 100mm macro-portrait prime lens at f/5.6, "
-                    f"delivering extreme optical micro-contrast, zero wide-angle distortion, and razor-sharp focus. "
-                    f"Illuminated by {fam_spec['lighting']}, isolated cleanly against a {fam_spec['backdrop']}. "
-                    f"Wearing {wardrobe_collar} that keeps the entire neck and jawline cleanly visible."
-                )
+        if is_frozen_active:
+            closeup_res = compile_casting_closeup_prompt(
+                slots=dynamic_slots,
+                style_code=style_code,
+                has_face_ref=bool(ref_candidates),
+                aspect_ratio=card_aspect,
+            )
+            positive_prompt = closeup_res["positive_prompt"]
+            frozen_negative_override = closeup_res["negative_prompt"]
+            width, height = closeup_res["width"], closeup_res["height"]
+            layers_applied = list(closeup_res["layers_applied"])
         else:
+            width, height = (1024, 1024) if card_aspect == "1:1" else (768, 1024)
             ref_clause = (
                 f"Analyze the visual reference and strictly preserve the exact {fam_spec['ref_noun']} identity, "
                 f"facial proportions, eye design, hair silhouette, and distinguishing features. "
@@ -2981,17 +3100,18 @@ def compile_sheet_prompt(
             if style_family == "photorealistic"
             else f"{fam_spec['sheet_header']} expression grid"
         )
+        lighting_segment = eff_lighting if is_frozen_active else f"illuminated by {eff_lighting} against a {eff_backdrop}"
         positive_prompt = (
             f"{grid_lead} composed of exactly six equal distinct portrait panels arranged in a rigid 3-column by 2-row grid "
             f"on a single horizontal canvas, featuring {char_name}, {biometric_profile}. {ref_note}"
             f"Strictly preserve 100% character identity, facial proportions, eye design, hairstyle silhouette, and consistent wardrobe collar ({wardrobe_collar}) across all six panels. "
-            f"Render consistently with {fam_spec['medium_desc']} ({clean_palette}). "
+            f"Render consistently with {eff_medium_desc} "
             "Top row from left to right: calm neutral resting face with relaxed closed lips, subtle genuine smile with expressive eyes and relaxed cheeks, "
             "and intense controlled anger with tightened jawline and furrowed brows. "
             "Bottom row from left to right: quiet sorrow and grief with softened downward gaze, sudden shock and astonishment with widened eyes and slightly parted lips, "
             "and wary sharp suspicion with narrowed focused eyes. "
-            f"Each individual panel maintains consistent head-and-shoulders framing at eye level using {fam_spec['optics']}, "
-            f"illuminated by {fam_spec['lighting']} against a {fam_spec['backdrop']}. Clean division lines separating panels."
+            f"Each individual panel maintains consistent head-and-shoulders framing at eye level using {fam_spec['optics']}. "
+            f"{lighting_segment} Clean division lines separating panels."
         )
 
     elif slot_key == "side":
@@ -3005,12 +3125,13 @@ def compile_sheet_prompt(
             ref_candidates.append(("Card 3 Full Body Front", character.front_image_url))
 
         ref_note = f"Capturing the exact same {fam_spec['ref_noun']} from the reference Card 1 close-up and Card 3 front view. " if ref_candidates else ""
+        lighting_segment = f"{eff_lighting} with a soft ground contact shadow." if is_frozen_active else f"illuminated by {eff_lighting} against a {eff_backdrop} with a soft ground contact shadow."
         positive_prompt = (
             f"Full-body {fam_spec['sheet_header']} 90-degree lateral side profile portrait of {char_name}, {biometric_profile}. {ref_note}"
             "Full-length strict 90-degree lateral side-profile orthogonal view framed cleanly from top of head down to the soles of the footwear touching the ground with comfortable margins. "
             "Standing upright in a natural, balanced neutral profile standing posture revealing precise lateral proportions and complete side costume construction matching "
-            f"{full_body_costume}. Strictly render in {fam_spec['medium_desc']} ({clean_palette}). "
-            f"Captured via {fam_spec['optics']}, illuminated by {fam_spec['lighting']} against a {fam_spec['backdrop']} with a soft ground contact shadow."
+            f"{full_body_costume}. {eff_medium_desc} "
+            f"Captured via {fam_spec['optics']}. {lighting_segment}"
         )
 
     elif slot_key == "three_quarter":
@@ -3024,13 +3145,14 @@ def compile_sheet_prompt(
             ref_candidates.append(("Card 3 Full Body Front", character.front_image_url))
 
         ref_note = f"Capturing the exact same {fam_spec['ref_noun']} from the reference Card 1 and Card 3 anchors. " if ref_candidates else ""
+        lighting_segment = f"{eff_lighting} with soft ground contact shadow." if is_frozen_active else f"illuminated by {eff_lighting} against a {eff_backdrop} with soft ground contact shadow."
         positive_prompt = (
             f"Full-body {fam_spec['sheet_header']} 45-degree three-quarter hero angle portrait of {char_name}, {biometric_profile}. {ref_note}"
             "Full-length distinct 45-degree three-quarter oblique standing perspective framed cleanly from top of head down to the soles of the footwear with comfortable margins. "
             "The subject's torso and shoulders are distinctly turned 45 degrees away from the optical axis with one shoulder forward toward the camera, breaking frontal symmetry and revealing volumetric depth and side garment drapery. "
             "The head turns gently toward the viewer while the body maintains a strict 45-degree three-quarter oblique orientation. Strictly avoid flat orthogonal front-facing orientation (0-degree front view) or camera-parallel torso alignment. "
             f"Standing in a confident three-quarter stance wearing complete consistent costume design matching {full_body_costume}. "
-            f"Rendered in {fam_spec['medium_desc']} ({clean_palette}) via {fam_spec['optics']}, illuminated by {fam_spec['lighting']} against a {fam_spec['backdrop']} with soft ground contact shadow."
+            f"{eff_medium_desc} Captured via {fam_spec['optics']}. {lighting_segment}"
         )
 
     elif slot_key == "back":
@@ -3044,11 +3166,11 @@ def compile_sheet_prompt(
             ref_candidates.append(("Card 3 Full Body Front", character.front_image_url))
 
         ref_note = f"Capturing the exact same {fam_spec['ref_noun']} from the reference anchors in a direct 180-degree rear orthogonal view. " if ref_candidates else ""
+        lighting_segment = f"{eff_lighting} with soft ground contact shadow." if is_frozen_active else f"illuminated by {eff_lighting} against a {eff_backdrop} with soft ground contact shadow."
         positive_prompt = (
             f"Full-body {fam_spec['sheet_header']} 180-degree rear turnaround portrait of {char_name}, {biometric_profile}. {ref_note}"
             "Full-length head-to-toe framing facing squarely away from the camera, capturing rear hair silhouette, shoulder anatomy, and complete back costume construction: "
-            f"{full_body_costume}. Rendered in {fam_spec['medium_desc']} ({clean_palette}) via {fam_spec['optics']}, "
-            f"illuminated by {fam_spec['lighting']} against a {fam_spec['backdrop']} with soft ground contact shadow."
+            f"{full_body_costume}. {eff_medium_desc} Captured via {fam_spec['optics']}. {lighting_segment}"
         )
 
     elif slot_key == "tpose":
@@ -3062,13 +3184,13 @@ def compile_sheet_prompt(
             ref_candidates.append(("Card 3 Full Body Front", character.front_image_url))
 
         ref_note = f"Capturing the exact same {fam_spec['ref_noun']} from the reference anchors in a strict orthopedic calibration T-pose. " if ref_candidates else ""
+        lighting_segment = eff_lighting if is_frozen_active else f"illuminated by {eff_lighting} against a {eff_backdrop}."
         positive_prompt = (
             f"Full-body {fam_spec['sheet_header']} technical T-pose calibration sheet of {char_name}, {biometric_profile}. {ref_note}"
             "Full-length direct frontal view framed cleanly from top of head down to footwear with comfortable margins. "
             "Standing upright with head level facing straight forward, arms extended horizontally to each side at exact 90-degree shoulder height, palms open facing forward, feet shoulder-width apart. "
             f"Wearing complete consistent costume construction: {full_body_costume}. "
-            f"Rendered in {fam_spec['medium_desc']} ({clean_palette}) via {fam_spec['optics']}, "
-            f"illuminated by {fam_spec['lighting']} against a {fam_spec['backdrop']}."
+            f"{eff_medium_desc} Captured via {fam_spec['optics']}. {lighting_segment}"
         )
 
     elif slot_key == "action":
@@ -3082,12 +3204,12 @@ def compile_sheet_prompt(
             ref_candidates.append(("Card 3 Full Body Front", character.front_image_url))
 
         ref_note = f"Capturing the exact same {fam_spec['ref_noun']} from the reference anchors in a dynamic narrative signature action pose. " if ref_candidates else ""
+        lighting_segment = f"{eff_lighting} with dynamic ground contact shadow." if is_frozen_active else f"illuminated by {eff_lighting} against a {eff_backdrop} with dynamic ground contact shadow."
         positive_prompt = (
             f"Full-body {fam_spec['sheet_header']} dynamic action-stance portrait of {char_name}, {biometric_profile}. {ref_note}"
             "Full-length head-to-toe framing with athletic weight distribution, expressive silhouette, and dynamic garment drapery. "
             f"Wearing complete consistent costume design under dynamic motion matching {full_body_costume}. "
-            f"Rendered in {fam_spec['medium_desc']} ({clean_palette}) via {fam_spec['optics']}, "
-            f"illuminated by {fam_spec['lighting']} against a {fam_spec['backdrop']} with dynamic ground contact shadow."
+            f"{eff_medium_desc} Captured via {fam_spec['optics']}. {lighting_segment}"
         )
 
     elif slot_key == "state":
@@ -3110,14 +3232,14 @@ def compile_sheet_prompt(
             ref_candidates.append(("Card 3 Full Body Front", character.front_image_url))
 
         ref_note = f"Strictly preserving character identity and baseline proportions from the reference {fam_spec['ref_noun']} while applying state progression. " if ref_candidates else ""
+        lighting_segment = eff_lighting if is_frozen_active else f"illuminated by {eff_lighting} against a {eff_backdrop}."
         positive_prompt = (
             f"{fam_spec['sheet_header']} state portrait of {char_name}, {biometric_profile}, in state {target_state.state_code}. "
             "Composed as a single unified character portrait on a single undivided canvas (strictly single frame, zero multi-panel grid, zero collage, zero split screen). "
             f"{ref_note}"
             f"Wardrobe: {target_state.wardrobe}. Physical weathering, damage, and wear: {target_state.injuries_and_wear}. "
             f"Emotional and psychological expression: {target_state.expression_anchor}. "
-            f"Rendered in {fam_spec['medium_desc']} ({clean_palette}) via {fam_spec['optics']}, "
-            f"illuminated by {fam_spec['lighting']} against a {fam_spec['backdrop']}."
+            f"{eff_medium_desc} Captured via {fam_spec['optics']}. {lighting_segment}"
         )
 
     else:  # front fallback (Card 3)
@@ -3130,20 +3252,21 @@ def compile_sheet_prompt(
 
         ref_note = f"Capturing the exact same {fam_spec['ref_noun']} from the reference close-up in a complete head-to-toe standing view. " if ref_candidates else ""
         pose_phrase = "studio A-pose" if style_family == "photorealistic" else "model sheet A-pose"
+        lighting_segment = f"{eff_lighting} with a soft natural ground contact shadow." if is_frozen_active else f"illuminated by {eff_lighting} against a {eff_backdrop} with a soft natural ground contact shadow."
         positive_prompt = (
             f"Full-body {fam_spec['sheet_header']} full-length turnaround portrait of {char_name}, {biometric_profile}. {ref_note}"
             "The camera is pulled back at neutral chest height to capture the full standing figure unobstructed from the crown of the hair down to the soles of the footwear touching the ground, "
             f"with comfortable visible margins above and below. Standing centered upright in a relaxed neutral {pose_phrase}, arms hanging naturally slightly away from the torso, "
             "hands open and relaxed, feet planted shoulder-width apart, looking straight ahead at orthogonal 0-degree angle. "
             f"Wearing complete, consistent costume design: {full_body_costume}. "
-            f"Rendered in {fam_spec['medium_desc']} ({clean_palette}) via {fam_spec['optics']}, "
-            f"illuminated by {fam_spec['lighting']} against a {fam_spec['backdrop']} with a soft natural ground contact shadow."
+            f"{eff_medium_desc} Captured via {fam_spec['optics']}. {lighting_segment}"
         )
 
     if prompt_override and prompt_override.strip():
         positive_prompt = prompt_override.strip()
 
-    if director_rag_cues and director_rag_cues.strip():
+    # Never inject scene/shot RAG cues into Card 1 when CASTING_CLOSEUP_REALISTIC_V1 is active
+    if director_rag_cues and director_rag_cues.strip() and not (slot_key == "closeup" and is_frozen_active):
         positive_prompt = f"{positive_prompt.rstrip('. ')}. Director look-dev style cues: {director_rag_cues.strip()}."
 
     if fam_spec["inline_guardrail"] and fam_spec["inline_guardrail"] not in positive_prompt:
@@ -3192,8 +3315,22 @@ def compile_sheet_prompt(
         positive_prompt = f"{positive_prompt.rstrip('. ')}.\n\n{strict_constraints}"
 
     anchors_used = [label for label, u in ref_candidates if u]
-    sanitized_negs = sanitize_negative_prompts_for_style([fam_spec["base_negative"]], style_code)
-    negative_prompt = ", ".join(sanitized_negs)
+    if slot_key == "closeup" and frozen_negative_override is not None:
+        negative_prompt = frozen_negative_override
+    elif downstream_layers is not None:
+        downstream_struct_neg = (
+            "text, numbers, captions, labels, watermarks, panel numbering, typography, subtitles, "
+            "UI overlay, distorted facial anatomy, asymmetrical eyes, missing fingers, extra limbs, "
+            "blurry textures, pixelated face, low resolution, inconsistent clothing"
+        )
+        sanitized_negs = sanitize_negative_prompts_for_style(
+            [f"{downstream_layers['negative_prompt']}, {downstream_struct_neg}"],
+            style_code,
+        )
+        negative_prompt = ", ".join(sanitized_negs)
+    else:
+        sanitized_negs = sanitize_negative_prompts_for_style([fam_spec["base_negative"]], style_code)
+        negative_prompt = ", ".join(sanitized_negs)
 
     copy_ready_text = (
         f"{positive_prompt}\n\n"
@@ -3205,6 +3342,10 @@ def compile_sheet_prompt(
     return {
         "slot": slot_key,
         "style_family": style_family,
+        "style_code": style_gate.style_code,
+        "preset_id": CASTING_CLOSEUP_PRESET_ID if is_frozen_active else None,
+        "routing_mode": style_gate.routing_mode,
+        "layers_applied": layers_applied,
         "card_title": card_title,
         "positive_prompt": positive_prompt,
         "negative_prompt": negative_prompt,
@@ -3311,6 +3452,7 @@ async def get_character_sheet_prompts(
         or (proj.target_style_code if proj else None)
         or "#Style 01"
     )
+    active_gate = resolve_style_gate(active_style_code)
     rag_cues = await _fetch_character_sheet_rag_cues(
         style_code=active_style_code,
         character_name=char.name or "Character",
@@ -3325,7 +3467,7 @@ async def get_character_sheet_prompts(
             project=proj,
             bible=mpb,
             slot=s,
-            director_rag_cues=rag_cues,
+            director_rag_cues="" if (s == "closeup" and active_gate.routing_mode != "strict_bypass") else rag_cues,
         )
         override = _resolve_sheet_override(char, [s])
         effective = _apply_sheet_overrides(compiled, override, active_style_code)
@@ -3346,6 +3488,9 @@ async def get_character_sheet_prompts(
             "dna_seed": compiled["dna_seed"],
             "width": compiled["width"],
             "height": compiled["height"],
+            "preset_id": compiled.get("preset_id"),
+            "routing_mode": compiled.get("routing_mode"),
+            "layers_applied": compiled.get("layers_applied", []),
             **effective,
         }
 
@@ -3386,6 +3531,9 @@ async def get_character_sheet_prompts(
             "dna_seed": compiled_st["dna_seed"],
             "width": compiled_st["width"],
             "height": compiled_st["height"],
+            "preset_id": compiled_st.get("preset_id"),
+            "routing_mode": compiled_st.get("routing_mode"),
+            "layers_applied": compiled_st.get("layers_applied", []),
             **state_effective,
         }
 
@@ -3505,6 +3653,9 @@ async def upload_character_sheet(
         "file_size": len(processed_bytes),
         "width": width,
         "height": height,
+        "resolution_width": width,
+        "resolution_height": height,
+        "is_2k": max(width, height) >= 1920,
         "prompt": compiled["positive_prompt"],
         "negative_prompt": compiled["negative_prompt"],
         "anchors_used": compiled["anchors_used"],
@@ -3613,13 +3764,25 @@ async def generate_character_asset(
         (payload.prompt_override or "").strip()
         or str(stored_override.get("prompt_override") or "").strip()
     )
+    active_gate = resolve_style_gate(active_style_code)
+    is_frozen_closeup = slot_to_compile in ("closeup", "close_up", "headshot", "portrait", "master_closeup", "slot_1") and active_gate.routing_mode != "strict_bypass"
+
+    director_slots_dict = None
+    if is_frozen_closeup and not has_prompt_override:
+        director_slots_dict = await DirectorRAGClient.retrieve_character_casting_slots(
+            character_name=char.name or "Character",
+            raw_biometric_text=char.base_prompt or "",
+            style_code=active_style_code,
+            narrative_summary=char.narrative_summary or "",
+        )
+
     rag_cues = (
         await _fetch_character_sheet_rag_cues(
             style_code=active_style_code,
             character_name=char.name or "Character",
             slot_label=f"character {slot_to_compile} look-dev",
         )
-        if not has_prompt_override
+        if (not has_prompt_override and not is_frozen_closeup)
         else ""
     )
     compiled = compile_sheet_prompt(
@@ -3630,6 +3793,7 @@ async def generate_character_asset(
         target_state=target_state,
         aspect_ratio=payload.aspect_ratio,
         director_rag_cues=rag_cues,
+        director_slots=director_slots_dict,
     )
     effective = _apply_sheet_overrides(compiled, stored_override, active_style_code)
 
@@ -3648,29 +3812,20 @@ async def generate_character_asset(
         if p and os.path.exists(p) and os.path.getsize(p) > 2048
     ][:4]
 
-    render_cfg = get_project_render_config(str(char.project_id))
-    active_prov_id = render_cfg.get("active_provider_id") if render_cfg else None
-    apply_all = render_cfg.get("apply_to_all_scenes", True) if render_cfg else False
-
-    prov_override = payload.provider if (payload.provider and payload.provider not in ("ag_gemini_flash", "default", None)) else None
-    base_url_to_use = None
-    api_key_to_use = None
-
-    if prov_override and render_cfg and prov_override in render_cfg.get("configs", {}):
-        prov = prov_override
-        cfg_override = render_cfg["configs"][prov_override]
-        base_url_to_use = cfg_override.get("baseUrl")
-        model_to_use = payload.model or cfg_override.get("modelId")
-        stored_key = cfg_override.get("apiKey", "")
-        api_key_to_use = decrypt_key(stored_key) if stored_key else ""
-    elif render_cfg and apply_all and active_prov_id:
-        prov = active_prov_id
-        model_to_use = payload.model or render_cfg.get("model_id")
-        base_url_to_use = render_cfg.get("base_url")
-        api_key_to_use = render_cfg.get("api_key")
-    else:
-        prov = (payload.provider or "9router").lower().strip()
-        model_to_use = payload.model or "ag/gemini-3.8-flash"
+    resolved_render = resolve_effective_render_provider(
+        project_id=str(char.project_id),
+        requested_provider=payload.provider,
+        requested_model=payload.model,
+        ignored_override_values=("ag_gemini_flash", "default", None),
+        default_provider="9router",
+        default_model="ag/gemini-3.8-flash",
+    )
+    prov = resolved_render["provider_id"]
+    model_to_use = resolved_render["model_id"]
+    base_url_to_use = resolved_render["base_url"]
+    api_key_to_use = resolved_render["api_key"]
+    use_universal_adapter = resolved_render["use_universal_adapter"]
+    width, height = resolve_provider_dimensions(prov, width, height, card_aspect)
 
     # 3. Google Flow Asynchronous Queue
     if prov in ("google_flow", "google-flow"):
@@ -3709,7 +3864,7 @@ async def generate_character_asset(
         }
 
     # 4. Image Generation Execution
-    if render_cfg and (apply_all or prov_override):
+    if use_universal_adapter:
         adapter = UniversalImageAdapter()
         req = UniversalImageRequest(
             provider_id=prov,
@@ -3764,8 +3919,32 @@ async def generate_character_asset(
         res_model = gen_res.model or model_to_use
 
     # 5. Persistent SQLite Updates
+    dims = _read_image_dimensions_from_url(gen_res_url)
+    actual_w, actual_h = dims if dims else (width, height)
+    is_2k_flag = max(actual_w, actual_h) >= 1920
+
+    meta = dict(char.sheet_metadata or {})
     if payload.target_type == "state" and target_state:
         target_state.image_url = gen_res_url
+        meta[f"state_{target_state.id}"] = {
+            "image_url": gen_res_url,
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "anchors_used": anchors_used,
+            "provider": res_provider,
+            "model": res_model,
+            "seed": dna_seed,
+            "aspect_ratio": card_aspect,
+            "width": actual_w,
+            "height": actual_h,
+            "resolution_width": actual_w,
+            "resolution_height": actual_h,
+            "is_2k": is_2k_flag,
+            "rendered_at": datetime.now(timezone.utc).isoformat(),
+            "status": "completed",
+        }
+        char.sheet_metadata = meta
+        flag_modified(char, "sheet_metadata")
     else:
         if angle_key == "closeup":
             char.closeup_image_url = gen_res_url
@@ -3784,7 +3963,6 @@ async def generate_character_asset(
         elif angle_key == "expression":
             char.expression_image_url = gen_res_url
 
-        meta = dict(char.sheet_metadata or {})
         meta[angle_key] = {
             "image_url": gen_res_url,
             "prompt": prompt,
@@ -3794,6 +3972,11 @@ async def generate_character_asset(
             "model": res_model,
             "seed": dna_seed,
             "aspect_ratio": card_aspect,
+            "width": actual_w,
+            "height": actual_h,
+            "resolution_width": actual_w,
+            "resolution_height": actual_h,
+            "is_2k": is_2k_flag,
             "rendered_at": datetime.now(timezone.utc).isoformat(),
             "status": "completed",
         }
@@ -3812,6 +3995,11 @@ async def generate_character_asset(
         "state_id": payload.state_id,
         "anchors_used": anchors_used,
         "dna_seed": dna_seed,
+        "width": actual_w,
+        "height": actual_h,
+        "resolution_width": actual_w,
+        "resolution_height": actual_h,
+        "is_2k": is_2k_flag,
         "compiled_prompt": prompt,
         "effective_prompt": prompt,
         "compiled_negative_prompt": effective["compiled_negative_prompt"],
@@ -3884,6 +4072,11 @@ async def attach_character_job_result(
     else:
         angle_key = "front"
 
+    dims = _read_image_dimensions_from_url(job.image_url)
+    actual_w, actual_h = dims if dims else (None, None)
+    is_2k_flag = bool(actual_w and actual_h and max(actual_w, actual_h) >= 1920)
+    meta = dict(char.sheet_metadata or {})
+
     if payload.target_type == "state" and payload.state_id:
         s_uuid = _parse_uuid(payload.state_id, "state_id")
         target_state = (
@@ -3891,6 +4084,23 @@ async def attach_character_job_result(
         ).scalar_one_or_none()
         if target_state:
             target_state.image_url = job.image_url
+            meta[f"state_{target_state.id}"] = {
+                "image_url": job.image_url,
+                "prompt": job.prompt,
+                "anchors_used": job.reference_image_paths or [],
+                "provider": "google_flow",
+                "seed": char.dna_seed,
+                "aspect_ratio": job.aspect_ratio,
+                "width": actual_w,
+                "height": actual_h,
+                "resolution_width": actual_w,
+                "resolution_height": actual_h,
+                "is_2k": is_2k_flag,
+                "rendered_at": datetime.now(timezone.utc).isoformat(),
+                "status": "completed",
+            }
+            char.sheet_metadata = meta
+            flag_modified(char, "sheet_metadata")
     else:
         if angle_key == "closeup":
             char.closeup_image_url = job.image_url
@@ -3909,7 +4119,6 @@ async def attach_character_job_result(
         elif angle_key == "expression":
             char.expression_image_url = job.image_url
 
-        meta = dict(char.sheet_metadata or {})
         meta[angle_key] = {
             "image_url": job.image_url,
             "prompt": job.prompt,
@@ -3917,6 +4126,11 @@ async def attach_character_job_result(
             "provider": "google_flow",
             "seed": char.dna_seed,
             "aspect_ratio": job.aspect_ratio,
+            "width": actual_w,
+            "height": actual_h,
+            "resolution_width": actual_w,
+            "resolution_height": actual_h,
+            "is_2k": is_2k_flag,
             "rendered_at": datetime.now(timezone.utc).isoformat(),
             "status": "completed",
         }
@@ -4251,18 +4465,99 @@ async def generate_character_preview(
         sheet_metadata={},
     )
 
-    render_cfg = get_project_render_config(str(project.id))
-    active_prov_id = render_cfg.get("active_provider_id") if render_cfg else None
-    apply_all = render_cfg.get("apply_to_all_scenes", True) if render_cfg else False
-
-    prov_override = payload.image_provider if (payload.image_provider and payload.image_provider not in ("ag_gemini_flash", "default", None)) else None
-    if prov_override and render_cfg and prov_override in render_cfg.get("configs", {}):
-        prov = prov_override
-    elif render_cfg and apply_all and active_prov_id:
-        prov = active_prov_id
-    else:
-        prov = (payload.image_provider or "9router").lower().strip()
+    resolved_render = resolve_effective_render_provider(
+        project_id=str(project.id),
+        requested_provider=payload.image_provider,
+        requested_model=payload.model,
+        ignored_override_values=("ag_gemini_flash", "default", None),
+        default_provider="9router",
+        default_model="gemini-3.1-flash-image",
+    )
+    prov = resolved_render["provider_id"]
+    resolved_model_id = resolved_render["model_id"]
+    resolved_base_url = resolved_render["base_url"]
+    resolved_api_key = resolved_render["api_key"]
+    use_universal_adapter = resolved_render["use_universal_adapter"]
     target = (payload.target or "closeup").lower().strip()
+
+    async def _run_sync_preview_slot(
+        slot_label: str,
+        compiled_slot: dict[str, Any],
+        aspect_ratio_val: str,
+        ref_paths_val: list[str] | None = None,
+    ) -> str:
+        safe_w, safe_h = resolve_provider_dimensions(
+            prov, compiled_slot["width"], compiled_slot["height"], aspect_ratio_val
+        )
+        if use_universal_adapter:
+            adapter = UniversalImageAdapter()
+            u_req = UniversalImageRequest(
+                provider_id=prov,
+                model_id=resolved_model_id,
+                prompt=compiled_slot["positive_prompt"],
+                negative_prompt=compiled_slot["negative_prompt"],
+                aspect_ratio=aspect_ratio_val,
+                width=safe_w,
+                height=safe_h,
+                seed=dna_seed,
+                reference_image_paths=ref_paths_val,
+                base_url_override=resolved_base_url,
+                api_key_override=resolved_api_key,
+                enable_fallback=True,
+            )
+            try:
+                u_res = await adapter.generate_image(u_req)
+                src = u_res.local_path
+                if not src or not os.path.exists(src):
+                    src = _url_to_local_path(u_res.local_url)
+                if not src or not os.path.exists(src):
+                    raise RuntimeError(f"Generated {slot_label} file could not be located on disk.")
+                return src
+            except RateLimitExceededError as rle:
+                logger.warning("preview_%s_rate_limited: %s", slot_label.lower(), str(rle))
+                raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(rle))
+            except Exception as exc:
+                logger.error("preview_%s_failed: %s", slot_label.lower(), str(exc))
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Image generation failed via {prov}: {str(exc)}",
+                )
+
+        model_to_use = payload.model or (
+            "gemini-3.1-flash-image" if prov in ("ag_gemini_flash", "antigravity") else None
+        )
+        provider_inst = get_image_provider(prov)
+        req_slot = ImageGenerationRequest(
+            prompt=compiled_slot["positive_prompt"],
+            negative_prompt=compiled_slot["negative_prompt"],
+            seed=dna_seed,
+            randomize_seed=False,
+            width=safe_w,
+            height=safe_h,
+            provider="9router" if prov in ("ag_gemini_flash", "antigravity") else prov,
+            model=model_to_use,
+            enable_fallback=True,
+            reference_image_paths=ref_paths_val or [],
+        )
+        try:
+            gen_res = await provider_inst.generate(req_slot)
+        except RateLimitExceededError as rle:
+            logger.warning("preview_%s_rate_limited: %s", slot_label.lower(), str(rle))
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(rle))
+        except ImageGenerationError as ige:
+            logger.error("preview_%s_failed: %s", slot_label.lower(), str(ige))
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(ige))
+
+        src = _url_to_local_path(gen_res.local_url)
+        if not src or not os.path.exists(src):
+            if gen_res.local_path and os.path.exists(gen_res.local_path):
+                src = gen_res.local_path
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Generated {slot_label} preview file could not be located on disk.",
+                )
+        return src
 
     closeup_file = temp_dir / "closeup.png"
     expr_file = temp_dir / "expression.png"
@@ -4280,15 +4575,29 @@ async def generate_character_preview(
 
     # 1. Preview 1: Character Close-Up (Master Anchor) - Slot 1
     if target in ("closeup", "all"):
-        aspect_to_use = "3:4" if target in ("closeup", "all") else (payload.aspect_ratio or "3:4")
+        aspect_to_use = "1:1" if target in ("closeup", "all") else (payload.aspect_ratio or "1:1")
+        preview_style_code = (
+            (mpb.style_parameters.get("master_style_code") if mpb and mpb.style_parameters else None)
+            or (project.target_style_code if project else None)
+            or "#Style 01"
+        )
+        preview_gate = resolve_style_gate(preview_style_code)
+        preview_director_slots = None
+        if preview_gate.routing_mode != "strict_bypass":
+            preview_director_slots = await DirectorRAGClient.retrieve_character_casting_slots(
+                character_name=payload.name or "Character",
+                raw_biometric_text=payload.base_visual_prompt or "",
+                style_code=preview_style_code,
+            )
         compiled_closeup = compile_sheet_prompt(
             character=dummy_char,
             project=project,
             bible=mpb,
             slot="closeup",
             aspect_ratio=aspect_to_use,
+            director_slots=preview_director_slots,
         )
-        if prov == "google_flow":
+        if prov in ("google_flow", "google-flow"):
             await _assert_socks5_healthy_for_flow(session)
             flow_job = FlowImageJobModel(
                 id=uuid.uuid4(),
@@ -4316,48 +4625,11 @@ async def generate_character_preview(
                 "message": "Character Close-Up render job placed in Google Flow queue",
             }
         else:
-            model_to_use = payload.model or (
-                "gemini-3.1-flash-image" if prov in ("ag_gemini_flash", "antigravity") else None
-            )
-            provider_inst = get_image_provider(prov)
-            req_closeup = ImageGenerationRequest(
-                prompt=compiled_closeup["positive_prompt"],
-                negative_prompt=compiled_closeup["negative_prompt"],
-                seed=dna_seed,
-                randomize_seed=False,
-                width=compiled_closeup["width"],
-                height=compiled_closeup["height"],
-                provider="9router" if prov in ("ag_gemini_flash", "antigravity") else prov,
-                model=model_to_use,
-                enable_fallback=True,
-            )
-            try:
-                gen_res = await provider_inst.generate(req_closeup)
-            except RateLimitExceededError as rle:
-                logger.warning("preview_closeup_rate_limited: %s", str(rle))
-                raise HTTPException(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail=str(rle),
-                )
-            except ImageGenerationError as ige:
-                logger.error("preview_closeup_failed: %s", str(ige))
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=str(ige),
-                )
-
-            src_path = _url_to_local_path(gen_res.local_url)
-            if not src_path or not os.path.exists(src_path):
-                if gen_res.local_path and os.path.exists(gen_res.local_path):
-                    src_path = gen_res.local_path
-                else:
-                    raise HTTPException(
-                        status_code=status.HTTP_502_BAD_GATEWAY,
-                        detail="Generated Close-Up file could not be located on disk.",
-                    )
-
+            src_path = await _run_sync_preview_slot("Close-Up", compiled_closeup, aspect_to_use)
             validate_raster_image_file(src_path)
             shutil.copyfile(src_path, closeup_file)
+            c_dims = _read_image_dimensions_from_path(closeup_file)
+            _update_preview_manifest(temp_dir, "closeup", closeup_file.name, dims=c_dims)
             ts = int(time.time() * 1000)
             closeup_url = f"/api/v1/assets/temp-previews/{preview_token}/closeup.png?v={ts}"
 
@@ -4370,6 +4642,13 @@ async def generate_character_preview(
                     "front_url": front_url,
                     "dna_seed": dna_seed,
                     "provider": prov,
+                    "slot_dimensions": {
+                        "closeup": {
+                            "resolution_width": c_dims[0] if c_dims else 1024,
+                            "resolution_height": c_dims[1] if c_dims else 1024,
+                            "is_2k": bool(c_dims and max(c_dims) >= 1920),
+                        }
+                    },
                     "message": "Character Close-Up preview ready for inspection",
                 }
 
@@ -4390,7 +4669,7 @@ async def generate_character_preview(
         if closeup_file.exists() and closeup_file.stat().st_size > 2048:
             ref_paths_expr = [str(closeup_file.resolve())]
 
-        if prov == "google_flow":
+        if prov in ("google_flow", "google-flow"):
             await _assert_socks5_healthy_for_flow(session)
             flow_job = FlowImageJobModel(
                 id=uuid.uuid4(),
@@ -4418,50 +4697,13 @@ async def generate_character_preview(
                 "message": "Expression Sheet render job placed in Google Flow queue",
             }
         else:
-            model_to_use = payload.model or (
-                "gemini-3.1-flash-image" if prov in ("ag_gemini_flash", "antigravity") else None
+            src_path = await _run_sync_preview_slot(
+                "Expression Sheet", compiled_expr, aspect_to_use_expr, ref_paths_expr
             )
-            provider_inst = get_image_provider(prov)
-            req_expr = ImageGenerationRequest(
-                prompt=compiled_expr["positive_prompt"],
-                negative_prompt=compiled_expr["negative_prompt"],
-                seed=dna_seed,
-                randomize_seed=False,
-                width=compiled_expr["width"],
-                height=compiled_expr["height"],
-                provider="9router" if prov in ("ag_gemini_flash", "antigravity") else prov,
-                model=model_to_use,
-                enable_fallback=True,
-                reference_image_paths=ref_paths_expr,
-            )
-            try:
-                gen_res = await provider_inst.generate(req_expr)
-            except RateLimitExceededError as rle:
-                logger.warning("preview_expression_rate_limited: %s", str(rle))
-                raise HTTPException(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail=str(rle),
-                )
-            except ImageGenerationError as ige:
-                logger.error("preview_expression_failed: %s", str(ige))
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=str(ige),
-                )
-
-            src_path = _url_to_local_path(gen_res.local_url)
-            if not src_path or not os.path.exists(src_path):
-                if gen_res.local_path and os.path.exists(gen_res.local_path):
-                    src_path = gen_res.local_path
-                else:
-                    raise HTTPException(
-                        status_code=status.HTTP_502_BAD_GATEWAY,
-                        detail="Generated Expression Sheet file could not be located on disk.",
-                    )
-
             # Strict magic bytes raster check before staging
             validate_raster_image_file(src_path)
             shutil.copyfile(src_path, expr_file)
+            _update_preview_manifest(temp_dir, "expression", expr_file.name, dims=_read_image_dimensions_from_path(expr_file))
             ts = int(time.time() * 1000)
             expression_url = f"/api/v1/assets/temp-previews/{preview_token}/expression.png?v={ts}"
 
@@ -4485,7 +4727,7 @@ async def generate_character_preview(
         if closeup_file.exists() and closeup_file.stat().st_size > 2048:
             ref_paths.append(str(closeup_file.resolve()))
 
-        if prov == "google_flow":
+        if prov in ("google_flow", "google-flow"):
             await _assert_socks5_healthy_for_flow(session)
             flow_job = FlowImageJobModel(
                 id=uuid.uuid4(),
@@ -4513,50 +4755,13 @@ async def generate_character_preview(
                 "message": "Full Body render job placed in Google Flow queue",
             }
         else:
-            model_to_use = payload.model or (
-                "gemini-3.1-flash-image" if prov in ("ag_gemini_flash", "antigravity") else None
+            src_path = await _run_sync_preview_slot(
+                "Full Body", compiled_front, aspect_to_use_front, ref_paths
             )
-            provider_inst = get_image_provider(prov)
-            req_front = ImageGenerationRequest(
-                prompt=compiled_front["positive_prompt"],
-                negative_prompt=compiled_front["negative_prompt"],
-                seed=dna_seed,
-                randomize_seed=False,
-                width=compiled_front["width"],
-                height=compiled_front["height"],
-                provider="9router" if prov in ("ag_gemini_flash", "antigravity") else prov,
-                model=model_to_use,
-                enable_fallback=True,
-                reference_image_paths=ref_paths,
-            )
-            try:
-                gen_res = await provider_inst.generate(req_front)
-            except RateLimitExceededError as rle:
-                logger.warning("preview_front_rate_limited: %s", str(rle))
-                raise HTTPException(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail=str(rle),
-                )
-            except ImageGenerationError as ige:
-                logger.error("preview_front_failed: %s", str(ige))
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=str(ige),
-                )
-
-            src_path = _url_to_local_path(gen_res.local_url)
-            if not src_path or not os.path.exists(src_path):
-                if gen_res.local_path and os.path.exists(gen_res.local_path):
-                    src_path = gen_res.local_path
-                else:
-                    raise HTTPException(
-                        status_code=status.HTTP_502_BAD_GATEWAY,
-                        detail="Generated Full Body preview file could not be located on disk.",
-                    )
-
             # Strict magic bytes raster check before staging
             validate_raster_image_file(src_path)
             shutil.copyfile(src_path, front_file)
+            _update_preview_manifest(temp_dir, "front", front_file.name, dims=_read_image_dimensions_from_path(front_file))
             ts = int(time.time() * 1000)
             front_url = f"/api/v1/assets/temp-previews/{preview_token}/front.png?v={ts}"
 
@@ -4576,6 +4781,16 @@ async def generate_character_preview(
         ts = int(time.time() * 1000)
         expression_url = f"/api/v1/assets/temp-previews/{preview_token}/expression.png?v={ts}"
 
+    slot_dims: dict[str, Any] = {}
+    for s_key, f_path in (("closeup", closeup_file), ("expression", expr_file), ("front", front_file)):
+        d = _read_image_dimensions_from_path(f_path)
+        if d:
+            slot_dims[s_key] = {
+                "resolution_width": d[0],
+                "resolution_height": d[1],
+                "is_2k": max(d) >= 1920,
+            }
+
     return {
         "status": "completed",
         "preview_token": preview_token,
@@ -4584,7 +4799,645 @@ async def generate_character_preview(
         "front_url": front_url,
         "dna_seed": dna_seed,
         "provider": prov,
+        "slot_dimensions": slot_dims,
         "message": "Pre-creation visual previews ready for inspection",
+    }
+
+
+def _update_preview_manifest(
+    temp_dir: Path,
+    slot_name: str,
+    active_file: str,
+    *,
+    dims: tuple[int, int] | None = None,
+    previous_1k_file: str | None = None,
+) -> dict[str, Any]:
+    manifest_path = temp_dir / "preview_manifest.json"
+    manifest: dict[str, Any] = {}
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = {}
+
+    w, h = dims if dims else (None, None)
+    is_2k_val = bool(w and h and max(w, h) >= 1920)
+    entry: dict[str, Any] = {
+        "active_file": active_file,
+        "resolution_width": w,
+        "resolution_height": h,
+        "is_2k": is_2k_val,
+    }
+    if previous_1k_file:
+        entry["previous_1k_file"] = previous_1k_file
+    manifest[slot_name] = entry
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return entry
+
+
+def _resolve_upscale_2k_provider(
+    project_id: str | None,
+    provider_override: str | None = None,
+    model_override: str | None = None,
+) -> dict[str, Any]:
+    """Resolve a 2K-native + reference-capable cloud provider or auto-route if configured."""
+    render_cfg = get_project_render_config(str(project_id)) if project_id else None
+    configs = (render_cfg.get("configs") or {}) if render_cfg else {}
+
+    active_prov = (
+        (provider_override or "").strip()
+        or (render_cfg.get("active_provider_id") if render_cfg else None)
+        or "9router"
+    )
+    _, active_cfg = _lookup_provider_config(configs, active_prov)
+    active_cfg = active_cfg or {}
+    active_model = (model_override or "").strip() or active_cfg.get("modelId")
+    active_base_url = active_cfg.get("baseUrl")
+    active_key = decrypt_key(active_cfg.get("apiKey", "")) if active_cfg.get("apiKey") else ""
+
+    supported, reason = supports_native_2k_upscale(active_prov, model_id=active_model)
+    if supported and active_key:
+        return {
+            "provider_id": active_prov,
+            "model_id": active_model,
+            "base_url": active_base_url,
+            "api_key": active_key,
+            "auto_routed_from": None,
+            "route_reason": reason,
+        }
+
+    # Capability fallback: auto-route to the highest-priority configured 2K + reference provider
+    for cand_pid in AUTO_ROUTE_2K_PRIORITY:
+        matched_key, cand_cfg = _lookup_provider_config(configs, cand_pid)
+        if not cand_cfg or not matched_key:
+            continue
+        cand_model = cand_cfg.get("modelId")
+        cand_key = decrypt_key(cand_cfg.get("apiKey", "")) if cand_cfg.get("apiKey") else ""
+        cand_ok, cand_reason = supports_native_2k_upscale(matched_key, model_id=cand_model)
+        if cand_ok and cand_key:
+            return {
+                "provider_id": matched_key,
+                "model_id": cand_model,
+                "base_url": cand_cfg.get("baseUrl"),
+                "api_key": cand_key,
+                "auto_routed_from": active_prov,
+                "route_reason": f"Auto-routed from '{active_prov}' to '{matched_key}': {cand_reason}",
+            }
+
+    if not supported:
+        detail_msg = (
+            f"Provider aktif '{active_prov}' tidak mendukung Upscale 2K native + reference image ({reason}). "
+            "Konfigurasikan API key untuk Seedream 5.5, FLUX, atau Gemini Direct di Render Settings."
+        )
+    else:
+        detail_msg = (
+            f"API key untuk provider 2K '{active_prov}' belum dikonfigurasi. "
+            "Tambahkan API key pada Render Settings sebelum melakukan Upscale 2K."
+        )
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail={
+            "error_code": "UPSCALE_2K_PROVIDER_UNSUPPORTED",
+            "message": detail_msg,
+            "active_provider": active_prov,
+        },
+    )
+
+
+class CharacterAssetUpscaleRequest(BaseModel):
+    slot_key: str | None = Field(
+        default=None,
+        description="'closeup', 'expression', 'front', 'side', 'three_quarter', 'back', 'tpose', 'action', or 'state'",
+    )
+    state_id: str | None = Field(default=None, description="Character state UUID when upscaling a Dynamic State")
+    provider_override: str | None = Field(default=None, description="Optional 2K provider override")
+    model_override: str | None = Field(default=None, description="Optional model override")
+
+
+class CharacterAssetRevertRequest(BaseModel):
+    slot_key: str | None = Field(default=None, description="Sheet slot key to revert to 1K")
+    state_id: str | None = Field(default=None, description="State UUID to revert to 1K")
+
+
+class CharacterPreviewUpscaleRequest(BaseModel):
+    project_id: str | None = Field(default=None, description="Project ID (optional when supplied in path)")
+    preview_token: str = Field(description="Active pre-creation staging preview token")
+    slot: Literal["closeup", "expression", "front"] = Field(default="closeup")
+    name: str = Field(default="Character")
+    role: str = Field(default="PROTAGONIST")
+    base_visual_prompt: str = Field(default="")
+    dna_seed: int | None = Field(default=None)
+    provider_override: str | None = Field(default=None)
+    model_override: str | None = Field(default=None)
+
+
+class CharacterPreviewRevertRequest(BaseModel):
+    preview_token: str = Field(description="Active pre-creation staging preview token")
+    slot: Literal["closeup", "expression", "front"] = Field(default="closeup")
+
+
+_SLOT_URL_ATTR_MAP: dict[str, str] = {
+    "closeup": "closeup_image_url",
+    "front": "front_image_url",
+    "side": "side_image_url",
+    "three_quarter": "three_quarter_image_url",
+    "back": "back_image_url",
+    "tpose": "tpose_image_url",
+    "action": "action_image_url",
+    "expression": "expression_image_url",
+}
+
+
+@router.post("/bible/characters/{character_id}/upscale-asset", status_code=status.HTTP_200_OK)
+@router.post("/characters/{character_id}/upscale-asset", status_code=status.HTTP_200_OK)
+async def upscale_character_asset_2k(
+    character_id: str,
+    payload: CharacterAssetUpscaleRequest,
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Perform reference-guided native 2K refinement via direct cloud HTTP API adapter."""
+    c_uuid = _parse_uuid(character_id, "character_id")
+    char = (await session.execute(select(CharacterModel).where(CharacterModel.id == c_uuid))).scalar_one_or_none()
+    if not char:
+        raise HTTPException(status_code=404, detail="Character not found")
+
+    if not char.dna_seed:
+        char.dna_seed = int(hashlib.sha256(str(char.id).encode()).hexdigest()[:8], 16) % 900000 + 100000
+
+    proj = (await session.execute(select(ProjectModel).where(ProjectModel.id == char.project_id))).scalar_one_or_none()
+    mpb_stmt = (
+        select(MasterProductionBibleModel)
+        .where(MasterProductionBibleModel.project_id == char.project_id)
+        .order_by(MasterProductionBibleModel.version.desc())
+        .limit(1)
+    )
+    mpb = (await session.execute(mpb_stmt)).scalar_one_or_none()
+
+    active_style_code = (
+        (mpb.style_parameters.get("master_style_code") if mpb and mpb.style_parameters else None)
+        or (proj.target_style_code if proj else None)
+        or "#Style 01"
+    )
+
+    target_state: CharacterStateModel | None = None
+    is_state = bool(payload.state_id) or (payload.slot_key or "").strip().lower() == "state"
+    if is_state:
+        if not payload.state_id:
+            raise HTTPException(status_code=400, detail="state_id is required when upscaling a Dynamic State")
+        s_uuid = _parse_uuid(payload.state_id, "state_id")
+        target_state = (
+            await session.execute(
+                select(CharacterStateModel).where(
+                    CharacterStateModel.id == s_uuid,
+                    CharacterStateModel.character_id == char.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if not target_state:
+            raise HTTPException(status_code=404, detail="Character state not found")
+        slot_key = "state"
+        meta_key = f"state_{target_state.id}"
+        current_url = target_state.image_url
+        override_keys = [target_state.state_code, "state"]
+    else:
+        slot_key = _normalize_sheet_slot(payload.slot_key, default="closeup")
+        if slot_key not in _SLOT_URL_ATTR_MAP:
+            raise HTTPException(status_code=400, detail=f"Invalid slot_key '{payload.slot_key}'")
+        meta_key = slot_key
+        current_url = getattr(char, _SLOT_URL_ATTR_MAP[slot_key], None)
+        override_keys = [slot_key]
+
+    if not current_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Slot '{meta_key}' has no generated 1K image yet to upscale.",
+        )
+
+    source_local_path = _url_to_local_path(current_url)
+    if not source_local_path or not os.path.exists(source_local_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Source image file for '{meta_key}' could not be located on disk.",
+        )
+
+    # Resolve 2K-native + reference-capable provider (with auto-route if active provider lacks 2K+ref)
+    resolved_2k = _resolve_upscale_2k_provider(
+        str(char.project_id),
+        provider_override=payload.provider_override,
+        model_override=payload.model_override,
+    )
+
+    stored_override = _resolve_sheet_override(char, override_keys)
+    active_gate = resolve_style_gate(active_style_code)
+    director_slots_dict = None
+    if slot_key == "closeup" and active_gate.routing_mode != "strict_bypass" and not stored_override.get("prompt_override"):
+        director_slots_dict = await DirectorRAGClient.retrieve_character_casting_slots(
+            character_name=char.name or "Character",
+            raw_biometric_text=char.base_prompt or "",
+            style_code=active_style_code,
+            narrative_summary=char.narrative_summary or "",
+        )
+
+    compiled = compile_sheet_prompt(
+        character=char,
+        project=proj,
+        bible=mpb,
+        slot=slot_key,
+        target_state=target_state,
+        director_slots=director_slots_dict,
+    )
+    effective = _apply_sheet_overrides(compiled, stored_override, active_style_code)
+
+    has_state_wear = False
+    if target_state is not None:
+        wear_str = (target_state.injuries_and_wear or "").strip().lower()
+        has_state_wear = bool(wear_str and wear_str not in ("none", "zero defects"))
+
+    upscale_compiled = compile_upscale_2k_prompt(
+        slot_key=slot_key,
+        style_code=active_style_code,
+        base_positive_prompt=effective["effective_prompt"],
+        base_negative_prompt=effective["effective_negative_prompt"],
+        style_family=compiled.get("style_family", "photorealistic"),
+        has_override=effective["has_override"],
+        has_injuries_or_wear=has_state_wear,
+    )
+
+    adapter = UniversalImageAdapter()
+    req = UniversalImageRequest(
+        provider_id=resolved_2k["provider_id"],
+        model_id=resolved_2k["model_id"],
+        prompt=upscale_compiled["positive_prompt"],
+        negative_prompt=upscale_compiled["negative_prompt"],
+        aspect_ratio=upscale_compiled["aspect_ratio"],
+        width=upscale_compiled["target_width"],
+        height=upscale_compiled["target_height"],
+        seed=char.dna_seed,
+        reference_image_paths=[source_local_path],
+        strength=0.35,
+        filename_suffix=f"_2k_{int(time.time() * 1000)}",
+        style_code=active_style_code,
+        base_url_override=resolved_2k["base_url"],
+        api_key_override=resolved_2k["api_key"],
+        enable_fallback=False,
+    )
+
+    try:
+        gen_res = await adapter.generate_image(req)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Upscale 2K failed via {resolved_2k['provider_id']}: {str(exc)}",
+        )
+
+    validate_raster_image_file(gen_res.local_path)
+    real_dims = _read_image_dimensions_from_path(gen_res.local_path)
+    if not real_dims:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to inspect output pixel dimensions after 2K upscale.",
+        )
+    actual_w, actual_h = real_dims
+    is_2k = max(actual_w, actual_h) >= 1920
+
+    meta = dict(char.sheet_metadata or {})
+    prev_entry = meta.get(meta_key) if isinstance(meta.get(meta_key), dict) else {}
+    previous_1k_url = prev_entry.get("previous_1k_url")
+    if not previous_1k_url and not prev_entry.get("is_2k"):
+        previous_1k_url = current_url
+
+    new_url = gen_res.local_url
+    if target_state is not None:
+        target_state.image_url = new_url
+    else:
+        setattr(char, _SLOT_URL_ATTR_MAP[slot_key], new_url)
+
+    meta[meta_key] = {
+        **prev_entry,
+        "image_url": new_url,
+        "previous_1k_url": previous_1k_url,
+        "resolution_width": actual_w,
+        "resolution_height": actual_h,
+        "width": actual_w,
+        "height": actual_h,
+        "is_2k": is_2k,
+        "provider": gen_res.provider_id,
+        "model": gen_res.model_id or resolved_2k["model_id"],
+        "aspect_ratio": upscale_compiled["aspect_ratio"],
+        "prompt": upscale_compiled["positive_prompt"],
+        "negative_prompt": upscale_compiled["negative_prompt"],
+        "upscaled_at": datetime.now(timezone.utc).isoformat(),
+        "status": "completed",
+    }
+    char.sheet_metadata = meta
+    flag_modified(char, "sheet_metadata")
+    await session.commit()
+
+    return {
+        "status": "completed",
+        "character_id": str(char.id),
+        "slot_key": slot_key,
+        "state_id": payload.state_id,
+        "image_url": new_url,
+        "previous_1k_url": previous_1k_url,
+        "resolution_width": actual_w,
+        "resolution_height": actual_h,
+        "is_2k": is_2k,
+        "provider": gen_res.provider_id,
+        "model": gen_res.model_id or resolved_2k["model_id"],
+        "auto_routed_from": resolved_2k["auto_routed_from"],
+        "message": (
+            f"Upscaled to {actual_w}×{actual_h} (2K)"
+            if is_2k
+            else f"Provider returned {actual_w}×{actual_h} (< 1920px, not labeled as 2K)"
+        ),
+    }
+
+
+@router.post("/bible/characters/{character_id}/revert-asset", status_code=status.HTTP_200_OK)
+@router.post("/characters/{character_id}/revert-asset", status_code=status.HTTP_200_OK)
+async def revert_character_asset_1k(
+    character_id: str,
+    payload: CharacterAssetRevertRequest,
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Revert an upscaled character asset or dynamic state back to its stored 1K image."""
+    c_uuid = _parse_uuid(character_id, "character_id")
+    char = (await session.execute(select(CharacterModel).where(CharacterModel.id == c_uuid))).scalar_one_or_none()
+    if not char:
+        raise HTTPException(status_code=404, detail="Character not found")
+
+    meta = dict(char.sheet_metadata or {})
+    target_state: CharacterStateModel | None = None
+    is_state = bool(payload.state_id) or (payload.slot_key or "").strip().lower() == "state"
+
+    if is_state:
+        if not payload.state_id:
+            raise HTTPException(status_code=400, detail="state_id is required when reverting a Dynamic State")
+        s_uuid = _parse_uuid(payload.state_id, "state_id")
+        target_state = (
+            await session.execute(
+                select(CharacterStateModel).where(
+                    CharacterStateModel.id == s_uuid,
+                    CharacterStateModel.character_id == char.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if not target_state:
+            raise HTTPException(status_code=404, detail="Character state not found")
+        slot_key = "state"
+        meta_key = f"state_{target_state.id}"
+    else:
+        slot_key = _normalize_sheet_slot(payload.slot_key, default="closeup")
+        if slot_key not in _SLOT_URL_ATTR_MAP:
+            raise HTTPException(status_code=400, detail=f"Invalid slot_key '{payload.slot_key}'")
+        meta_key = slot_key
+
+    slot_entry = dict(meta.get(meta_key) or {})
+    prev_1k_url = slot_entry.get("previous_1k_url")
+    if not prev_1k_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"No previous_1k_url recorded for '{meta_key}'.",
+        )
+
+    if target_state is not None:
+        target_state.image_url = prev_1k_url
+    else:
+        setattr(char, _SLOT_URL_ATTR_MAP[slot_key], prev_1k_url)
+
+    dims = _read_image_dimensions_from_url(prev_1k_url)
+    actual_w, actual_h = dims if dims else (1024, 1024)
+    is_2k = max(actual_w, actual_h) >= 1920
+
+    slot_entry["image_url"] = prev_1k_url
+    slot_entry.pop("previous_1k_url", None)
+    slot_entry["width"] = actual_w
+    slot_entry["height"] = actual_h
+    slot_entry["resolution_width"] = actual_w
+    slot_entry["resolution_height"] = actual_h
+    slot_entry["is_2k"] = is_2k
+    slot_entry["reverted_at"] = datetime.now(timezone.utc).isoformat()
+    meta[meta_key] = slot_entry
+
+    char.sheet_metadata = meta
+    flag_modified(char, "sheet_metadata")
+    await session.commit()
+
+    return {
+        "status": "reverted",
+        "character_id": str(char.id),
+        "slot_key": slot_key,
+        "state_id": payload.state_id,
+        "image_url": prev_1k_url,
+        "resolution_width": actual_w,
+        "resolution_height": actual_h,
+        "is_2k": is_2k,
+        "message": f"Reverted {meta_key} back to 1K ({actual_w}×{actual_h})",
+    }
+
+
+@router.post("/projects/{project_id}/characters/preview/upscale", status_code=status.HTTP_200_OK)
+@router.post("/bible/projects/{project_id}/characters/preview/upscale", status_code=status.HTTP_200_OK)
+@router.post("/bible/characters/preview/upscale", status_code=status.HTTP_200_OK)
+async def upscale_character_preview_2k(
+    payload: CharacterPreviewUpscaleRequest,
+    project_id: str | None = None,
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Upscale a staged pre-creation preview (closeup/expression/front) to native 2K."""
+    eff_project_id = project_id or payload.project_id
+    project = await _resolve_project(eff_project_id, session) if eff_project_id else None
+    mpb = await _load_latest_bible(project, session) if project else None
+
+    clean_token = Path(payload.preview_token).name
+    settings = get_settings()
+    temp_dir = settings.effective_preview_storage_path.parent / "temp_previews" / clean_token
+    if not temp_dir.exists():
+        temp_dir = Path("./data/assets/temp_previews") / clean_token
+    if not temp_dir.exists():
+        raise HTTPException(status_code=404, detail="Preview staging directory not found")
+
+    slot_name = payload.slot
+    manifest_path = temp_dir / "preview_manifest.json"
+    manifest: dict[str, Any] = {}
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = {}
+
+    slot_info = manifest.get(slot_name) if isinstance(manifest.get(slot_name), dict) else {}
+    active_fname = slot_info.get("active_file") or f"{slot_name}.png"
+    src_file = temp_dir / Path(active_fname).name
+    if not src_file.exists():
+        src_file = temp_dir / f"{slot_name}.png"
+    if not src_file.exists():
+        raise HTTPException(status_code=400, detail=f"Preview '{slot_name}' image has not been generated yet.")
+
+    resolved_2k = _resolve_upscale_2k_provider(
+        str(project.id) if project else None,
+        provider_override=payload.provider_override,
+        model_override=payload.model_override,
+    )
+
+    active_style_code = (
+        (mpb.style_parameters.get("master_style_code") if mpb and mpb.style_parameters else None)
+        or (project.target_style_code if project else None)
+        or "#Style 01"
+    )
+    dna_seed = payload.dna_seed or (
+        int(hashlib.sha256(f"{payload.name}_{clean_token}".encode()).hexdigest()[:8], 16) % 900000 + 100000
+    )
+    dummy_char = CharacterModel(
+        id=uuid.uuid4(),
+        project_id=project.id if project else uuid.uuid4(),
+        name=payload.name or "Character",
+        role=payload.role,
+        base_prompt=payload.base_visual_prompt or "an authentic human individual",
+        dna_seed=dna_seed,
+        sheet_metadata={},
+    )
+    if (temp_dir / "closeup.png").exists():
+        dummy_char.closeup_image_url = f"/api/v1/assets/temp-previews/{clean_token}/closeup.png"
+
+    compiled = compile_sheet_prompt(
+        character=dummy_char,
+        project=project,
+        bible=mpb,
+        slot=slot_name,
+    )
+    upscale_compiled = compile_upscale_2k_prompt(
+        slot_key=slot_name,
+        style_code=active_style_code,
+        base_positive_prompt=compiled["positive_prompt"],
+        base_negative_prompt=compiled["negative_prompt"],
+        style_family=compiled.get("style_family", "photorealistic"),
+    )
+
+    adapter = UniversalImageAdapter()
+    req = UniversalImageRequest(
+        provider_id=resolved_2k["provider_id"],
+        model_id=resolved_2k["model_id"],
+        prompt=upscale_compiled["positive_prompt"],
+        negative_prompt=upscale_compiled["negative_prompt"],
+        aspect_ratio=upscale_compiled["aspect_ratio"],
+        width=upscale_compiled["target_width"],
+        height=upscale_compiled["target_height"],
+        seed=dna_seed,
+        reference_image_paths=[str(src_file.resolve())],
+        strength=0.35,
+        filename_suffix=f"_2k_{int(time.time() * 1000)}",
+        style_code=active_style_code,
+        base_url_override=resolved_2k["base_url"],
+        api_key_override=resolved_2k["api_key"],
+        enable_fallback=False,
+    )
+
+    try:
+        gen_res = await adapter.generate_image(req)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Preview Upscale 2K failed via {resolved_2k['provider_id']}: {str(exc)}",
+        )
+
+    validate_raster_image_file(gen_res.local_path)
+    real_dims = _read_image_dimensions_from_path(gen_res.local_path)
+    if not real_dims:
+        raise HTTPException(status_code=502, detail="Failed to inspect upscaled preview dimensions.")
+    actual_w, actual_h = real_dims
+    is_2k = max(actual_w, actual_h) >= 1920
+
+    prev_1k_fname = slot_info.get("previous_1k_file")
+    if not prev_1k_fname and not slot_info.get("is_2k"):
+        prev_1k_fname = src_file.name
+
+    ts = int(time.time() * 1000)
+    new_fname = f"{slot_name}_2k_{ts}.png"
+    dest_2k = temp_dir / new_fname
+    shutil.copyfile(gen_res.local_path, dest_2k)
+
+    _update_preview_manifest(
+        temp_dir,
+        slot_name,
+        new_fname,
+        dims=(actual_w, actual_h),
+        previous_1k_file=prev_1k_fname,
+    )
+    new_url = f"/api/v1/assets/temp-previews/{clean_token}/{new_fname}?v={ts}"
+    prev_1k_url = f"/api/v1/assets/temp-previews/{clean_token}/{prev_1k_fname}" if prev_1k_fname else None
+
+    return {
+        "status": "completed",
+        "preview_token": clean_token,
+        "slot": slot_name,
+        "image_url": new_url,
+        "previous_1k_url": prev_1k_url,
+        "resolution_width": actual_w,
+        "resolution_height": actual_h,
+        "is_2k": is_2k,
+        "provider": gen_res.provider_id,
+        "model": gen_res.model_id or resolved_2k["model_id"],
+        "message": (
+            f"Upscaled to {actual_w}×{actual_h} (2K)"
+            if is_2k
+            else f"Provider returned {actual_w}×{actual_h} (< 1920px, not labeled as 2K)"
+        ),
+    }
+
+
+@router.post("/projects/{project_id}/characters/preview/revert", status_code=status.HTTP_200_OK)
+@router.post("/bible/projects/{project_id}/characters/preview/revert", status_code=status.HTTP_200_OK)
+@router.post("/bible/characters/preview/revert", status_code=status.HTTP_200_OK)
+async def revert_character_preview_1k(
+    payload: CharacterPreviewRevertRequest,
+    project_id: str | None = None,
+    current_user: UserModel = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Revert a staged pre-creation preview slot back to its 1K image."""
+    clean_token = Path(payload.preview_token).name
+    settings = get_settings()
+    temp_dir = settings.effective_preview_storage_path.parent / "temp_previews" / clean_token
+    if not temp_dir.exists():
+        temp_dir = Path("./data/assets/temp_previews") / clean_token
+    if not temp_dir.exists():
+        raise HTTPException(status_code=404, detail="Preview staging directory not found")
+
+    manifest_path = temp_dir / "preview_manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(status_code=400, detail="No 1K backup recorded for preview revert.")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    slot_info = manifest.get(payload.slot) or {}
+    prev_1k_fname = slot_info.get("previous_1k_file")
+    if not prev_1k_fname:
+        raise HTTPException(status_code=400, detail=f"No previous 1K image recorded for preview slot '{payload.slot}'.")
+
+    prev_path = temp_dir / Path(prev_1k_fname).name
+    if not prev_path.exists():
+        raise HTTPException(status_code=404, detail="Previous 1K preview file missing on disk.")
+
+    dims = _read_image_dimensions_from_path(prev_path)
+    actual_w, actual_h = dims if dims else (1024, 1024)
+    _update_preview_manifest(
+        temp_dir,
+        payload.slot,
+        prev_path.name,
+        dims=(actual_w, actual_h),
+        previous_1k_file=None,
+    )
+    ts = int(time.time() * 1000)
+    return {
+        "status": "reverted",
+        "preview_token": clean_token,
+        "slot": payload.slot,
+        "image_url": f"/api/v1/assets/temp-previews/{clean_token}/{prev_path.name}?v={ts}",
+        "resolution_width": actual_w,
+        "resolution_height": actual_h,
+        "is_2k": max(actual_w, actual_h) >= 1920,
     }
 
 
@@ -4624,6 +5477,8 @@ async def attach_character_preview_job(
     validate_raster_image_file(src_path)
 
     shutil.copyfile(src_path, dest_file)
+    dims = _read_image_dimensions_from_path(dest_file)
+    _update_preview_manifest(temp_dir, target_slot, dest_file.name, dims=dims)
     ts = int(time.time() * 1000)
     new_url = f"/api/v1/assets/temp-previews/{payload.preview_token}/{target_slot}.png?v={ts}"
 
@@ -4632,6 +5487,9 @@ async def attach_character_preview_job(
         "preview_token": payload.preview_token,
         "slot": target_slot,
         "image_url": new_url,
+        "resolution_width": dims[0] if dims else None,
+        "resolution_height": dims[1] if dims else None,
+        "is_2k": bool(dims and max(dims) >= 1920),
     }
 
 

@@ -371,3 +371,46 @@ class DirectorRAGClient:
 
         cues_text = " | ".join(cue_snippets) if cue_snippets else ""
         return cues_text, refs
+
+    @_InstanceOrClassMethod
+    async def retrieve_character_casting_slots(
+        self,
+        *,
+        character_name: str,
+        raw_biometric_text: str,
+        style_code: str | None = None,
+        narrative_summary: str = "",
+    ) -> dict[str, Any] | None:
+        """Best-effort Polia AI Director character visual translation lookup (returns None on offline/unsupported)."""
+        if not self.enabled:
+            return None
+        cleaned_bio = (raw_biometric_text or "").strip()
+        if not cleaned_bio:
+            return None
+
+        resolved_style = resolve_style_filter(style_code=style_code) or "#Style 01"
+        payload = {
+            "character_name": character_name or "",
+            "raw_biometric_text": cleaned_bio[:1200],
+            "narrative_summary": (narrative_summary or "")[:600],
+            "style_code": resolved_style,
+            "slot": "closeup",
+        }
+        headers = {"Content-Type": "application/json"}
+        if self.token:
+            headers["X-Polia-Token"] = self.token
+
+        url = f"{self.base_url}/api/v1/director/translate-character"
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_sec) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+                if resp.status_code != 200:
+                    return None
+                data = resp.json()
+                if isinstance(data, dict) and isinstance(data.get("slots"), dict):
+                    return data["slots"]
+                if isinstance(data, dict) and data.get("character_identity_and_facial_features"):
+                    return data
+        except Exception:
+            return None
+        return None

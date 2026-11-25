@@ -92,8 +92,8 @@ def test_character_and_state_management(client: TestClient, auth_headers: dict[s
     assert p_data["dna_seed"] is not None
     prompts_map = p_data["prompts"]
 
-    expected_backdrop = "seamless matte neutral gray studio"
-    expected_lighting = "5500K neutral daylight studio softboxes"
+    expected_backdrop = "neutral medium-grey studio backdrop"
+    expected_lighting = "butterfly/clamshell studio lighting"
 
     for slot in ["front", "side", "three_quarter", "back", "tpose", "action", "expression"]:
         assert slot in prompts_map

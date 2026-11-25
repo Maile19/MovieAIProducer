@@ -36,6 +36,62 @@ import { Character, SheetPromptItem, Project, api, FlowProxyStatus } from "@/lib
 import { cn } from "@/lib/utils";
 import ObsidianDropdown from "@/components/ui/ObsidianDropdown";
 import AIRenderProviderCard from "@/components/AIRenderProviderCard";
+import { AI_RENDER_PROVIDERS, UserProviderConfig } from "@/config/aiProviders";
+
+const GLOBAL_PROVIDER_STORAGE_KEY = "movieai_global_render_provider_v2";
+
+function normalizeProviderId(providerId?: string | null): string {
+  if (!providerId) return "google-flow";
+  const clean = providerId.trim();
+  if (clean === "google_flow") return "google-flow";
+  return clean;
+}
+
+function isGoogleFlowProvider(providerId?: string | null): boolean {
+  const norm = (providerId || "").trim().toLowerCase();
+  return norm === "google_flow" || norm === "google-flow";
+}
+
+const STRICT_BYPASS_STYLE_CODES = new Set([
+  "#Style 06",
+  "#Style 09",
+  "#Style 10",
+  "#Style 11",
+  "#Style 13",
+  "#Style 14",
+  "#Style 15",
+  "#Style 16",
+  "#Style 17",
+]);
+
+function isPhotorealisticCastingStyle(styleCode?: string | null): boolean {
+  const clean = (styleCode || "#Style 01").trim();
+  return !STRICT_BYPASS_STYLE_CODES.has(clean);
+}
+
+function resolveProviderDisplayInfo(providerId: string, modelId?: string) {
+  const norm = normalizeProviderId(providerId);
+  const spec = AI_RENDER_PROVIDERS.find((p) => p.id === norm);
+  if (spec) {
+    return {
+      spec,
+      label: modelId ? `${spec.name} (${modelId})` : spec.name,
+      supportsVisualAnchor: spec.supportsVisualAnchor,
+    };
+  }
+  if (norm === "ag_gemini_flash") {
+    return {
+      spec: undefined,
+      label: modelId ? `AG/Gemini (${modelId})` : "AG/Gemini 3.8 Flash",
+      supportsVisualAnchor: false,
+    };
+  }
+  return {
+    spec: undefined,
+    label: modelId ? `${providerId} (${modelId})` : providerId,
+    supportsVisualAnchor: false,
+  };
+}
 
 interface CharacterMatrixTabProps {
   projectId: string;
@@ -45,7 +101,7 @@ interface CharacterMatrixTabProps {
   onRefresh: (options?: { silent?: boolean }) => void | Promise<void>;
   onSilentRefresh?: () => void | Promise<void>;
   onPatchCharacterAsset?: (characterId: string, slot: string, imageUrl: string, metaPatch?: Record<string, any>) => void;
-  onPatchCharacterStateAsset?: (characterId: string, stateId: string, imageUrl: string) => void;
+  onPatchCharacterStateAsset?: (characterId: string, stateId: string, imageUrl: string, metaPatch?: Record<string, any>) => void;
 }
 
 export default function CharacterMatrixTab({
@@ -122,11 +178,9 @@ export default function CharacterMatrixTab({
   const [newCharSeed, setNewCharSeed] = useState<number>(() => Math.floor(100000 + Math.random() * 900000));
   const [isSubmittingChar, setIsSubmittingChar] = useState(false);
 
-  // Dual AI Provider Selector for Add Character Modal (Default: Google Flow [5 Akun PRO])
+  // Dual AI Provider Selector for Add Character Modal (Synced with Global Acuan)
   const [addCharLLMProvider, setAddCharLLMProvider] = useState<"9router" | "gemini" | "agy">("9router");
-  const [addCharImageProvider, setAddCharImageProvider] = useState<
-    "ag_gemini_flash" | "google_flow" | "9router" | string
-  >("google_flow");
+  const [addCharImageProvider, setAddCharImageProvider] = useState<string>("google-flow");
 
   // Auto-generation loading states
   const [isAutoGeneratingAll, setIsAutoGeneratingAll] = useState(false);
@@ -267,19 +321,115 @@ export default function CharacterMatrixTab({
   const suggestAbortControllerRef = useRef<AbortController | null>(null);
   const [deletingStateId, setDeletingStateId] = useState<string | null>(null);
 
-  // AI Generation Provider & Model Configuration (Default: Google Flow [5 Akun PRO])
-  const [selectedProvider, setSelectedProvider] = useState<
-    "ag_gemini_flash" | "9router" | "google_flow" | string
-  >(() => {
+  // AI Generation Provider & Model Configuration (Synced with Global Acuan SQLite)
+  const [selectedProvider, setSelectedProvider] = useState<string>(() => {
     if (typeof window !== "undefined") {
-      const saved = localStorage.getItem("movieai_active_character_provider");
-      if (saved && ["ag_gemini_flash", "9router", "google_flow"].includes(saved)) {
-        return saved;
+      try {
+        const raw = localStorage.getItem(`${GLOBAL_PROVIDER_STORAGE_KEY}_${projectId}`);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed?.activeProviderId) {
+            return normalizeProviderId(parsed.activeProviderId);
+          }
+        }
+      } catch {
+        // ignore invalid JSON
       }
     }
-    return "google_flow";
+    return "google-flow";
   });
-  const [selectedModel] = useState<string>("ag/gemini-3.8-flash");
+  const [selectedModel, setSelectedModel] = useState<string>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const raw = localStorage.getItem(`${GLOBAL_PROVIDER_STORAGE_KEY}_${projectId}`);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          const pid = normalizeProviderId(parsed?.activeProviderId || "google-flow");
+          const cfgModel = parsed?.configs?.[pid]?.modelId;
+          if (cfgModel) return cfgModel;
+          const spec = AI_RENDER_PROVIDERS.find((p) => p.id === pid);
+          if (spec?.defaultModelId) return spec.defaultModelId;
+        }
+      } catch {
+        // ignore
+      }
+    }
+    return "flow-imagen-anchor-pro";
+  });
+  const [applyToAllScenes, setApplyToAllScenes] = useState<boolean>(true);
+  const [globalProviderConfigs, setGlobalProviderConfigs] = useState<Record<string, UserProviderConfig>>({});
+
+  const applyGlobalProviderState = useCallback(
+    (payload: {
+      activeProviderId?: string;
+      applyToAllScenes?: boolean;
+      configs?: Record<string, UserProviderConfig>;
+    }) => {
+      if (!payload?.activeProviderId) return;
+      const normId = normalizeProviderId(payload.activeProviderId);
+      const nextConfigs = payload.configs || {};
+      const spec = AI_RENDER_PROVIDERS.find((p) => p.id === normId);
+      const nextModel =
+        nextConfigs[payload.activeProviderId]?.modelId ||
+        nextConfigs[normId]?.modelId ||
+        spec?.defaultModelId ||
+        "";
+
+      setSelectedProvider(normId);
+      setSelectedModel(nextModel);
+      if (typeof payload.applyToAllScenes === "boolean") {
+        setApplyToAllScenes(payload.applyToAllScenes);
+      }
+      if (payload.configs) {
+        setGlobalProviderConfigs(payload.configs);
+      }
+      setAddCharImageProvider(normId);
+    },
+    []
+  );
+
+  // Sync Character Matrix provider state directly from backend SQLite (Source of Truth)
+  useEffect(() => {
+    let isMounted = true;
+    async function syncGlobalProvider() {
+      try {
+        const res = await fetch(`/api/v1/projects/${projectId}/render-provider`, {
+          headers: { Accept: "application/json" },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.configured && data?.activeProviderId && isMounted) {
+            applyGlobalProviderState({
+              activeProviderId: data.activeProviderId,
+              applyToAllScenes: data.applyToAllScenes,
+              configs: data.configs,
+            });
+            return;
+          }
+        }
+      } catch {
+        // Fallback to global localStorage cache below
+      }
+      try {
+        const raw = localStorage.getItem(`${GLOBAL_PROVIDER_STORAGE_KEY}_${projectId}`);
+        if (!raw || !isMounted) return;
+        const parsed = JSON.parse(raw);
+        if (parsed?.activeProviderId) {
+          applyGlobalProviderState({
+            activeProviderId: parsed.activeProviderId,
+            applyToAllScenes: parsed.applyToAllScenes,
+            configs: parsed.configs,
+          });
+        }
+      } catch {
+        // ignore
+      }
+    }
+    syncGlobalProvider();
+    return () => {
+      isMounted = false;
+    };
+  }, [projectId, applyGlobalProviderState]);
 
   // SOCKS5 Android Proxy Live Indicator & Fail-Fast State
   const [proxyStatus, setProxyStatus] = useState<FlowProxyStatus | null>(null);
@@ -374,6 +524,37 @@ export default function CharacterMatrixTab({
   // Per-slot upload states
   const [uploadingSlots, setUploadingSlots] = useState<Record<string, boolean>>({});
   const [uploadErrors, setUploadErrors] = useState<Record<string, string | null>>({});
+
+  // Per-card Upscale 2K locking, preview dimensions, and toast feedback
+  const [upscalingSlots, setUpscalingSlots] = useState<Record<string, boolean>>({});
+  const [upscaleErrors, setUpscaleErrors] = useState<Record<string, string | null>>({});
+  const [previewSlotMeta, setPreviewSlotMeta] = useState<
+    Record<
+      "closeup" | "expression" | "front",
+      { resolution_width?: number | null; resolution_height?: number | null; is_2k?: boolean; previous_1k_url?: string | null }
+    >
+  >({
+    closeup: {},
+    expression: {},
+    front: {},
+  });
+  const [upscaleToast, setUpscaleToast] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    isError?: boolean;
+  } | null>(null);
+  const upscaleToastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const showUpscaleToast = useCallback((title: string, message: string, isError = false) => {
+    if (upscaleToastTimeoutRef.current) {
+      clearTimeout(upscaleToastTimeoutRef.current);
+    }
+    setUpscaleToast({ isOpen: true, title, message, isError });
+    upscaleToastTimeoutRef.current = setTimeout(() => {
+      setUpscaleToast(null);
+    }, 5500);
+  }, []);
 
   // Zero Static Fallback: Active characters derived purely from persistent database
   const activeCharacters: Character[] = characters;
@@ -662,10 +843,19 @@ export default function CharacterMatrixTab({
     }
 
     setPreviewStatusText(
-      addCharImageProvider === "google_flow"
+      isGoogleFlowProvider(addCharImageProvider)
         ? `Mengirim ${target === "closeup" ? "Slot 1: Close-Up Master Anchor" : target === "expression" ? "Expression Sheet" : "Full Body"} ke antrean Google Flow PRO...`
         : `Merender ${target === "closeup" ? "Card 1: Character Close-Up (Master Anchor)" : target === "expression" ? "Card 2: Expression Sheet" : "Card 3: Full Body"}...`
     );
+
+    const normModalProvider = normalizeProviderId(addCharImageProvider);
+    const modalSpec = AI_RENDER_PROVIDERS.find((p) => p.id === normModalProvider);
+    const modalModel =
+      globalProviderConfigs[addCharImageProvider]?.modelId ||
+      globalProviderConfigs[normModalProvider]?.modelId ||
+      (normModalProvider === selectedProvider ? selectedModel : undefined) ||
+      modalSpec?.defaultModelId ||
+      undefined;
 
     try {
       const res = await api.bible.previewCharacter(projectId, {
@@ -674,8 +864,9 @@ export default function CharacterMatrixTab({
         base_visual_prompt: effectivePrompt,
         dna_seed: newCharSeed,
         image_provider: addCharImageProvider,
+        model: modalModel,
         target,
-        aspect_ratio: (target === "expression" || target === "both") ? "16:9" : "3:4",
+        aspect_ratio: (target === "expression" || target === "both") ? "16:9" : target === "closeup" ? "1:1" : "3:4",
         preview_token: previewToken || undefined,
       });
 
@@ -688,6 +879,23 @@ export default function CharacterMatrixTab({
         if (res.closeup_url) setPreviewCloseupUrl(res.closeup_url);
         if (res.expression_url) setPreviewExpressionUrl(res.expression_url);
         if (res.front_url) setPreviewFrontUrl(res.front_url);
+        setPreviewSlotMeta((prev) => ({
+          closeup: res.slot_dimensions?.closeup
+            ? { ...res.slot_dimensions.closeup, previous_1k_url: null }
+            : target === "closeup" || target === "all"
+            ? { resolution_width: 1024, resolution_height: 1024, is_2k: false, previous_1k_url: null }
+            : prev.closeup,
+          expression: res.slot_dimensions?.expression
+            ? { ...res.slot_dimensions.expression, previous_1k_url: null }
+            : target === "expression" || target === "both" || target === "all"
+            ? { resolution_width: 1344, resolution_height: 768, is_2k: false, previous_1k_url: null }
+            : prev.expression,
+          front: res.slot_dimensions?.front
+            ? { ...res.slot_dimensions.front, previous_1k_url: null }
+            : target === "front" || target === "both" || target === "all"
+            ? { resolution_width: 768, resolution_height: 1024, is_2k: false, previous_1k_url: null }
+            : prev.front,
+        }));
         setPreviewStatusText("");
         setIsPreviewGenerating(false);
         setIsRollingCloseup(false);
@@ -723,6 +931,15 @@ export default function CharacterMatrixTab({
               } else {
                 setPreviewFrontUrl(attachRes.image_url);
               }
+              setPreviewSlotMeta((prev) => ({
+                ...prev,
+                [slot]: {
+                  resolution_width: attachRes.resolution_width ?? (slot === "expression" ? 1344 : slot === "closeup" ? 1024 : 768),
+                  resolution_height: attachRes.resolution_height ?? (slot === "expression" ? 768 : 1024),
+                  is_2k: !!attachRes.is_2k,
+                  previous_1k_url: null,
+                },
+              }));
 
               setPreviewStatusText("");
               setIsPreviewGenerating(false);
@@ -838,6 +1055,7 @@ export default function CharacterMatrixTab({
     setIsRollingCloseup(false);
     setIsRollingExpression(false);
     setIsRollingFront(false);
+    setPreviewSlotMeta({ closeup: {}, expression: {}, front: {} });
     setIsExprOutdated(false);
     setIsFrontOutdated(false);
     setPreviewError(null);
@@ -891,6 +1109,7 @@ export default function CharacterMatrixTab({
       setIsRollingCloseup(false);
       setIsRollingExpression(false);
       setIsRollingFront(false);
+      setPreviewSlotMeta({ closeup: {}, expression: {}, front: {} });
       setPreviewError(null);
       setPreviewErrorMsg(null);
       setNewCharName("");
@@ -898,10 +1117,19 @@ export default function CharacterMatrixTab({
       setNewCharBio("");
       setNewCharVoiceDna("");
 
-      // Sync active provider in main matrix with provider used during character creation & persist
-      setSelectedProvider(addCharImageProvider);
-      if (typeof window !== "undefined") {
-        localStorage.setItem("movieai_active_character_provider", addCharImageProvider);
+      // Respect Global Acuan when applyToAllScenes is active; otherwise sync local selection without stale localStorage
+      if (!applyToAllScenes) {
+        const normModalProv = normalizeProviderId(addCharImageProvider);
+        const modalSpec = AI_RENDER_PROVIDERS.find((p) => p.id === normModalProv);
+        const modalModel =
+          globalProviderConfigs[addCharImageProvider]?.modelId ||
+          globalProviderConfigs[normModalProv]?.modelId ||
+          modalSpec?.defaultModelId ||
+          "";
+        setSelectedProvider(normModalProv);
+        setSelectedModel(modalModel);
+      } else {
+        setAddCharImageProvider(selectedProvider);
       }
 
       onRefresh();
@@ -1454,24 +1682,22 @@ export default function CharacterMatrixTab({
       setPollStatus((prev) => ({
         ...prev,
         [targetKey]:
-          selectedProvider === "google_flow"
+          isGoogleFlowProvider(selectedProvider)
             ? "Mengirim job ke antrean Google Flow (Visual Anchoring)..."
             : selectedProvider === "ag_gemini_flash"
             ? "Merender dengan AG/Gemini 3.8 Flash (Seed Locked)..."
-            : "Merender gambar cinema-grade...",
+            : `Merender gambar via ${resolveProviderDisplayInfo(selectedProvider, selectedModel).label}...`,
       }));
 
-      const aspect_ratio = angle === "expression" ? "16:9" : targetType === "state" ? "1:1" : "3:4";
+      const aspect_ratio =
+        angle === "expression" ? "16:9" : targetType === "state" || angle === "closeup" ? "1:1" : "3:4";
 
       const res = await api.bible.generateCharacterAsset(effectiveCharId, {
         target_type: targetType,
         angle,
         state_id: stateId,
         provider: selectedProvider,
-        model:
-          selectedProvider === "9router" || selectedProvider === "ag_gemini_flash"
-            ? selectedModel
-            : undefined,
+        model: selectedModel || undefined,
         aspect_ratio,
       });
 
@@ -1861,7 +2087,7 @@ export default function CharacterMatrixTab({
     const charToRun = targetChar || selectedChar;
     if (!charToRun?.closeup_image_url || isLocked || isRegeneratingAllDownstream || isBatchGenerating) return;
 
-    if (selectedProvider === "google_flow") {
+    if (isGoogleFlowProvider(selectedProvider)) {
       const pStatus = await handleCheckProxy();
       if (!pStatus.healthy) {
         setProxyOfflineAlert({
@@ -1904,7 +2130,7 @@ export default function CharacterMatrixTab({
     if (!selectedChar?.closeup_image_url || isLocked || isRegeneratingAllDownstream || isBatchGenerating) return;
 
     // Pre-flight check: batalkan langsung jika SOCKS5 proxy sedang offline
-    if (selectedProvider === "google_flow") {
+    if (isGoogleFlowProvider(selectedProvider)) {
       const pStatus = await handleCheckProxy();
       if (!pStatus.healthy) {
         setProxyOfflineAlert({
@@ -1987,7 +2213,7 @@ export default function CharacterMatrixTab({
   // Open Batch Pre-Flight Check Modal
   const handleOpenBatchModal = async () => {
     if (isLocked || isBatchGenerating) return;
-    if (selectedProvider === "google_flow") {
+    if (isGoogleFlowProvider(selectedProvider)) {
       await handleCheckProxy();
     }
     setBatchPreflightModalOpen(true);
@@ -2006,7 +2232,7 @@ export default function CharacterMatrixTab({
 
     if (readyChars.length === 0) return;
 
-    if (selectedProvider === "google_flow") {
+    if (isGoogleFlowProvider(selectedProvider)) {
       const pStatus = await handleCheckProxy();
       if (!pStatus.healthy) {
         setProxyOfflineAlert({
@@ -2132,12 +2358,197 @@ export default function CharacterMatrixTab({
     }
   };
 
+  const handleUpscaleAsset = async (slotKey: string, stateId?: string) => {
+    if (!selectedChar?.id || isLocked) return;
+    if (isBatchActive) {
+      showBatchLockNotification(stateId ? "Upscale 2K Dynamic State" : `Upscale 2K (${slotKey})`);
+      return;
+    }
+    const lockKey = stateId ? `state_${stateId}` : slotKey;
+    if (upscalingSlots[lockKey]) return;
+
+    setUpscalingSlots((prev) => ({ ...prev, [lockKey]: true }));
+    setUpscaleErrors((prev) => ({ ...prev, [lockKey]: null }));
+    try {
+      const res = await api.bible.upscaleCharacterAsset(selectedChar.id, {
+        slot_key: stateId ? "state" : slotKey,
+        state_id: stateId,
+      });
+      const patchMeta = {
+        resolution_width: res.resolution_width,
+        resolution_height: res.resolution_height,
+        width: res.resolution_width,
+        height: res.resolution_height,
+        is_2k: res.is_2k,
+        previous_1k_url: res.previous_1k_url ?? null,
+        provider: res.provider,
+        model: res.model,
+      };
+      if (stateId) {
+        onPatchCharacterStateAsset?.(selectedChar.id, stateId, res.image_url, patchMeta);
+      } else {
+        onPatchCharacterAsset?.(selectedChar.id, slotKey, res.image_url, patchMeta);
+      }
+      if (res.is_2k) {
+        showUpscaleToast(
+          "Upscale 2K Selesai",
+          `Upscaled to ${res.resolution_width}×${res.resolution_height} (2K)${res.auto_routed_from ? ` via ${res.provider}` : ""}`
+        );
+      } else {
+        showUpscaleToast(
+          "Resolusi Di Bawah 2K",
+          `Provider mengembalikan ${res.resolution_width}×${res.resolution_height} (< 1920px). Tidak dilabeli 2K.`,
+          true
+        );
+      }
+      if (onSilentRefresh) {
+        await onSilentRefresh();
+      } else {
+        await onRefresh({ silent: true });
+      }
+      await fetchPrompts(selectedChar.id);
+    } catch (err: any) {
+      const msg =
+        err?.response?.data?.detail?.message ||
+        err?.response?.data?.detail ||
+        err?.message ||
+        "Gagal melakukan Upscale 2K.";
+      setUpscaleErrors((prev) => ({ ...prev, [lockKey]: String(msg) }));
+      showUpscaleToast("Upscale 2K Gagal", String(msg), true);
+    } finally {
+      setUpscalingSlots((prev) => ({ ...prev, [lockKey]: false }));
+    }
+  };
+
+  const handleRevertAsset = async (slotKey: string, stateId?: string) => {
+    if (!selectedChar?.id || isLocked) return;
+    if (isBatchActive) {
+      showBatchLockNotification(stateId ? "Revert 1K State" : `Revert 1K (${slotKey})`);
+      return;
+    }
+    const lockKey = stateId ? `state_${stateId}` : slotKey;
+    if (upscalingSlots[lockKey]) return;
+
+    setUpscalingSlots((prev) => ({ ...prev, [lockKey]: true }));
+    setUpscaleErrors((prev) => ({ ...prev, [lockKey]: null }));
+    try {
+      const res = await api.bible.revertCharacterAsset(selectedChar.id, {
+        slot_key: stateId ? "state" : slotKey,
+        state_id: stateId,
+      });
+      const patchMeta = {
+        resolution_width: res.resolution_width,
+        resolution_height: res.resolution_height,
+        width: res.resolution_width,
+        height: res.resolution_height,
+        is_2k: res.is_2k,
+        previous_1k_url: null,
+      };
+      if (stateId) {
+        onPatchCharacterStateAsset?.(selectedChar.id, stateId, res.image_url, patchMeta);
+      } else {
+        onPatchCharacterAsset?.(selectedChar.id, slotKey, res.image_url, patchMeta);
+      }
+      showUpscaleToast(
+        "Dikembalikan ke 1K",
+        `Reverted to ${res.resolution_width}×${res.resolution_height} (1K)`
+      );
+      if (onSilentRefresh) {
+        await onSilentRefresh();
+      } else {
+        await onRefresh({ silent: true });
+      }
+    } catch (err: any) {
+      const msg = err?.message || "Gagal mengembalikan ke versi 1K.";
+      setUpscaleErrors((prev) => ({ ...prev, [lockKey]: String(msg) }));
+      showUpscaleToast("Revert 1K Gagal", String(msg), true);
+    } finally {
+      setUpscalingSlots((prev) => ({ ...prev, [lockKey]: false }));
+    }
+  };
+
+  const handleUpscalePreview = async (slot: "closeup" | "expression" | "front") => {
+    if (!previewToken) return;
+    const lockKey = `preview_${slot}`;
+    if (upscalingSlots[lockKey] || isPreviewGenerating) return;
+    setUpscalingSlots((prev) => ({ ...prev, [lockKey]: true }));
+    setPreviewError(null);
+    setPreviewErrorMsg(null);
+    try {
+      const res = await api.bible.upscaleCharacterPreview(projectId, {
+        preview_token: previewToken,
+        slot,
+        name: newCharName.trim() || "Character",
+        role: newCharRole,
+        base_visual_prompt: newCharPrompt.trim(),
+        dna_seed: newCharSeed,
+      });
+      if (slot === "closeup") setPreviewCloseupUrl(res.image_url);
+      else if (slot === "expression") setPreviewExpressionUrl(res.image_url);
+      else setPreviewFrontUrl(res.image_url);
+      setPreviewSlotMeta((prev) => ({
+        ...prev,
+        [slot]: {
+          resolution_width: res.resolution_width,
+          resolution_height: res.resolution_height,
+          is_2k: res.is_2k,
+          previous_1k_url: res.previous_1k_url ?? null,
+        },
+      }));
+      showUpscaleToast(
+        res.is_2k ? "Preview Upscale 2K Selesai" : "Resolusi Di Bawah 2K",
+        res.is_2k
+          ? `Upscaled to ${res.resolution_width}×${res.resolution_height} (2K)`
+          : `Provider mengembalikan ${res.resolution_width}×${res.resolution_height} (< 1920px).`,
+        !res.is_2k
+      );
+    } catch (err: any) {
+      const msg = err?.message || "Gagal upscale preview ke 2K.";
+      setPreviewError(msg);
+      setPreviewErrorMsg(msg);
+    } finally {
+      setUpscalingSlots((prev) => ({ ...prev, [lockKey]: false }));
+    }
+  };
+
+  const handleRevertPreview = async (slot: "closeup" | "expression" | "front") => {
+    if (!previewToken) return;
+    const lockKey = `preview_${slot}`;
+    if (upscalingSlots[lockKey]) return;
+    setUpscalingSlots((prev) => ({ ...prev, [lockKey]: true }));
+    try {
+      const res = await api.bible.revertCharacterPreview(projectId, {
+        preview_token: previewToken,
+        slot,
+      });
+      if (slot === "closeup") setPreviewCloseupUrl(res.image_url);
+      else if (slot === "expression") setPreviewExpressionUrl(res.image_url);
+      else setPreviewFrontUrl(res.image_url);
+      setPreviewSlotMeta((prev) => ({
+        ...prev,
+        [slot]: {
+          resolution_width: res.resolution_width,
+          resolution_height: res.resolution_height,
+          is_2k: res.is_2k,
+          previous_1k_url: null,
+        },
+      }));
+      showUpscaleToast("Preview Dikembalikan ke 1K", `Reverted to ${res.resolution_width}×${res.resolution_height}`);
+    } catch (err: any) {
+      const msg = err?.message || "Gagal revert preview ke 1K.";
+      setPreviewError(msg);
+      setPreviewErrorMsg(msg);
+    } finally {
+      setUpscalingSlots((prev) => ({ ...prev, [lockKey]: false }));
+    }
+  };
+
   // Render Matrix Card for Turnaround & Rigging/Action/Expression Sheets
   const renderMatrixCard = (cfg: {
     slot: "closeup" | "front" | "side" | "three_quarter" | "back" | "tpose" | "action" | "expression";
     title: string;
     targetType: "turnaround" | "sheet";
-    aspect: "3:4" | "16:9";
+    aspect: "3:4" | "16:9" | "1:1";
     imageUrl: string | null | undefined;
     subtitle: string;
     anchorBadge: string;
@@ -2146,12 +2557,26 @@ export default function CharacterMatrixTab({
     const targetKey = `${cfg.targetType}_${cfg.slot}`;
     const isRendering = !!renderingTargets[targetKey];
     const isUploading = !!uploadingSlots[cfg.slot];
+    const isUpscaling = !!upscalingSlots[cfg.slot];
     const statusText = pollStatus[targetKey];
-    const errorMsg = uploadErrors[cfg.slot] || targetErrors[targetKey];
+    const errorMsg = upscaleErrors[cfg.slot] || uploadErrors[cfg.slot] || targetErrors[targetKey];
     const imageUrl = cfg.imageUrl;
     const promptItem = sheetPrompts[cfg.slot];
     const meta = selectedChar?.sheet_metadata?.[cfg.slot];
     const isUploaded = meta?.source === "manual_upload";
+    const resW = meta?.resolution_width ?? meta?.width;
+    const resH = meta?.resolution_height ?? meta?.height;
+    const is2k = !!meta?.is_2k || (!!resW && !!resH && Math.max(resW, resH) >= 1920);
+    const hasPrev1k = !!meta?.previous_1k_url;
+    const resBadgeLabel = is2k
+      ? `2K • ${resW || 2048}×${resH || 2048}`
+      : resW && resH
+      ? `1K • ${resW}×${resH}`
+      : cfg.aspect === "16:9"
+      ? "1K • 1344×768"
+      : cfg.aspect === "1:1"
+      ? "1K • 1024×1024"
+      : "1K • 768×1024";
 
     return (
       <div
@@ -2182,7 +2607,7 @@ export default function CharacterMatrixTab({
                 "px-1.5 py-0.2 rounded text-[9px] font-semibold border",
                 cfg.isMasterAnchor
                   ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
-                  : selectedProvider === "google_flow"
+                  : isGoogleFlowProvider(selectedProvider)
                   ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
                   : "bg-blue-500/15 text-blue-400 border-blue-500/30"
               )}
@@ -2224,7 +2649,7 @@ export default function CharacterMatrixTab({
         <div
           className={cn(
             "relative w-full rounded-lg bg-panel/40 overflow-hidden flex items-center justify-center border border-border/50",
-            cfg.aspect === "16:9" ? "aspect-[16/9]" : "aspect-[3/4]"
+            cfg.aspect === "16:9" ? "aspect-[16/9]" : cfg.aspect === "1:1" ? "aspect-square" : "aspect-[3/4]"
           )}
         >
           {isRendering || isUploading ? (
@@ -2249,6 +2674,17 @@ export default function CharacterMatrixTab({
                 alt={cfg.title}
                 className="w-full h-full object-cover rounded-lg group-hover/img:scale-105 transition-transform duration-200"
               />
+              <span
+                className={cn(
+                  "absolute top-2 left-2 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border backdrop-blur-sm shadow-sm",
+                  is2k
+                    ? "bg-emerald-950/85 text-emerald-300 border-emerald-500/50"
+                    : "bg-black/75 text-amber-300 border-amber-500/30"
+                )}
+                title={is2k ? "Native 2K Verified" : "Standard 1K Render"}
+              >
+                {is2k ? "2K Ready" : resBadgeLabel}
+              </span>
               <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/img:opacity-100 transition-opacity flex items-center justify-center">
                 <ZoomIn className="w-5 h-5 text-amber-400" />
               </div>
@@ -2392,6 +2828,62 @@ export default function CharacterMatrixTab({
               <span>View</span>
             </button>
           </div>
+
+          {/* Row 3: Upscale Quality 2K & Revert 1K Controls */}
+          {!isLocked && imageUrl && (
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => handleUpscaleAsset(cfg.slot)}
+                disabled={isBatchActive || isRendering || isUploading || isUpscaling || is2k}
+                className={cn(
+                  "flex-1 py-1.5 px-2 rounded-lg border font-bold flex items-center justify-center gap-1 transition-colors disabled:opacity-60",
+                  is2k
+                    ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300 cursor-default"
+                    : isBatchActive
+                    ? "bg-canvas border-border text-obsidian-muted cursor-not-allowed"
+                    : "bg-indigo-500/15 hover:bg-indigo-500/25 border-indigo-400/40 text-indigo-300 hover:text-indigo-200"
+                )}
+                title={
+                  is2k
+                    ? `Sudah 2K (${resBadgeLabel})`
+                    : isBatchActive
+                    ? "Dinonaktifkan saat Batch Orchestrator sedang aktif"
+                    : "Refine & Upscale aset ini ke resolusi native 2K via Cloud API"
+                }
+              >
+                {isUpscaling ? (
+                  <>
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    <span>Upscaling 2K...</span>
+                  </>
+                ) : is2k ? (
+                  <>
+                    <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                    <span>2K Ready ({resW}×{resH})</span>
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-3 h-3 text-indigo-300" />
+                    <span>Upscale 2K</span>
+                  </>
+                )}
+              </button>
+
+              {hasPrev1k && (
+                <button
+                  type="button"
+                  onClick={() => handleRevertAsset(cfg.slot)}
+                  disabled={isBatchActive || isUpscaling || isRendering}
+                  className="py-1.5 px-2 rounded-lg bg-canvas hover:bg-elevated border border-border hover:border-amber-500/40 text-obsidian-secondary hover:text-amber-300 font-semibold flex items-center justify-center gap-1 transition-colors disabled:opacity-50"
+                  title="Kembalikan ke versi 1K sebelumnya"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Revert 1K</span>
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </div>
     );
@@ -2645,6 +3137,7 @@ export default function CharacterMatrixTab({
         initialProviderId={selectedProvider}
         socks5Online={proxyStatus?.healthy}
         onCheckSocks5={handleCheckProxy}
+        onSaveGlobalConfig={(payload) => applyGlobalProviderState(payload)}
       />
 
       {/* Selected Character Profile Header */}
@@ -2892,35 +3385,39 @@ export default function CharacterMatrixTab({
               </div>
             </div>
 
-            <div className="p-2.5 rounded-lg bg-canvas border border-border space-y-1.5 text-[10px]">
-              <div className="flex items-center justify-between">
-                <span className="text-obsidian-muted uppercase">Active Engine:</span>
-                <span className="text-amber-400 font-bold">
-                  {selectedProvider === "google_flow"
-                    ? "Google Flow (5 Akun PRO)"
-                    : selectedProvider === "ag_gemini_flash"
-                    ? "AG/Gemini 3.8 Flash"
-                    : selectedProvider === "9router"
-                    ? `9Router (${selectedModel})`
-                    : "SD 3.5 Large (HF)"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-obsidian-muted uppercase">Anchoring Mode:</span>
-                <span
-                  className={cn(
-                    "px-1.5 py-0.5 rounded font-bold text-[9px]",
-                    selectedProvider === "google_flow"
-                      ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
-                      : "bg-blue-500/15 text-blue-400 border border-blue-500/30"
-                  )}
-                >
-                  {selectedProvider === "google_flow"
-                    ? "Multimodal Reference Upload (Max 4)"
-                    : "Strict Seed + Chained DNA Lock"}
-                </span>
-              </div>
-            </div>
+            {(() => {
+              const engineInfo = resolveProviderDisplayInfo(selectedProvider, selectedModel);
+              const isFlowEngine = isGoogleFlowProvider(selectedProvider);
+              return (
+                <div className="p-2.5 rounded-lg bg-canvas border border-border space-y-1.5 text-[10px]">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-obsidian-muted uppercase">Active Engine:</span>
+                    <span className="text-amber-400 font-bold text-right truncate">
+                      {isFlowEngine
+                        ? "Google Flow (6 Akun PRO)"
+                        : engineInfo.label}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-obsidian-muted uppercase">Anchoring Mode:</span>
+                    <span
+                      className={cn(
+                        "px-1.5 py-0.5 rounded font-bold text-[9px]",
+                        isFlowEngine || engineInfo.supportsVisualAnchor
+                          ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+                          : "bg-blue-500/15 text-blue-400 border border-blue-500/30"
+                      )}
+                    >
+                      {isFlowEngine
+                        ? "Multimodal Reference Upload (Max 4)"
+                        : engineInfo.supportsVisualAnchor
+                        ? "Visual Anchor + Seed Lock"
+                        : "Strict Seed + Chained DNA Lock"}
+                    </span>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         </div>
       </div>
@@ -3043,9 +3540,11 @@ export default function CharacterMatrixTab({
                 slot: "closeup",
                 title: "CARD 1: CHARACTER CLOSE-UP",
                 targetType: "sheet",
-                aspect: "3:4",
+                aspect: "1:1",
                 imageUrl: selectedChar.closeup_image_url,
-                subtitle: "Master Biometric Headshot • 100mm f/5.6 RAW",
+                subtitle: isPhotorealisticCastingStyle(project?.target_style_code)
+                  ? "1:1 Square • 85mm f/4.5 RAW"
+                  : "1:1 Square • Stylized Master Anchor",
                 anchorBadge: "Master Anchor",
                 isMasterAnchor: true,
               })}
@@ -3170,8 +3669,19 @@ export default function CharacterMatrixTab({
           {(selectedChar.states || []).map((st) => {
             const targetKey = `state_${st.id}`;
             const isRendering = renderingTargets[targetKey];
+            const isStateUpscaling = !!upscalingSlots[targetKey];
+            const stateMeta = selectedChar?.sheet_metadata?.[targetKey];
+            const stW = st.resolution_width ?? stateMeta?.resolution_width ?? stateMeta?.width;
+            const stH = st.resolution_height ?? stateMeta?.resolution_height ?? stateMeta?.height;
+            const stIs2k = !!(st.is_2k ?? stateMeta?.is_2k) || (!!stW && !!stH && Math.max(stW, stH) >= 1920);
+            const stPrev1k = st.previous_1k_url ?? stateMeta?.previous_1k_url;
+            const stBadge = stIs2k
+              ? `2K Ready • ${stW || 2048}×${stH || 2048}`
+              : stW && stH
+              ? `1K • ${stW}×${stH}`
+              : "1K • 1024×1024";
             const statusText = pollStatus[targetKey];
-            const errorMsg = targetErrors[targetKey];
+            const errorMsg = upscaleErrors[targetKey] || targetErrors[targetKey];
 
             return (
               <div
@@ -3234,51 +3744,106 @@ export default function CharacterMatrixTab({
 
                   {/* State Image Preview */}
                   {st.image_url ? (
-                    <div className="relative aspect-video w-full rounded-lg overflow-hidden border border-border mb-2.5 group/stateimg">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={st.image_url}
-                        alt={st.state_code}
-                        className="w-full h-full object-cover"
-                      />
-                      <div className="absolute inset-0 bg-black/60 opacity-0 group-hover/stateimg:opacity-100 transition-opacity flex items-center justify-center gap-2">
-                        <a
-                          href={st.image_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="p-1 rounded bg-black/80 hover:bg-black text-amber-400 border border-border text-[10px] flex items-center gap-1 px-2"
+                    <div className="space-y-1.5 mb-2.5">
+                      <div className="relative aspect-video w-full rounded-lg overflow-hidden border border-border group/stateimg">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={st.image_url}
+                          alt={st.state_code}
+                          className="w-full h-full object-cover"
+                        />
+                        <span
+                          className={cn(
+                            "absolute top-2 left-2 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border backdrop-blur-sm",
+                            stIs2k
+                              ? "bg-emerald-950/85 text-emerald-300 border-emerald-500/50"
+                              : "bg-black/75 text-amber-300 border-amber-500/30"
+                          )}
                         >
-                          <ExternalLink className="w-3 h-3" />
-                          <span>Buka</span>
-                        </a>
-                        {!isLocked && (
+                          {stBadge}
+                        </span>
+                        <div className="absolute inset-0 bg-black/60 opacity-0 group-hover/stateimg:opacity-100 transition-opacity flex items-center justify-center gap-2">
+                          <a
+                            href={st.image_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="p-1 rounded bg-black/80 hover:bg-black text-amber-400 border border-border text-[10px] flex items-center gap-1 px-2"
+                          >
+                            <ExternalLink className="w-3 h-3" />
+                            <span>Buka</span>
+                          </a>
+                          {!isLocked && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (isBatchActive) {
+                                  showBatchLockNotification(`Render Ulang State ${st.state_code}`);
+                                  return;
+                                }
+                                handleRenderAsset("state", undefined, st.id);
+                              }}
+                              aria-disabled={isBatchActive}
+                              className={cn(
+                                "p-1 rounded text-canvas font-bold text-[10px] flex items-center gap-1 px-2 transition-colors",
+                                isBatchActive
+                                  ? "bg-amber-500/50 opacity-60 cursor-not-allowed"
+                                  : "bg-amber-500 hover:bg-amber-600"
+                              )}
+                              title={
+                                isBatchActive
+                                  ? "Terkunci: Proses batch sedang berlangsung"
+                                  : `Render Ulang State ${st.state_code}`
+                              }
+                            >
+                              <RefreshCw className="w-3 h-3" />
+                              <span>Render Ulang</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {!isLocked && (
+                        <div className="flex items-center gap-1.5">
                           <button
                             type="button"
-                            onClick={() => {
-                              if (isBatchActive) {
-                                showBatchLockNotification(`Render Ulang State ${st.state_code}`);
-                                return;
-                              }
-                              handleRenderAsset("state", undefined, st.id);
-                            }}
-                            aria-disabled={isBatchActive}
+                            onClick={() => handleUpscaleAsset("state", st.id)}
+                            disabled={isBatchActive || isRendering || isStateUpscaling || stIs2k}
                             className={cn(
-                              "p-1 rounded text-canvas font-bold text-[10px] flex items-center gap-1 px-2 transition-colors",
-                              isBatchActive
-                                ? "bg-amber-500/50 opacity-60 cursor-not-allowed"
-                                : "bg-amber-500 hover:bg-amber-600"
+                              "flex-1 py-1 px-2 rounded-lg border text-[10px] font-bold flex items-center justify-center gap-1 transition-colors disabled:opacity-60",
+                              stIs2k
+                                ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300 cursor-default"
+                                : "bg-indigo-500/15 hover:bg-indigo-500/25 border-indigo-400/40 text-indigo-300"
                             )}
-                            title={
-                              isBatchActive
-                                ? "Terkunci: Proses batch sedang berlangsung"
-                                : `Render Ulang State ${st.state_code}`
-                            }
                           >
-                            <RefreshCw className="w-3 h-3" />
-                            <span>Render Ulang</span>
+                            {isStateUpscaling ? (
+                              <>
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                <span>Upscaling 2K...</span>
+                              </>
+                            ) : stIs2k ? (
+                              <>
+                                <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                                <span>2K Ready</span>
+                              </>
+                            ) : (
+                              <>
+                                <Sparkles className="w-3 h-3 text-indigo-300" />
+                                <span>Upscale 2K</span>
+                              </>
+                            )}
                           </button>
-                        )}
-                      </div>
+                          {stPrev1k && (
+                            <button
+                              type="button"
+                              onClick={() => handleRevertAsset("state", st.id)}
+                              disabled={isBatchActive || isStateUpscaling || isRendering}
+                              className="py-1 px-2 rounded-lg bg-panel hover:bg-elevated border border-border text-[10px] font-semibold text-obsidian-secondary hover:text-amber-300 flex items-center gap-1"
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                              <span>Revert 1K</span>
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
                   ) : isRendering ? (
                     <div className="aspect-video w-full rounded-lg bg-panel border border-border/80 flex flex-col items-center justify-center p-3 mb-2.5 text-center space-y-1.5">
@@ -3421,14 +3986,19 @@ export default function CharacterMatrixTab({
                       <label className="text-[10px] text-obsidian-secondary font-semibold">2. Image Render Engine</label>
                       <select
                         value={addCharImageProvider}
-                        onChange={(e) => setAddCharImageProvider(e.target.value as any)}
+                        onChange={(e) => setAddCharImageProvider(e.target.value)}
                         className="w-full px-2.5 py-1.5 rounded-lg bg-panel border border-border text-[11px] text-obsidian-primary focus:border-amber-500 focus:outline-none"
                       >
-                        <option value="google_flow">Google Flow (5 Akun PRO) [Recommended]</option>
-                        <option value="ag_gemini_flash">AG / Gemini 3.8 Flash (Fast)</option>
-                        <option value="9router">9Router Multi-Combo</option>
+                        {AI_RENDER_PROVIDERS.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.id === "google-flow"
+                              ? "Google Flow (6 Akun PRO) [Recommended]"
+                              : `${p.name} (${p.vendor})`}
+                          </option>
+                        ))}
+                        <option value="ag_gemini_flash">AG / Gemini 3.8 Flash (Legacy)</option>
                       </select>
-                      {addCharImageProvider === "google_flow" && (
+                      {isGoogleFlowProvider(addCharImageProvider) && (
                         <div className="mt-1 flex items-center justify-between text-[10px] font-mono px-2 py-1 rounded bg-canvas border border-border">
                           <div className="flex items-center gap-1.5">
                             <span
@@ -3627,12 +4197,14 @@ export default function CharacterMatrixTab({
                         <span>Card 1: Character Close-Up (Master Anchor)</span>
                       </span>
                       <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
-                        3:4 Portrait &bull; 85mm Prime
+                        {isPhotorealisticCastingStyle(project?.target_style_code)
+                          ? "1:1 Square • 85mm f/4.5 RAW"
+                          : "1:1 Square • Master Anchor"}
                       </span>
                     </div>
 
                     {/* Close-Up Preview Body */}
-                    <div className="relative aspect-[3/4] max-h-[220px] w-auto mx-auto rounded-md bg-black/40 overflow-hidden flex items-center justify-center border border-border/60">
+                    <div className="relative aspect-square max-h-[220px] w-auto mx-auto rounded-md bg-black/40 overflow-hidden flex items-center justify-center border border-border/60">
                       {isRollingCloseup || (isPreviewGenerating && !previewCloseupUrl) ? (
                         <div className="flex flex-col items-center justify-center p-3 text-center space-y-1.5">
                           <Loader2 className="w-6 h-6 text-amber-500 animate-spin" />
@@ -3695,6 +4267,20 @@ export default function CharacterMatrixTab({
                               <ZoomIn className="w-5 h-5 text-amber-400" />
                             </div>
                           )}
+                          {closeupImgLoaded && (
+                            <span
+                              className={cn(
+                                "absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded text-[8px] font-mono font-bold border backdrop-blur-sm",
+                                previewSlotMeta.closeup?.is_2k
+                                  ? "bg-emerald-950/85 text-emerald-300 border-emerald-500/50"
+                                  : "bg-black/75 text-amber-300 border-amber-500/30"
+                              )}
+                            >
+                              {previewSlotMeta.closeup?.is_2k
+                                ? `2K Ready • ${previewSlotMeta.closeup.resolution_width || 2048}×${previewSlotMeta.closeup.resolution_height || 2048}`
+                                : `1K • ${previewSlotMeta.closeup?.resolution_width || 1024}×${previewSlotMeta.closeup?.resolution_height || 1024}`}
+                            </span>
+                          )}
                         </div>
                       ) : (
                         <div className="flex flex-col items-center justify-center text-obsidian-muted p-3 text-center space-y-1">
@@ -3705,16 +4291,61 @@ export default function CharacterMatrixTab({
                       )}
                     </div>
 
-                    {/* Independent Generate / Re-roll Close-Up Button */}
-                    <button
-                      type="button"
-                      onClick={() => handleGeneratePreview("closeup")}
-                      disabled={isPreviewGenerating || !newCharName.trim()}
-                      className="w-full py-1.5 px-2 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-[10px] text-amber-300 hover:text-amber-200 font-bold flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50"
-                    >
-                      <RefreshCw className={cn("w-3 h-3 text-amber-400", isRollingCloseup && "animate-spin")} />
-                      <span>{previewCloseupUrl ? "Re-roll Close-Up (Slot 1)" : "Generate Close-Up (Master Anchor)"}</span>
-                    </button>
+                    {/* Independent Generate / Re-roll Close-Up + Upscale 2K Buttons */}
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => handleGeneratePreview("closeup")}
+                        disabled={isPreviewGenerating || !!upscalingSlots["preview_closeup"] || !newCharName.trim()}
+                        className="flex-1 py-1.5 px-2 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-[10px] text-amber-300 hover:text-amber-200 font-bold flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50"
+                      >
+                        <RefreshCw className={cn("w-3 h-3 text-amber-400", isRollingCloseup && "animate-spin")} />
+                        <span>{previewCloseupUrl ? "Re-roll Close-Up (Slot 1)" : "Generate Close-Up (Master Anchor)"}</span>
+                      </button>
+
+                      {previewCloseupUrl && previewToken && (
+                        <button
+                          type="button"
+                          onClick={() => handleUpscalePreview("closeup")}
+                          disabled={isPreviewGenerating || isRollingCloseup || !!upscalingSlots["preview_closeup"] || !!previewSlotMeta.closeup?.is_2k}
+                          className={cn(
+                            "py-1.5 px-2.5 rounded-lg border text-[10px] font-bold flex items-center justify-center gap-1 transition-colors disabled:opacity-60",
+                            previewSlotMeta.closeup?.is_2k
+                              ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300 cursor-default"
+                              : "bg-indigo-500/15 hover:bg-indigo-500/25 border-indigo-400/40 text-indigo-300"
+                          )}
+                        >
+                          {upscalingSlots["preview_closeup"] ? (
+                            <>
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              <span>Upscaling 2K...</span>
+                            </>
+                          ) : previewSlotMeta.closeup?.is_2k ? (
+                            <>
+                              <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                              <span>2K Ready</span>
+                            </>
+                          ) : (
+                            <>
+                              <Sparkles className="w-3 h-3 text-indigo-300" />
+                              <span>Upscale 2K</span>
+                            </>
+                          )}
+                        </button>
+                      )}
+
+                      {previewSlotMeta.closeup?.previous_1k_url && previewToken && (
+                        <button
+                          type="button"
+                          onClick={() => handleRevertPreview("closeup")}
+                          disabled={isPreviewGenerating || !!upscalingSlots["preview_closeup"]}
+                          className="py-1.5 px-2 rounded-lg bg-canvas hover:bg-elevated border border-border text-[10px] font-semibold text-obsidian-secondary hover:text-amber-300 flex items-center gap-1"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                          <span>Revert 1K</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   {/* DOWNSTREAM ANCHORS: Slot 2 (Expression Sheet) & Slot 3 (Full Body Front) */}
@@ -3785,21 +4416,67 @@ export default function CharacterMatrixTab({
                                   setExprImgLoaded(false);
                                 }}
                               />
+                              <span
+                                className={cn(
+                                  "absolute top-1 left-1 px-1 py-0.5 rounded text-[8px] font-mono font-bold border backdrop-blur-sm",
+                                  previewSlotMeta.expression?.is_2k
+                                    ? "bg-emerald-950/85 text-emerald-300 border-emerald-500/50"
+                                    : "bg-black/75 text-amber-300 border-amber-500/30"
+                                )}
+                              >
+                                {previewSlotMeta.expression?.is_2k
+                                  ? "2K Ready"
+                                  : `1K • ${previewSlotMeta.expression?.resolution_width || 1344}×${previewSlotMeta.expression?.resolution_height || 768}`}
+                              </span>
                             </div>
                           ) : (
                             <span className="text-[9px] text-obsidian-muted">Opsional</span>
                           )}
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={() => handleGeneratePreview("expression")}
-                          disabled={isPreviewGenerating || !newCharName.trim()}
-                          className="w-full py-1 px-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[9px] text-obsidian-secondary hover:text-amber-300 font-semibold flex items-center justify-center gap-1 transition-colors disabled:opacity-50"
-                        >
-                          <RefreshCw className={cn("w-2.5 h-2.5 text-amber-400", isRollingExpression && "animate-spin")} />
-                          <span>Re-roll Expression</span>
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => handleGeneratePreview("expression")}
+                            disabled={isPreviewGenerating || !!upscalingSlots["preview_expression"] || !newCharName.trim()}
+                            className="flex-1 py-1 px-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[9px] text-obsidian-secondary hover:text-amber-300 font-semibold flex items-center justify-center gap-1 transition-colors disabled:opacity-50"
+                          >
+                            <RefreshCw className={cn("w-2.5 h-2.5 text-amber-400", isRollingExpression && "animate-spin")} />
+                            <span>Re-roll Expression</span>
+                          </button>
+                          {previewExpressionUrl && previewToken && (
+                            <button
+                              type="button"
+                              onClick={() => handleUpscalePreview("expression")}
+                              disabled={isPreviewGenerating || isRollingExpression || !!upscalingSlots["preview_expression"] || !!previewSlotMeta.expression?.is_2k}
+                              className={cn(
+                                "py-1 px-1.5 rounded border text-[9px] font-bold flex items-center gap-1 disabled:opacity-60",
+                                previewSlotMeta.expression?.is_2k
+                                  ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                                  : "bg-indigo-500/15 hover:bg-indigo-500/25 border-indigo-400/40 text-indigo-300"
+                              )}
+                            >
+                              {upscalingSlots["preview_expression"] ? (
+                                <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                              ) : previewSlotMeta.expression?.is_2k ? (
+                                <span>2K Ready</span>
+                              ) : (
+                                <span>Upscale 2K</span>
+                              )}
+                            </button>
+                          )}
+                          {previewSlotMeta.expression?.previous_1k_url && previewToken && (
+                            <button
+                              type="button"
+                              onClick={() => handleRevertPreview("expression")}
+                              disabled={isPreviewGenerating || !!upscalingSlots["preview_expression"]}
+                              className="py-1 px-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[9px] text-obsidian-secondary hover:text-amber-300"
+                              title="Revert 1K"
+                            >
+                              Revert 1K
+                            </button>
+                          )}
+                        </div>
                       </div>
 
                       {/* Full Body Front */}
@@ -3858,21 +4535,67 @@ export default function CharacterMatrixTab({
                                   setFrontImgLoaded(false);
                                 }}
                               />
+                              <span
+                                className={cn(
+                                  "absolute top-1 left-1 px-1 py-0.5 rounded text-[8px] font-mono font-bold border backdrop-blur-sm",
+                                  previewSlotMeta.front?.is_2k
+                                    ? "bg-emerald-950/85 text-emerald-300 border-emerald-500/50"
+                                    : "bg-black/75 text-amber-300 border-amber-500/30"
+                                )}
+                              >
+                                {previewSlotMeta.front?.is_2k
+                                  ? "2K Ready"
+                                  : `1K • ${previewSlotMeta.front?.resolution_width || 768}×${previewSlotMeta.front?.resolution_height || 1024}`}
+                              </span>
                             </div>
                           ) : (
                             <span className="text-[9px] text-obsidian-muted">Opsional</span>
                           )}
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={() => handleGeneratePreview("front")}
-                          disabled={isPreviewGenerating || !newCharName.trim()}
-                          className="w-full py-1 px-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[9px] text-obsidian-secondary hover:text-amber-300 font-semibold flex items-center justify-center gap-1 transition-colors disabled:opacity-50"
-                        >
-                          <RefreshCw className={cn("w-2.5 h-2.5 text-amber-400", isRollingFront && "animate-spin")} />
-                          <span>Re-roll Full Body</span>
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => handleGeneratePreview("front")}
+                            disabled={isPreviewGenerating || !!upscalingSlots["preview_front"] || !newCharName.trim()}
+                            className="flex-1 py-1 px-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[9px] text-obsidian-secondary hover:text-amber-300 font-semibold flex items-center justify-center gap-1 transition-colors disabled:opacity-50"
+                          >
+                            <RefreshCw className={cn("w-2.5 h-2.5 text-amber-400", isRollingFront && "animate-spin")} />
+                            <span>Re-roll Full Body</span>
+                          </button>
+                          {previewFrontUrl && previewToken && (
+                            <button
+                              type="button"
+                              onClick={() => handleUpscalePreview("front")}
+                              disabled={isPreviewGenerating || isRollingFront || !!upscalingSlots["preview_front"] || !!previewSlotMeta.front?.is_2k}
+                              className={cn(
+                                "py-1 px-1.5 rounded border text-[9px] font-bold flex items-center gap-1 disabled:opacity-60",
+                                previewSlotMeta.front?.is_2k
+                                  ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                                  : "bg-indigo-500/15 hover:bg-indigo-500/25 border-indigo-400/40 text-indigo-300"
+                              )}
+                            >
+                              {upscalingSlots["preview_front"] ? (
+                                <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                              ) : previewSlotMeta.front?.is_2k ? (
+                                <span>2K Ready</span>
+                              ) : (
+                                <span>Upscale 2K</span>
+                              )}
+                            </button>
+                          )}
+                          {previewSlotMeta.front?.previous_1k_url && previewToken && (
+                            <button
+                              type="button"
+                              onClick={() => handleRevertPreview("front")}
+                              disabled={isPreviewGenerating || !!upscalingSlots["preview_front"]}
+                              className="py-1 px-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[9px] text-obsidian-secondary hover:text-amber-300"
+                              title="Revert 1K"
+                            >
+                              Revert 1K
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -3888,16 +4611,16 @@ export default function CharacterMatrixTab({
                             (previewErrorMsg || previewError || "").toLowerCase().includes("kuota") ||
                             (previewErrorMsg || previewError || "").toLowerCase().includes("quota") ||
                             (previewErrorMsg || previewError || "").toLowerCase().includes("rate limit") ||
-                            addCharImageProvider !== "google_flow") && (
+                            !isGoogleFlowProvider(addCharImageProvider)) && (
                             <div className="mt-2 pt-2 border-t border-rose-500/20 flex flex-wrap items-center justify-between gap-2">
                               <span className="text-[10px] text-amber-300">
-                                Rekomendasi: Beralih ke Google Flow [5 Akun PRO] yang memiliki kuota aktif dan stabil.
+                                Rekomendasi: Beralih ke Google Flow [6 Akun PRO] yang memiliki kuota aktif dan stabil.
                               </span>
-                              {addCharImageProvider !== "google_flow" && (
+                              {!isGoogleFlowProvider(addCharImageProvider) && (
                                 <button
                                   type="button"
                                   onClick={() => {
-                                    setAddCharImageProvider("google_flow");
+                                    setAddCharImageProvider("google-flow");
                                     setPreviewErrorMsg(null);
                                     setPreviewError(null);
                                   }}
@@ -4292,8 +5015,18 @@ export default function CharacterMatrixTab({
                     {sheetPrompts[activePromptModalSlot]?.card_title || `Card: ${activePromptModalSlot.toUpperCase()}`}
                   </span>
                   <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                    Aspect: {sheetPrompts[activePromptModalSlot]?.recommended_aspect_ratio || "3:4"}
+                    Aspect: {sheetPrompts[activePromptModalSlot]?.recommended_aspect_ratio || (activePromptModalSlot === "closeup" ? "1:1" : "3:4")}
                   </span>
+                  {sheetPrompts[activePromptModalSlot]?.routing_mode && (
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 uppercase">
+                      CASTING_CLOSEUP_REALISTIC_V1:{" "}
+                      {sheetPrompts[activePromptModalSlot]?.routing_mode === "full"
+                        ? "FULL"
+                        : sheetPrompts[activePromptModalSlot]?.routing_mode === "light_override"
+                        ? "LIGHT_OVERRIDE"
+                        : "STRICT_BYPASS"}
+                    </span>
+                  )}
                 </div>
                 <div className="text-[11px] text-obsidian-muted flex items-center gap-2">
                   <span>Character: <strong className="text-obsidian-primary">{selectedChar.name}</strong></span>
@@ -4890,7 +5623,7 @@ export default function CharacterMatrixTab({
           (c) => !c.closeup_image_url || !c.closeup_image_url.trim().length
         );
         const estimates = calculateEstimatedAssets(batchResumeMode);
-        const isFlowOffline = selectedProvider === "google_flow" && proxyStatus?.healthy === false;
+        const isFlowOffline = isGoogleFlowProvider(selectedProvider) && proxyStatus?.healthy === false;
 
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
@@ -5020,7 +5753,7 @@ export default function CharacterMatrixTab({
                   Card 1 hanya digunakan sebagai read-only visual reference anchor untuk Phase 1, Phase 2, dan Phase 3.
                 </p>
                 <div className="pt-1 flex items-center justify-between text-[10px] font-mono text-obsidian-muted">
-                  <span>Provider: <strong className="text-obsidian-primary">{selectedProvider}</strong></span>
+                  <span>Provider: <strong className="text-obsidian-primary">{resolveProviderDisplayInfo(selectedProvider, selectedModel).label}</strong></span>
                   <span>📱 Screen Wake Lock Otomatis Aktif</span>
                 </div>
               </div>
@@ -5209,6 +5942,52 @@ export default function CharacterMatrixTab({
               </div>
               <p className="text-[11px] text-obsidian-secondary leading-relaxed font-mono">
                 {batchLockToast.message}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Upscale 2K / Revert 1K Toast Notification */}
+      {upscaleToast?.isOpen && (
+        <div className="fixed bottom-6 right-6 z-50 w-11/12 max-w-sm animate-in fade-in slide-in-from-bottom-5 duration-200 pointer-events-auto">
+          <div
+            className={cn(
+              "p-3.5 rounded-2xl bg-panel/95 backdrop-blur-md border shadow-2xl flex items-start gap-3 text-obsidian-primary font-sans",
+              upscaleToast.isError ? "border-rose-500/50" : "border-emerald-500/50"
+            )}
+          >
+            <div
+              className={cn(
+                "p-2 rounded-xl border shrink-0 mt-0.5",
+                upscaleToast.isError
+                  ? "bg-rose-500/20 text-rose-400 border-rose-500/40"
+                  : "bg-emerald-500/20 text-emerald-400 border-emerald-500/40"
+              )}
+            >
+              {upscaleToast.isError ? <AlertTriangle className="w-4 h-4" /> : <CheckCircle2 className="w-4 h-4" />}
+            </div>
+            <div className="flex-1 min-w-0 space-y-0.5">
+              <div className="flex items-center justify-between gap-2">
+                <h5
+                  className={cn(
+                    "font-cinzel text-xs font-bold uppercase tracking-wider",
+                    upscaleToast.isError ? "text-rose-300" : "text-emerald-300"
+                  )}
+                >
+                  {upscaleToast.title}
+                </h5>
+                <button
+                  type="button"
+                  onClick={() => setUpscaleToast(null)}
+                  className="p-1 rounded text-obsidian-muted hover:text-obsidian-primary transition-colors -mr-1 -mt-1"
+                  title="Tutup notifikasi"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <p className="text-[11px] text-obsidian-secondary leading-relaxed font-mono">
+                {upscaleToast.message}
               </p>
             </div>
           </div>

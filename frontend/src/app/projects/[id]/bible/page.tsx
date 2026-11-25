@@ -129,12 +129,12 @@ export default function ProductionBiblePage() {
   );
 
   const handlePatchCharacterStateAsset = useCallback(
-    (characterId: string, stateId: string, imageUrl: string) => {
+    (characterId: string, stateId: string, imageUrl: string, metaPatch?: Record<string, any>) => {
       setCharacters((prev) =>
         prev.map((c) => {
           if (c.id !== characterId) return c;
           const updatedStates = (c.states || []).map((s) =>
-            s.id === stateId ? { ...s, image_url: imageUrl } : s
+            s.id === stateId ? { ...s, image_url: imageUrl, ...(metaPatch || {}) } : s
           );
           return {
             ...c,
