@@ -640,3 +640,155 @@ def test_resolve_effective_render_provider_precedence_and_aliases(client):
     assert resolved_override["use_universal_adapter"] is True
 
 
+def test_gpt_2_6_openai_protocol_1k_and_reference_edits(tmp_path):
+    """Verify gpt-2-6 strips response_format/negative_prompt/seed, maps sizes, retries model alias, and uses /images/edits for refs."""
+    storage = tmp_path / "previews"
+    adapter = UniversalImageAdapter(storage_path=storage)
+
+    ref1 = tmp_path / "card1.png"
+    ref2 = tmp_path / "card3.png"
+    ref1.write_bytes(TINY_PNG_BYTES)
+    ref2.write_bytes(TINY_PNG_BYTES)
+
+    seen_calls = []
+
+    def openai_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/images/generations"):
+            body = json.loads(request.content.decode("utf-8"))
+            seen_calls.append(("generations", body))
+            assert "response_format" not in body
+            assert "negative_prompt" not in body
+            assert "seed" not in body
+            assert "Strictly avoid:" in body["prompt"]
+            if body["model"] == "gpt-image-2.6":
+                return httpx.Response(
+                    404,
+                    json={"error": {"message": "The model 'gpt-image-2.6' does not exist", "code": "model_not_found"}},
+                )
+            return httpx.Response(200, json={"data": [{"b64_json": TINY_PNG_B64}]})
+
+        if request.url.path.endswith("/images/edits"):
+            raw_body = request.content.decode("latin-1")
+            seen_calls.append(("edits", raw_body))
+            assert "gpt-image-2.6-flare" in raw_body or "gpt-image-1" in raw_body
+            assert 'name="image[]"' in raw_body
+            assert 'name="size"\r\n\r\n1024x1536' in raw_body
+            return httpx.Response(200, json={"data": [{"b64_json": TINY_PNG_B64}]})
+
+        return httpx.Response(404)
+
+    with patch(
+        "backend.app.infrastructure.universal_image_adapter.httpx.AsyncClient",
+        side_effect=lambda **kwargs: REAL_ASYNC_CLIENT(transport=httpx.MockTransport(openai_handler)),
+    ):
+        # 1. Card 1 (no ref, 1:1) -> retries gpt-image-2.6 -> gpt-image-2.6-flare
+        res1 = asyncio.run(
+            adapter.generate_image(
+                UniversalImageRequest(
+                    provider_id="gpt-2-6",
+                    model_id="gpt-image-2.6",
+                    prompt="Studio casting closeup",
+                    negative_prompt="blurry, CGI",
+                    aspect_ratio="1:1",
+                    width=1024,
+                    height=1024,
+                    seed=4242,
+                    base_url_override="https://api.openai.com/v1",
+                    api_key_override="sk-proj-test",
+                    enable_fallback=False,
+                )
+            )
+        )
+        assert res1.model_id == "gpt-image-2.6-flare"
+        assert seen_calls[0][0] == "generations"
+        assert seen_calls[0][1]["size"] == "1024x1024"
+        assert seen_calls[1][1]["model"] == "gpt-image-2.6-flare"
+
+        # 2. Card 4 (2 refs, 3:4) -> /images/edits with image[] and 1024x1536
+        res2 = asyncio.run(
+            adapter.generate_image(
+                UniversalImageRequest(
+                    provider_id="gpt-2-6",
+                    model_id="gpt-image-2.6-flare",
+                    prompt="Side profile",
+                    negative_prompt="blurry",
+                    aspect_ratio="3:4",
+                    width=768,
+                    height=1024,
+                    reference_image_paths=[str(ref1), str(ref2)],
+                    base_url_override="https://api.openai.com/v1",
+                    api_key_override="sk-proj-test",
+                    enable_fallback=False,
+                )
+            )
+        )
+        assert res2.model_id == "gpt-image-2.6-flare"
+        assert seen_calls[-1][0] == "edits"
+
+
+def test_seedream_5_5_payload_and_misconfigured_endpoint_guard(tmp_path):
+    """Verify seedream-5-5 rejects Alibaba MaaS URL clearly and omits sequential_image_generation on 5.5."""
+    storage = tmp_path / "previews"
+    adapter = UniversalImageAdapter(storage_path=storage)
+
+    ref1 = tmp_path / "card1.png"
+    ref1.write_bytes(TINY_PNG_BYTES)
+
+    # 1. Misconfigured Alibaba Cloud URL fails immediately with clear diagnostic
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(
+            adapter.generate_image(
+                UniversalImageRequest(
+                    provider_id="seedream-5-5",
+                    model_id="seedream-5.5",
+                    prompt="Upscale portrait",
+                    aspect_ratio="1:1",
+                    width=2048,
+                    height=2048,
+                    reference_image_paths=[str(ref1)],
+                    base_url_override="https://ws-os66oybk9aerfdmb.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+                    api_key_override="sk-ws-test",
+                    enable_fallback=False,
+                )
+            )
+        )
+    assert "aliyuncs.com" in str(exc_info.value)
+    assert "BytePlus ModelArk" in str(exc_info.value)
+
+    # 2. Real BytePlus ModelArk omits sequential_image_generation on seedream-5.5 and retries size preset on 400 pixel error
+    seen_payloads = []
+
+    def byteplus_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        seen_payloads.append(body)
+        assert "sequential_image_generation" not in body
+        assert body["image"].startswith("data:image/png;base64,")
+        if body["size"] == "2048x2048":
+            return httpx.Response(400, json={"error": {"message": "InvalidParameter: pixel limit"}})
+        assert body["size"] == "2K"
+        return httpx.Response(200, json={"data": [{"b64_json": TINY_PNG_B64}]})
+
+    with patch(
+        "backend.app.infrastructure.universal_image_adapter.httpx.AsyncClient",
+        side_effect=lambda **kwargs: REAL_ASYNC_CLIENT(transport=httpx.MockTransport(byteplus_handler)),
+    ):
+        res = asyncio.run(
+            adapter.generate_image(
+                UniversalImageRequest(
+                    provider_id="seedream-5-5",
+                    model_id="seedream-5.5",
+                    prompt="Upscale portrait",
+                    aspect_ratio="1:1",
+                    width=2048,
+                    height=2048,
+                    reference_image_paths=[str(ref1)],
+                    base_url_override="https://ark.ap-southeast.bytepluses.com/api/v3",
+                    api_key_override="sk-byteplus-test",
+                    enable_fallback=False,
+                )
+            )
+        )
+        assert res.provider_id == "seedream-5-5"
+        assert len(seen_payloads) == 2
+
+

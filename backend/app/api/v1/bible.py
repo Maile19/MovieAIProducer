@@ -79,6 +79,7 @@ from backend.app.infrastructure.universal_image_adapter import (
     UniversalImageAdapter,
     UniversalImageRequest,
     supports_native_2k_upscale,
+    validate_2k_provider_config,
 )
 
 router = APIRouter(tags=["Master Production Bible"])
@@ -3885,7 +3886,7 @@ async def generate_character_asset(
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Image generation failed via {prov}: {str(exc)}",
+                detail=f"Image generation failed via {prov}: {_format_concise_provider_error(exc)}",
             )
         gen_res_url = gen_res.local_url
         res_provider = gen_res.provider_id
@@ -4835,6 +4836,14 @@ def _update_preview_manifest(
     return entry
 
 
+def _format_concise_provider_error(exc: Exception) -> str:
+    """Produce a concise non-empty error summary without leaking raw tracebacks."""
+    msg = str(exc).strip()
+    if not msg:
+        return f"{type(exc).__name__} (upstream request timed out or failed)"
+    return msg[:280]
+
+
 def _resolve_upscale_2k_provider(
     project_id: str | None,
     provider_override: str | None = None,
@@ -4856,7 +4865,10 @@ def _resolve_upscale_2k_provider(
     active_key = decrypt_key(active_cfg.get("apiKey", "")) if active_cfg.get("apiKey") else ""
 
     supported, reason = supports_native_2k_upscale(active_prov, model_id=active_model)
-    if supported and active_key:
+    active_valid, active_valid_reason = validate_2k_provider_config(
+        active_prov, active_base_url, model_id=active_model, api_key=active_key
+    )
+    if active_valid:
         return {
             "provider_id": active_prov,
             "model_id": active_model,
@@ -4866,33 +4878,40 @@ def _resolve_upscale_2k_provider(
             "route_reason": reason,
         }
 
-    # Capability fallback: auto-route to the highest-priority configured 2K + reference provider
+    skipped_notes: list[str] = []
+    # Capability fallback: auto-route to the highest-priority validly configured 2K + reference provider
     for cand_pid in AUTO_ROUTE_2K_PRIORITY:
         matched_key, cand_cfg = _lookup_provider_config(configs, cand_pid)
         if not cand_cfg or not matched_key:
             continue
         cand_model = cand_cfg.get("modelId")
+        cand_base_url = cand_cfg.get("baseUrl")
         cand_key = decrypt_key(cand_cfg.get("apiKey", "")) if cand_cfg.get("apiKey") else ""
-        cand_ok, cand_reason = supports_native_2k_upscale(matched_key, model_id=cand_model)
-        if cand_ok and cand_key:
+        if not cand_key:
+            continue
+        cand_ok, cand_reason = validate_2k_provider_config(
+            matched_key, cand_base_url, model_id=cand_model, api_key=cand_key
+        )
+        if cand_ok:
             return {
                 "provider_id": matched_key,
                 "model_id": cand_model,
-                "base_url": cand_cfg.get("baseUrl"),
+                "base_url": cand_base_url,
                 "api_key": cand_key,
                 "auto_routed_from": active_prov,
                 "route_reason": f"Auto-routed from '{active_prov}' to '{matched_key}': {cand_reason}",
             }
+        skipped_notes.append(f"{matched_key}: {cand_reason}")
 
     if not supported:
+        skipped_hint = f" ({'; '.join(skipped_notes)})" if skipped_notes else ""
         detail_msg = (
-            f"Provider aktif '{active_prov}' tidak mendukung Upscale 2K native + reference image ({reason}). "
-            "Konfigurasikan API key untuk Seedream 5.5, FLUX, atau Gemini Direct di Render Settings."
+            f"Provider aktif '{active_prov}' tidak mendukung Upscale 2K native + reference image ({reason}).{skipped_hint} "
+            "Konfigurasikan endpoint & API key valid untuk Seedream 5.5 (BytePlus ModelArk), FLUX, atau Gemini Direct di Render Settings."
         )
     else:
         detail_msg = (
-            f"API key untuk provider 2K '{active_prov}' belum dikonfigurasi. "
-            "Tambahkan API key pada Render Settings sebelum melakukan Upscale 2K."
+            f"Provider 2K '{active_prov}' belum siap: {active_valid_reason}"
         )
     raise HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -5088,10 +5107,21 @@ async def upscale_character_asset_2k(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Upscale 2K failed via {resolved_2k['provider_id']}: {str(exc)}",
+            detail=f"Upscale 2K failed via {resolved_2k['provider_id']}: {_format_concise_provider_error(exc)}",
         )
 
-    validate_raster_image_file(gen_res.local_path)
+    try:
+        validate_raster_image_file(gen_res.local_path)
+    except Exception as exc:
+        if gen_res.local_path and os.path.exists(gen_res.local_path):
+            try:
+                os.remove(gen_res.local_path)
+            except OSError:
+                pass
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Upscale 2K returned invalid image via {resolved_2k['provider_id']}: {_format_concise_provider_error(exc)}",
+        )
     real_dims = _read_image_dimensions_from_path(gen_res.local_path)
     if not real_dims:
         raise HTTPException(
@@ -5342,10 +5372,21 @@ async def upscale_character_preview_2k(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Preview Upscale 2K failed via {resolved_2k['provider_id']}: {str(exc)}",
+            detail=f"Preview Upscale 2K failed via {resolved_2k['provider_id']}: {_format_concise_provider_error(exc)}",
         )
 
-    validate_raster_image_file(gen_res.local_path)
+    try:
+        validate_raster_image_file(gen_res.local_path)
+    except Exception as exc:
+        if gen_res.local_path and os.path.exists(gen_res.local_path):
+            try:
+                os.remove(gen_res.local_path)
+            except OSError:
+                pass
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Preview Upscale 2K returned invalid image via {resolved_2k['provider_id']}: {_format_concise_provider_error(exc)}",
+        )
     real_dims = _read_image_dimensions_from_path(gen_res.local_path)
     if not real_dims:
         raise HTTPException(status_code=502, detail="Failed to inspect upscaled preview dimensions.")

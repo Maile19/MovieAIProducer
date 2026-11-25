@@ -211,6 +211,31 @@ def supports_native_2k_upscale(
     return False, f"{provider_id or 'unknown'} does not support {', '.join(missing)}. ({cap['notes']})"
 
 
+def validate_2k_provider_config(
+    provider_id: Optional[str],
+    base_url: Optional[str],
+    model_id: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> tuple[bool, str]:
+    """Verify both adapter 2K capability and configured endpoint/credential compatibility."""
+    supported, reason = supports_native_2k_upscale(provider_id, model_id=model_id)
+    if not supported:
+        return False, reason
+    if not (api_key or "").strip():
+        return False, f"API key untuk provider '{provider_id}' belum dikonfigurasi."
+
+    norm = (provider_id or "").strip().lower()
+    clean_url = (base_url or "").strip().lower()
+    clean_model = (model_id or "").strip().lower()
+    if norm == "seedream-5-5" and "aliyuncs.com" in clean_url and (not clean_model or clean_model.startswith("seedream")):
+        return (
+            False,
+            "Seedream 5.5 dikonfigurasi ke endpoint Alibaba Cloud (aliyuncs.com) yang tidak menyediakan model 'seedream-5.5'. "
+            "Gunakan endpoint BytePlus ModelArk (https://ark.ap-southeast.bytepluses.com/api/v3).",
+        )
+    return True, reason
+
+
 def _resolve_dimensions(
     aspect_ratio: str,
     width: Optional[int],
@@ -352,7 +377,7 @@ class UniversalImageAdapter:
         self,
         storage_path: Optional[Path] = None,
         public_url_prefix: Optional[str] = None,
-        timeout_seconds: float = 90.0,
+        timeout_seconds: float = 120.0,
     ):
         settings = get_settings()
         self.storage_path = storage_path or settings.effective_preview_storage_path
@@ -1025,64 +1050,253 @@ class UniversalImageAdapter:
             mime_type=mime_type,
         )
 
+    @staticmethod
+    def _is_openai_gpt_image_request(provider_id: str, base_url: str, model_id: str) -> bool:
+        """Detect OpenAI GPT-Image protocol (no response_format/negative_prompt/seed, strict size enum)."""
+        pid = (provider_id or "").strip().lower()
+        burl = (base_url or "").strip().lower()
+        mid = (model_id or "").strip().lower()
+        if pid == "gpt-2-6":
+            return True
+        if "api.openai.com" in burl and mid.startswith(("gpt-image-", "chatgpt-image-")):
+            return True
+        return mid.startswith(("gpt-image-", "chatgpt-image-")) and "127.0.0.1" not in burl
+
+    @staticmethod
+    def _resolve_openai_gpt_image_size(width: int, height: int, aspect_ratio: str) -> str:
+        """Map requested dimensions to OpenAI GPT-Image supported sizes (1024x1024, 1536x1024, 1024x1536)."""
+        ar = (aspect_ratio or "").strip()
+        if ar == "1:1" or width == height:
+            return "1024x1024"
+        if width > height or ar == "16:9":
+            return "1536x1024"
+        return "1024x1536"
+
+    @staticmethod
+    def _openai_gpt_model_candidates(model_id: str) -> list[str]:
+        """Return ordered GPT-Image model candidates handling missing 'gpt-image-2.6' alias on OpenAI."""
+        clean = (model_id or "gpt-image-2.6").strip()
+        candidates = [clean]
+        if clean == "gpt-image-2.6":
+            for fallback_alias in (
+                "gpt-image-2.6-flare",
+                "gpt-image-2.6-sunburst",
+                "gpt-image-2",
+                "gpt-image-1.5",
+                "gpt-image-1",
+            ):
+                if fallback_alias not in candidates:
+                    candidates.append(fallback_alias)
+        return candidates
+
+    @staticmethod
+    def _collect_reference_files(reference_image_paths: Optional[List[str]]) -> list[tuple[str, bytes, str]]:
+        """Read valid reference image files from disk for multipart upload."""
+        files_out: list[tuple[str, bytes, str]] = []
+        if not reference_image_paths:
+            return files_out
+        for ref_path in reference_image_paths[:4]:
+            if not ref_path:
+                continue
+            p = Path(ref_path)
+            if not (p.exists() and p.is_file() and p.stat().st_size > 0):
+                continue
+            raw = p.read_bytes()
+            mime = "image/png"
+            if raw.startswith(b"\xff\xd8\xff"):
+                mime = "image/jpeg"
+            elif raw.startswith(b"RIFF") and len(raw) >= 12 and raw[8:12] == b"WEBP":
+                mime = "image/webp"
+            elif p.suffix.lower() in (".jpg", ".jpeg"):
+                mime = "image/jpeg"
+            elif p.suffix.lower() == ".webp":
+                mime = "image/webp"
+            files_out.append((p.name, raw, mime))
+        return files_out
+
+    async def _extract_openai_image_bytes(
+        self, client: httpx.AsyncClient, res: httpx.Response, provider_id: str
+    ) -> bytes:
+        """Parse OpenAI-compatible image response payload (b64_json or url)."""
+        data = res.json()
+        items = data.get("data") if isinstance(data, dict) else None
+        if not items or not isinstance(items, list) or len(items) == 0:
+            raise RuntimeError(f"No image data in response: {res.text[:180]}")
+
+        first = items[0]
+        if first.get("b64_json"):
+            return base64.b64decode(first["b64_json"])
+        if first.get("url") and first["url"].startswith("http"):
+            dl_res = await client.get(first["url"])
+            if dl_res.status_code == 200:
+                return dl_res.content
+            raise RuntimeError(f"Failed to download image from {first['url']}: HTTP {dl_res.status_code}")
+        raise RuntimeError(f"Could not retrieve raster image from {provider_id}")
+
+    async def _generate_openai_gpt_image(
+        self,
+        req: UniversalImageRequest,
+        base_url: str,
+        api_key: str,
+        model_id: str,
+        width: int,
+        height: int,
+    ) -> tuple[bytes, str]:
+        """Execute OpenAI GPT-Image generation/edit without unsupported params (response_format, negative_prompt, seed)."""
+        if not api_key:
+            raise ValueError("API Key is required for OpenAI GPT Image.")
+
+        effective_prompt = fold_negative_bans_into_positive(
+            req.prompt,
+            req.negative_prompt,
+            style_code=req.style_code,
+        )
+        gpt_size = self._resolve_openai_gpt_image_size(width, height, req.aspect_ratio)
+        ref_files = self._collect_reference_files(req.reference_image_paths)
+        candidates = self._openai_gpt_model_candidates(model_id)
+        auth_headers = {"Authorization": f"Bearer {api_key}"}
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_seconds)) as client:
+            last_err: Optional[RuntimeError] = None
+            for cand_model in candidates:
+                res: Optional[httpx.Response] = None
+                if ref_files:
+                    edit_url = f"{base_url}/images/edits"
+                    field_key = "image[]" if len(ref_files) > 1 else "image"
+                    multipart_files = [(field_key, (fname, raw, mime)) for fname, raw, mime in ref_files]
+                    form_data = {
+                        "model": cand_model,
+                        "prompt": effective_prompt,
+                        "n": "1",
+                        "size": gpt_size,
+                    }
+                    res = await client.post(edit_url, headers=auth_headers, data=form_data, files=multipart_files)
+                    # Some OpenAI-compatible proxies only expose /images/generations
+                    if res.status_code in (404, 405) and "model" not in res.text.lower():
+                        res = None
+
+                if res is None:
+                    gen_url = f"{base_url}/images/generations"
+                    payload = {
+                        "model": cand_model,
+                        "prompt": effective_prompt,
+                        "n": 1,
+                        "size": gpt_size,
+                    }
+                    res = await client.post(
+                        gen_url,
+                        headers={**auth_headers, "Content-Type": "application/json"},
+                        json=payload,
+                    )
+
+                if res.status_code == 429 or "quota" in res.text.lower() or "rate limit" in res.text.lower():
+                    raise RuntimeError(
+                        f"Rate limit / Quota exceeded on {req.provider_id} (HTTP {res.status_code}): {res.text[:180]}"
+                    )
+                if res.status_code == 200:
+                    raw_bytes = await self._extract_openai_image_bytes(client, res, req.provider_id)
+                    return raw_bytes, cand_model
+
+                err_text = res.text[:200]
+                is_model_missing = res.status_code == 404 or "model_not_found" in err_text.lower() or (
+                    "does not exist" in err_text.lower() and "model" in err_text.lower()
+                )
+                last_err = RuntimeError(f"{req.provider_id} call failed ({res.status_code}): {err_text}")
+                if is_model_missing and cand_model != candidates[-1]:
+                    logger.info("openai_gpt_image_retrying_model_alias", failed_model=cand_model)
+                    continue
+                raise last_err
+
+            raise last_err or RuntimeError(f"{req.provider_id} call failed for model {model_id}")
+
     async def _generate_openai_compatible(
         self, req: UniversalImageRequest, width: int, height: int
     ) -> UniversalImageResult:
         """Execute generation using standard /images/generations endpoint."""
-        base_url = (req.base_url_override or "http://127.0.0.1:8080/v1").rstrip("/")
+        prov_norm = (req.provider_id or "").strip().lower()
+        default_base_url = (
+            "https://api.openai.com/v1"
+            if prov_norm == "gpt-2-6"
+            else "https://ark.ap-southeast.bytepluses.com/api/v3"
+            if prov_norm == "seedream-5-5"
+            else "http://127.0.0.1:8080/v1"
+        )
+        base_url = (req.base_url_override or default_base_url).rstrip("/")
         api_key = (req.api_key_override or "").strip()
         model_id = (req.model_id or "ag/gemini-3.8-flash").strip()
 
-        call_url = f"{base_url}/images/generations"
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
-        payload: dict[str, Any] = {
-            "model": model_id,
-            "prompt": req.prompt,
-            "n": 1,
-            "size": f"{width}x{height}",
-            "response_format": "b64_json",
-        }
-        if req.negative_prompt:
-            payload["negative_prompt"] = req.negative_prompt
-        if req.seed is not None:
-            payload["seed"] = req.seed
-
-        # Attach reference image for BytePlus Seedream 5.5 / reference-capable OpenAI-compatible models
-        ref_data = _encode_first_reference(req.reference_image_paths)
-        if ref_data and req.provider_id.strip().lower() in ("seedream-5-5",):
-            _, _, data_uri = ref_data
-            payload["image"] = data_uri
-            payload["sequential_image_generation"] = "disabled"
-
         raw_bytes: Optional[bytes] = None
+        used_model_id = model_id
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_seconds)) as client:
-            res = await client.post(call_url, headers=headers, json=payload)
-            if res.status_code == 429 or "quota" in res.text.lower() or "rate limit" in res.text.lower():
-                raise RuntimeError(f"Rate limit / Quota exceeded on {req.provider_id} (HTTP {res.status_code}): {res.text[:180]}")
-            if res.status_code != 200:
-                raise RuntimeError(f"{req.provider_id} call failed ({res.status_code}): {res.text[:200]}")
+        if self._is_openai_gpt_image_request(prov_norm, base_url, model_id):
+            raw_bytes, used_model_id = await self._generate_openai_gpt_image(
+                req, base_url, api_key, model_id, width, height
+            )
+        else:
+            if prov_norm == "seedream-5-5" and "aliyuncs.com" in base_url.lower() and model_id.lower().startswith("seedream"):
+                raise RuntimeError(
+                    "seedream-5-5 endpoint misconfigured: Alibaba Cloud (aliyuncs.com) does not host "
+                    f"BytePlus model '{model_id}'. Set baseUrl to BytePlus ModelArk "
+                    "(https://ark.ap-southeast.bytepluses.com/api/v3)."
+                )
 
-            data = res.json()
-            items = data.get("data") if isinstance(data, dict) else None
-            if not items or not isinstance(items, list) or len(items) == 0:
-                raise RuntimeError(f"No image data in response: {res.text[:180]}")
+            call_url = f"{base_url}/images/generations"
+            headers: dict[str, str] = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
 
-            first = items[0]
-            if first.get("b64_json"):
-                raw_bytes = base64.b64decode(first["b64_json"])
-            elif first.get("url") and first["url"].startswith("http"):
-                dl_res = await client.get(first["url"])
-                if dl_res.status_code == 200:
-                    raw_bytes = dl_res.content
-                else:
-                    raise RuntimeError(f"Failed to download image from {first['url']}: HTTP {dl_res.status_code}")
+            payload: dict[str, Any] = {
+                "model": model_id,
+                "prompt": req.prompt,
+                "n": 1,
+                "size": f"{width}x{height}",
+                "response_format": "b64_json",
+            }
+            if req.negative_prompt:
+                payload["negative_prompt"] = req.negative_prompt
+            if req.seed is not None:
+                payload["seed"] = req.seed
 
-        if not raw_bytes:
-            raise RuntimeError(f"Could not retrieve raster image from {req.provider_id}")
+            # Attach reference image for BytePlus Seedream 5.5 / reference-capable OpenAI-compatible models
+            ref_data = _encode_first_reference(req.reference_image_paths)
+            if ref_data and prov_norm == "seedream-5-5":
+                _, _, data_uri = ref_data
+                payload["image"] = data_uri
+                # sequential_image_generation is only supported on Seedream 4.0/4.5/5.0-lite, rejected on 5.0 Pro/5.5
+                if any(v in model_id.lower() for v in ("4-0", "4.0", "4-5", "4.5", "lite")):
+                    payload["sequential_image_generation"] = "disabled"
+
+            async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_seconds)) as client:
+                res = await client.post(call_url, headers=headers, json=payload)
+
+                # Retry once on BytePlus Seedream 400 size/parameter rejection using safe presets
+                if res.status_code == 400 and prov_norm == "seedream-5-5":
+                    err_low = res.text.lower()
+                    retry_payload = dict(payload)
+                    changed = False
+                    if "pixel" in err_low or "size" in err_low:
+                        retry_payload["size"] = "2K" if max(width, height) >= 1536 else "1K"
+                        changed = True
+                    if any(tok in err_low for tok in ("negative_prompt", "seed", "sequential_image_generation", "unknown")):
+                        retry_payload.pop("sequential_image_generation", None)
+                        if "negative_prompt" in err_low and "negative_prompt" in retry_payload:
+                            retry_payload["prompt"] = fold_negative_bans_into_positive(
+                                retry_payload["prompt"],
+                                retry_payload.pop("negative_prompt", None),
+                                style_code=req.style_code,
+                            )
+                        if "seed" in err_low:
+                            retry_payload.pop("seed", None)
+                        changed = True
+                    if changed:
+                        res = await client.post(call_url, headers=headers, json=retry_payload)
+
+                if res.status_code == 429 or "quota" in res.text.lower() or "rate limit" in res.text.lower():
+                    raise RuntimeError(f"Rate limit / Quota exceeded on {req.provider_id} (HTTP {res.status_code}): {res.text[:180]}")
+                if res.status_code != 200:
+                    raise RuntimeError(f"{req.provider_id} call failed ({res.status_code}): {res.text[:200]}")
+
+                raw_bytes = await self._extract_openai_image_bytes(client, res, req.provider_id)
 
         local_path, local_url, mime_type, actual_w, actual_h = _save_raw_image(
             raw_bytes,
@@ -1097,7 +1311,7 @@ class UniversalImageAdapter:
             local_path=local_path,
             local_url=local_url,
             provider_id=req.provider_id,
-            model_id=model_id,
+            model_id=used_model_id,
             width=actual_w,
             height=actual_h,
             is_2k=max(actual_w, actual_h) >= 1920,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 from types import SimpleNamespace
 import uuid
 from unittest.mock import AsyncMock, patch
@@ -566,3 +567,179 @@ def test_upscale_2k_and_revert_1k_end_to_end(client: TestClient, auth_headers: d
     assert r_sub.status_code == 200
     assert r_sub.json()["is_2k"] is False
     assert r_sub.json()["resolution_width"] == 1024
+
+
+def test_upscale_2k_skips_misconfigured_seedream_and_isolates_failure(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    """Verify misconfigured Seedream endpoint is not auto-routed, upscale errors are concise, and DB/manifest/normal generate stay isolated."""
+    from backend.app.core.config import get_settings
+    from backend.app.infrastructure.database.models.character import CharacterModel
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session
+
+    settings = get_settings()
+    storage_dir = settings.effective_preview_storage_path
+    storage_dir.mkdir(parents=True, exist_ok=True)
+
+    proj_resp = client.post(
+        "/api/v1/projects",
+        json={"title": "Upscale Isolation Test", "target_style_code": "#Style 02"},
+        headers=auth_headers,
+    )
+    assert proj_resp.status_code == 201
+    project_id = proj_resp.json()["data"]["id"]
+
+    char_resp = client.post(
+        f"/api/v1/projects/{project_id}/characters",
+        json={
+            "name": "Aria Vance",
+            "role": "PROTAGONIST",
+            "base_prompt": "28yo woman with dark braided hair and weathered jacket",
+            "dna_seed": 112233,
+        },
+        headers=auth_headers,
+    )
+    assert char_resp.status_code == 201
+    char_id = char_resp.json()["data"]["id"]
+
+    card1_1k = storage_dir / f"iso_c1_1k_{uuid.uuid4().hex[:6]}.png"
+    Image.new("RGB", (1024, 1024), (175, 175, 175)).save(card1_1k, format="PNG")
+    card1_1k_url = f"/api/v1/assets/previews/{card1_1k.name}"
+
+    engine = create_engine(f"sqlite:///{settings.database_path}")
+    with Session(engine) as db:
+        c = db.execute(select(CharacterModel).where(CharacterModel.id == uuid.UUID(char_id))).scalar_one()
+        c.closeup_image_url = card1_1k_url
+        c.sheet_metadata = {
+            "closeup": {
+                "image_url": card1_1k_url,
+                "width": 1024,
+                "height": 1024,
+                "resolution_width": 1024,
+                "resolution_height": 1024,
+                "is_2k": False,
+                "status": "completed",
+            }
+        }
+        db.commit()
+
+    # 1. Exact production scenario: gpt-2-6 active + seedream-5-5 misconfigured with aliyuncs.com
+    put_mis = client.put(
+        f"/api/v1/projects/{project_id}/render-provider",
+        json={
+            "activeProviderId": "gpt-2-6",
+            "applyToAllScenes": True,
+            "configs": {
+                "gpt-2-6": {
+                    "baseUrl": "https://api.openai.com/v1",
+                    "apiKey": "sk-proj-test",
+                    "modelId": "gpt-image-2.6",
+                },
+                "seedream-5-5": {
+                    "baseUrl": "https://ws-os66oybk9aerfdmb.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+                    "apiKey": "sk-ws-alibaba-key",
+                    "modelId": "seedream-5.5",
+                },
+            },
+            "freePortals": [],
+        },
+    )
+    assert put_mis.status_code == 200
+
+    res_422 = client.post(
+        f"/api/v1/bible/characters/{char_id}/upscale-asset",
+        json={"slot_key": "closeup"},
+        headers=auth_headers,
+    )
+    assert res_422.status_code == 422
+    err_422 = res_422.json()["error"]
+    assert err_422["code"] == "UPSCALE_2K_PROVIDER_UNSUPPORTED"
+    assert "aliyuncs.com" in err_422["message"]
+
+    # 2. Valid BytePlus Seedream config where upstream raises empty ReadTimeout("") -> concise 502 + zero DB corruption
+    put_valid = client.put(
+        f"/api/v1/projects/{project_id}/render-provider",
+        json={
+            "activeProviderId": "gpt-2-6",
+            "applyToAllScenes": True,
+            "configs": {
+                "gpt-2-6": {
+                    "baseUrl": "https://api.openai.com/v1",
+                    "apiKey": "sk-proj-test",
+                    "modelId": "gpt-image-2.6",
+                },
+                "seedream-5-5": {
+                    "baseUrl": "https://ark.ap-southeast.bytepluses.com/api/v3",
+                    "apiKey": "sk-byteplus-valid",
+                    "modelId": "seedream-5.5",
+                },
+            },
+            "freePortals": [],
+        },
+    )
+    assert put_valid.status_code == 200
+
+    with patch("backend.app.api.v1.bible.UniversalImageAdapter") as MockAdapterCls:
+        MockAdapterCls.return_value.generate_image = AsyncMock(side_effect=httpx.ReadTimeout(""))
+        res_502 = client.post(
+            f"/api/v1/bible/characters/{char_id}/upscale-asset",
+            json={"slot_key": "closeup"},
+            headers=auth_headers,
+        )
+    assert res_502.status_code == 502
+    assert "ReadTimeout" in res_502.json()["error"]["message"]
+
+    # DB & sheet_metadata for Card 1 must be 100% untouched
+    with Session(engine) as db:
+        c_after = db.execute(select(CharacterModel).where(CharacterModel.id == uuid.UUID(char_id))).scalar_one()
+        assert c_after.closeup_image_url == card1_1k_url
+        assert c_after.sheet_metadata["closeup"]["image_url"] == card1_1k_url
+        assert c_after.sheet_metadata["closeup"]["is_2k"] is False
+
+    # 3. Normal 1K generation on another card (Card 3 front) still works seamlessly
+    front_out = storage_dir / f"iso_front_1k_{uuid.uuid4().hex[:6]}.png"
+    Image.new("RGB", (1024, 1536), (170, 170, 170)).save(front_out, format="PNG")
+
+    async def fake_normal_1k(req: UniversalImageRequest):
+        return UniversalImageResult(
+            local_path=str(front_out),
+            local_url=f"/api/v1/assets/previews/{front_out.name}",
+            provider_id="gpt-2-6",
+            model_id="gpt-image-2.6-flare",
+            width=1024,
+            height=1536,
+            is_2k=False,
+            seed=req.seed,
+            mime_type="image/png",
+        )
+
+    with patch("backend.app.api.v1.bible.UniversalImageAdapter") as MockAdapterCls:
+        MockAdapterCls.return_value.generate_image = AsyncMock(side_effect=fake_normal_1k)
+        res_front = client.post(
+            f"/api/v1/characters/{char_id}/generate-asset",
+            json={"target_type": "turnaround", "angle": "front", "aspect_ratio": "3:4"},
+            headers=auth_headers,
+        )
+    assert res_front.status_code == 200
+    assert res_front.json()["status"] == "completed"
+    assert res_front.json()["provider"] == "gpt-2-6"
+
+    # 4. Preview upscale failure leaves preview_manifest.json 100% untouched
+    token = f"iso_{uuid.uuid4().hex[:8]}"
+    temp_dir = settings.effective_preview_storage_path.parent / "temp_previews" / token
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    (temp_dir / "closeup.png").write_bytes(card1_1k.read_bytes())
+    manifest_path = temp_dir / "preview_manifest.json"
+    orig_manifest = {"closeup": {"active_file": "closeup.png", "resolution_width": 1024, "resolution_height": 1024, "is_2k": False}}
+    manifest_path.write_text(json.dumps(orig_manifest), encoding="utf-8")
+
+    with patch("backend.app.api.v1.bible.UniversalImageAdapter") as MockAdapterCls:
+        MockAdapterCls.return_value.generate_image = AsyncMock(side_effect=RuntimeError("Upstream error"))
+        res_prev = client.post(
+            f"/api/v1/projects/{project_id}/characters/preview/upscale",
+            json={"preview_token": token, "slot": "closeup", "name": "Aria"},
+            headers=auth_headers,
+        )
+    assert res_prev.status_code == 502
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == orig_manifest
