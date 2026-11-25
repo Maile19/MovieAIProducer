@@ -489,6 +489,12 @@ export interface CharacterSheetMeta {
   status?: string;
 }
 
+export interface Upscale2KTarget {
+  width: number;
+  height: number;
+  aspect_ratio: string;
+}
+
 export interface SheetPromptItem {
   slot: string;
   card_title: string;
@@ -510,6 +516,24 @@ export interface SheetPromptItem {
   negative_prompt_override?: string | null;
   effective_negative_prompt?: string;
   has_override?: boolean;
+  upscale_2k_prompt?: string;
+  upscale_2k_negative_prompt?: string;
+  upscale_2k_target?: Upscale2KTarget;
+  style_gate_mode?: "full" | "light_override" | "strict_bypass" | string;
+}
+
+export interface Upscale2KPromptResponse {
+  status: string;
+  character_id: string;
+  character_name: string;
+  slot_key: "closeup" | "front";
+  dna_seed: number;
+  style_code: string;
+  style_gate_mode: "full" | "light_override" | "strict_bypass" | string;
+  upscale_2k_prompt: string;
+  upscale_2k_negative_prompt: string;
+  upscale_2k_target: Upscale2KTarget;
+  has_override?: boolean;
 }
 
 export interface CharacterSheetPromptsResponse {
@@ -526,10 +550,14 @@ export interface CharacterSheetUploadResponse {
   status: string;
   message: string;
   image_url: string;
+  previous_1k_url?: string | null;
   slot: string;
   character_id: string;
   width: number;
   height: number;
+  resolution_width?: number;
+  resolution_height?: number;
+  is_2k?: boolean;
   sheet_metadata: CharacterSheetMeta;
 }
 
@@ -1612,7 +1640,56 @@ export const api = {
     getSheetPrompts: async (
       characterId: string
     ): Promise<CharacterSheetPromptsResponse> => {
-      return apiRequest<CharacterSheetPromptsResponse>(`/characters/${characterId}/sheet-prompts`);
+      return apiRequest<CharacterSheetPromptsResponse>(`/bible/characters/${characterId}/sheet-prompts`);
+    },
+    getUpscalePrompt: async (
+      characterId: string,
+      slotKey: "closeup" | "front"
+    ): Promise<Upscale2KPromptResponse> => {
+      return apiRequest<Upscale2KPromptResponse>(
+        `/bible/characters/${characterId}/upscale-prompt?slot_key=${encodeURIComponent(slotKey)}`
+      );
+    },
+    downloadCharacterAsset: async (
+      characterId: string,
+      slotKey: "closeup" | "front",
+      characterName?: string
+    ): Promise<string> => {
+      const baseUrl = getApiBaseUrl();
+      const url = `${baseUrl}/bible/characters/${characterId}/download-asset?slot_key=${encodeURIComponent(slotKey)}`;
+      const response = await fetch(url, {
+        method: "GET",
+        credentials: "include",
+      });
+      if (!response.ok) {
+        let errorDetail = response.statusText || "Gagal mengunduh aset.";
+        try {
+          const errJson = await response.json();
+          errorDetail = getErrorMessage(errJson, errorDetail);
+        } catch {
+          // ignore
+        }
+        throw new ApiError(response.status, errorDetail, "DOWNLOAD_ASSET_FAILED");
+      }
+      const cd = response.headers.get("Content-Disposition") || "";
+      const fnMatch = cd.match(/filename="?([^";\n]+)"?/i);
+      const fallbackSlug =
+        (characterName || "character")
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "") || "character";
+      const filename = fnMatch?.[1]?.trim() || `${fallbackSlug}_${slotKey}_1k.png`;
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = blobUrl;
+      anchor.download = filename;
+      anchor.style.display = "none";
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1500);
+      return filename;
     },
     uploadCharacterSheet: async (
       characterId: string,

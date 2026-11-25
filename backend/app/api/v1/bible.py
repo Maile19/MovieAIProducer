@@ -3424,6 +3424,64 @@ async def _fetch_character_sheet_rag_cues(
         return ""
 
 
+def _resolve_upscale_2k_slot(slot_key: str | None) -> str:
+    """Strictly validate Upscale 2K Kit slot scope: ONLY 'closeup' and 'front' are allowed."""
+    norm = (slot_key or "").strip().lower()
+    if norm in ("closeup", "close_up", "headshot", "portrait", "master_closeup", "slot_1"):
+        return "closeup"
+    if norm in ("front", "turnaround_front"):
+        return "front"
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"Upscale 2K Kit is only available for 'closeup' (Card 1) and 'front' (Card 3). Invalid slot_key: '{slot_key}'.",
+    )
+
+
+def _build_slot_upscale_2k_payload(
+    *,
+    character: CharacterModel,
+    project: ProjectModel | None,
+    bible: MasterProductionBibleModel | None,
+    slot_key: str,
+    active_style_code: str,
+    compiled: dict[str, Any] | None = None,
+    effective: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Deterministically compile Frozen Upscale 2K prompt payload for closeup/front without calling AI providers."""
+    if compiled is None:
+        compiled = compile_sheet_prompt(
+            character=character,
+            project=project,
+            bible=bible,
+            slot=slot_key,
+        )
+    if effective is None:
+        override = _resolve_sheet_override(character, [slot_key])
+        effective = _apply_sheet_overrides(compiled, override, active_style_code)
+
+    upscale_compiled = compile_upscale_2k_prompt(
+        slot_key=slot_key,
+        style_code=active_style_code,
+        base_positive_prompt=effective["effective_prompt"],
+        base_negative_prompt=effective["effective_negative_prompt"],
+        style_family=compiled.get("style_family", "photorealistic"),
+        has_override=effective["has_override"],
+    )
+    return {
+        "upscale_2k_prompt": upscale_compiled["positive_prompt"],
+        "upscale_2k_negative_prompt": upscale_compiled["negative_prompt"],
+        "upscale_2k_target": {
+            "width": upscale_compiled["target_width"],
+            "height": upscale_compiled["target_height"],
+            "aspect_ratio": upscale_compiled["aspect_ratio"],
+        },
+        "style_gate_mode": upscale_compiled["routing_mode"],
+        "style_code": upscale_compiled["style_code"],
+        "has_override": effective["has_override"],
+    }
+
+
+@router.get("/bible/characters/{character_id}/sheet-prompts", status_code=status.HTTP_200_OK)
 @router.get("/characters/{character_id}/sheet-prompts", status_code=status.HTTP_200_OK)
 async def get_character_sheet_prompts(
     character_id: str,
@@ -3478,6 +3536,23 @@ async def get_character_sheet_prompts(
             f"--aspect_ratio: {compiled['recommended_aspect_ratio']}\n"
             f"--seed: {compiled['dna_seed']}"
         )
+        upscale_fields: dict[str, Any] = {}
+        if s in ("closeup", "front"):
+            up_payload = _build_slot_upscale_2k_payload(
+                character=char,
+                project=proj,
+                bible=mpb,
+                slot_key=s,
+                active_style_code=active_style_code,
+                compiled=compiled,
+                effective=effective,
+            )
+            upscale_fields = {
+                "upscale_2k_prompt": up_payload["upscale_2k_prompt"],
+                "upscale_2k_negative_prompt": up_payload["upscale_2k_negative_prompt"],
+                "upscale_2k_target": up_payload["upscale_2k_target"],
+                "style_gate_mode": up_payload["style_gate_mode"],
+            }
         prompts_map[s] = {
             "slot": s,
             "card_title": compiled["card_title"],
@@ -3493,6 +3568,7 @@ async def get_character_sheet_prompts(
             "routing_mode": compiled.get("routing_mode"),
             "layers_applied": compiled.get("layers_applied", []),
             **effective,
+            **upscale_fields,
         }
 
     # Also compile prompts for character dynamic states (#State 01 - #State 05)
@@ -3549,6 +3625,107 @@ async def get_character_sheet_prompts(
     }
 
 
+@router.get("/bible/characters/{character_id}/upscale-prompt", status_code=status.HTTP_200_OK)
+@router.get("/characters/{character_id}/upscale-prompt", status_code=status.HTTP_200_OK)
+async def get_character_upscale_2k_prompt(
+    character_id: str,
+    slot_key: str = Query(..., description="Must be 'closeup' or 'front'"),
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Read-only deterministic Frozen Upscale 2K Prompt endpoint for Card 1 (closeup) & Card 3 (front)."""
+    norm_slot = _resolve_upscale_2k_slot(slot_key)
+    c_uuid = _parse_uuid(character_id, "character_id")
+    char = (await session.execute(select(CharacterModel).where(CharacterModel.id == c_uuid))).scalar_one_or_none()
+    if not char:
+        raise HTTPException(status_code=404, detail="Character not found")
+
+    if not char.dna_seed:
+        char.dna_seed = int(hashlib.sha256(str(char.id).encode()).hexdigest()[:8], 16) % 900000 + 100000
+        await session.commit()
+
+    proj = (await session.execute(select(ProjectModel).where(ProjectModel.id == char.project_id))).scalar_one_or_none()
+    mpb_stmt = (
+        select(MasterProductionBibleModel)
+        .where(MasterProductionBibleModel.project_id == char.project_id)
+        .order_by(MasterProductionBibleModel.version.desc())
+        .limit(1)
+    )
+    mpb = (await session.execute(mpb_stmt)).scalar_one_or_none()
+
+    active_style_code = (
+        (mpb.style_parameters.get("master_style_code") if mpb and mpb.style_parameters else None)
+        or (proj.target_style_code if proj else None)
+        or "#Style 01"
+    )
+    payload = _build_slot_upscale_2k_payload(
+        character=char,
+        project=proj,
+        bible=mpb,
+        slot_key=norm_slot,
+        active_style_code=active_style_code,
+    )
+    return {
+        "status": "ok",
+        "character_id": str(char.id),
+        "character_name": char.name,
+        "slot_key": norm_slot,
+        "dna_seed": char.dna_seed,
+        **payload,
+    }
+
+
+@router.get("/bible/characters/{character_id}/download-asset", status_code=status.HTTP_200_OK)
+@router.get("/characters/{character_id}/download-asset", status_code=status.HTTP_200_OK)
+async def download_character_asset(
+    character_id: str,
+    slot_key: str = Query(..., description="Must be 'closeup' or 'front'"),
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> FileResponse:
+    """Download Card 1 (closeup) or Card 3 (front) image as an attachment (Chrome Android safe)."""
+    norm_slot = _resolve_upscale_2k_slot(slot_key)
+    c_uuid = _parse_uuid(character_id, "character_id")
+    char = (await session.execute(select(CharacterModel).where(CharacterModel.id == c_uuid))).scalar_one_or_none()
+    if not char:
+        raise HTTPException(status_code=404, detail="Character not found")
+
+    current_url = getattr(char, _SLOT_URL_ATTR_MAP[norm_slot], None)
+    if not current_url:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Slot '{norm_slot}' does not have an image yet.",
+        )
+
+    local_path = _url_to_local_path(current_url)
+    if not local_path or not os.path.exists(local_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Image file for '{norm_slot}' could not be located on disk.",
+        )
+
+    char_slug = re.sub(r"[^a-z0-9]+", "-", (char.name or "character").lower()).strip("-") or "character"
+    ext = Path(local_path).suffix.lstrip(".").lower() or "png"
+    media_type_map = {
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "webp": "image/webp",
+    }
+    media_type = media_type_map.get(ext, "application/octet-stream")
+    download_filename = f"{char_slug}_{norm_slot}_1k.{ext}"
+    return FileResponse(
+        path=local_path,
+        media_type=media_type,
+        filename=download_filename,
+        headers={
+            "Content-Disposition": f'attachment; filename="{download_filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.post("/bible/characters/{character_id}/upload-sheet", status_code=status.HTTP_200_OK)
 @router.post("/characters/{character_id}/upload-sheet", status_code=status.HTTP_200_OK)
 async def upload_character_sheet(
     character_id: str,
@@ -3610,29 +3787,27 @@ async def upload_character_sheet(
     storage_dir.mkdir(parents=True, exist_ok=True)
 
     file_uuid = uuid.uuid4().hex[:8]
-    filename = f"char_{str(char.id)[:8]}_{slot_key}_{file_uuid}.png"
+    ts_ms = int(time.time() * 1000)
+    filename = f"char_{str(char.id)[:8]}_{slot_key}_{ts_ms}_{file_uuid}.png"
     target_path = storage_dir / filename
     target_path.write_bytes(processed_bytes)
 
+    real_dims = _read_image_dimensions_from_path(target_path)
+    if real_dims:
+        width, height = real_dims
+    is_2k = bool(max(width, height) >= 1920)
+
     new_url = f"/api/v1/assets/previews/{filename}"
 
+    meta = dict(char.sheet_metadata or {})
+    prev_entry = meta.get(slot_key) if isinstance(meta.get(slot_key), dict) else {}
+    prev_active_url = getattr(char, _SLOT_URL_ATTR_MAP[slot_key], None)
+    previous_1k_url = prev_entry.get("previous_1k_url")
+    if prev_active_url and not prev_entry.get("is_2k"):
+        previous_1k_url = prev_active_url
+
     # Update character column in SQLite
-    if slot_key == "closeup":
-        char.closeup_image_url = new_url
-    elif slot_key == "front":
-        char.front_image_url = new_url
-    elif slot_key == "side":
-        char.side_image_url = new_url
-    elif slot_key == "three_quarter":
-        char.three_quarter_image_url = new_url
-    elif slot_key == "back":
-        char.back_image_url = new_url
-    elif slot_key == "tpose":
-        char.tpose_image_url = new_url
-    elif slot_key == "action":
-        char.action_image_url = new_url
-    elif slot_key == "expression":
-        char.expression_image_url = new_url
+    setattr(char, _SLOT_URL_ATTR_MAP[slot_key], new_url)
 
     # Compile prompt for metadata persistence
     proj = (await session.execute(select(ProjectModel).where(ProjectModel.id == char.project_id))).scalar_one_or_none()
@@ -3645,9 +3820,9 @@ async def upload_character_sheet(
     mpb = (await session.execute(mpb_stmt)).scalar_one_or_none()
     compiled = compile_sheet_prompt(character=char, project=proj, bible=mpb, slot=slot_key)
 
-    meta = dict(char.sheet_metadata or {})
     meta[slot_key] = {
         "image_url": new_url,
+        "previous_1k_url": previous_1k_url,
         "source": "manual_upload",
         "original_filename": file.filename,
         "content_type": file.content_type or "image/png",
@@ -3656,7 +3831,7 @@ async def upload_character_sheet(
         "height": height,
         "resolution_width": width,
         "resolution_height": height,
-        "is_2k": max(width, height) >= 1920,
+        "is_2k": is_2k,
         "prompt": compiled["positive_prompt"],
         "negative_prompt": compiled["negative_prompt"],
         "anchors_used": compiled["anchors_used"],
@@ -3675,10 +3850,14 @@ async def upload_character_sheet(
         "status": "completed",
         "message": f"Successfully uploaded and synced {slot_key} image",
         "image_url": new_url,
+        "previous_1k_url": previous_1k_url,
         "slot": slot_key,
         "character_id": str(char.id),
         "width": width,
         "height": height,
+        "resolution_width": width,
+        "resolution_height": height,
+        "is_2k": is_2k,
         "sheet_metadata": char.sheet_metadata[slot_key],
     }
 

@@ -31,6 +31,7 @@ import {
   ShieldAlert,
   RotateCcw,
   AlertCircle,
+  Download,
 } from "lucide-react";
 import { Character, SheetPromptItem, Project, api, FlowProxyStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -525,9 +526,21 @@ export default function CharacterMatrixTab({
   const [uploadingSlots, setUploadingSlots] = useState<Record<string, boolean>>({});
   const [uploadErrors, setUploadErrors] = useState<Record<string, string | null>>({});
 
-  // Per-card Upscale 2K locking, preview dimensions, and toast feedback
+  // Per-card Upscale 2K Kit modal, revert locking, preview dimensions, and toast feedback
   const [upscalingSlots, setUpscalingSlots] = useState<Record<string, boolean>>({});
-  const [upscaleErrors, setUpscaleErrors] = useState<Record<string, string | null>>({});
+  const [upscaleKitModal, setUpscaleKitModal] = useState<{
+    slotKey: "closeup" | "front";
+    positivePrompt: string;
+    negativePrompt: string;
+    target: { width: number; height: number; aspect_ratio: string };
+    styleGateMode: string;
+    clipboardCopied: boolean;
+    downloadStatus: "downloading" | "downloaded" | "error";
+    downloadFilename?: string | null;
+    downloadError?: string | null;
+    isLoadingPrompt?: boolean;
+    copiedField?: "pos" | "neg" | null;
+  } | null>(null);
   const [previewSlotMeta, setPreviewSlotMeta] = useState<
     Record<
       "closeup" | "expression" | "front",
@@ -1637,9 +1650,33 @@ export default function CharacterMatrixTab({
     setUploadErrors((prev) => ({ ...prev, [slot]: null }));
     try {
       const effectiveCharId = await ensurePersistedCharacter(selectedChar);
-      await api.bible.uploadCharacterSheet(effectiveCharId, slot, file);
-      onRefresh();
-      fetchPrompts(effectiveCharId);
+      const res = await api.bible.uploadCharacterSheet(effectiveCharId, slot, file);
+      const resW = res.resolution_width ?? res.width;
+      const resH = res.resolution_height ?? res.height;
+      const is2k = !!res.is_2k || (!!resW && !!resH && Math.max(resW, resH) >= 1920);
+      onPatchCharacterAsset?.(effectiveCharId, slot, res.image_url, {
+        ...(res.sheet_metadata || {}),
+        resolution_width: resW,
+        resolution_height: resH,
+        width: resW,
+        height: resH,
+        is_2k: is2k,
+        previous_1k_url: res.previous_1k_url ?? res.sheet_metadata?.previous_1k_url ?? null,
+        source: "manual_upload",
+      });
+      setUpscaleKitModal((prev) => (prev && prev.slotKey === slot ? null : prev));
+      showUpscaleToast(
+        is2k ? "2K Ready Terpasang" : "Foto Diperbarui",
+        is2k
+          ? `Aset ${slot === "closeup" ? "Card 1 (Close-Up)" : slot === "front" ? "Card 3 (Front View)" : slot} terpasang pada ${resW}×${resH} (2K Ready).`
+          : `Aset ${slot} diperbarui (${resW}×${resH}).`
+      );
+      if (onSilentRefresh) {
+        await onSilentRefresh();
+      } else {
+        await onRefresh({ silent: true });
+      }
+      await fetchPrompts(effectiveCharId);
     } catch (err: any) {
       console.error("Upload sheet error:", err);
       setUploadErrors((prev) => ({
@@ -2358,65 +2395,118 @@ export default function CharacterMatrixTab({
     }
   };
 
-  const handleUpscaleAsset = async (slotKey: string, stateId?: string) => {
+  const handleOpenUpscale2kKit = async (slotKey: "closeup" | "front") => {
     if (!selectedChar?.id || isLocked) return;
     if (isBatchActive) {
-      showBatchLockNotification(stateId ? "Upscale 2K Dynamic State" : `Upscale 2K (${slotKey})`);
+      showBatchLockNotification(`Upscale 2K Kit (${slotKey})`);
       return;
     }
-    const lockKey = stateId ? `state_${stateId}` : slotKey;
-    if (upscalingSlots[lockKey]) return;
+    const cached = sheetPrompts[slotKey];
+    const defaultTarget =
+      slotKey === "closeup"
+        ? { width: 2048, height: 2048, aspect_ratio: "1:1" }
+        : { width: 1536, height: 2048, aspect_ratio: "3:4" };
 
-    setUpscalingSlots((prev) => ({ ...prev, [lockKey]: true }));
-    setUpscaleErrors((prev) => ({ ...prev, [lockKey]: null }));
+    let positivePrompt = cached?.upscale_2k_prompt || "";
+    let negativePrompt = cached?.upscale_2k_negative_prompt || "";
+    let target = cached?.upscale_2k_target || defaultTarget;
+    let styleGateMode = cached?.style_gate_mode || cached?.routing_mode || "full";
+
+    // Synchronous clipboard write inside click gesture before any async awaits
+    const copyPromise = positivePrompt ? copyTextToClipboard(positivePrompt) : Promise.resolve(false);
+
+    setUpscaleKitModal({
+      slotKey,
+      positivePrompt,
+      negativePrompt,
+      target,
+      styleGateMode,
+      clipboardCopied: false,
+      downloadStatus: "downloading",
+      downloadFilename: null,
+      downloadError: null,
+      isLoadingPrompt: !positivePrompt,
+      copiedField: null,
+    });
+
+    const downloadPromise = api.bible
+      .downloadCharacterAsset(selectedChar.id, slotKey, selectedChar.name)
+      .then((filename) => ({ ok: true as const, filename }))
+      .catch((err: any) => ({ ok: false as const, error: err?.message || "Gagal mengunduh file gambar." }));
+
+    const promptPromise = positivePrompt
+      ? Promise.resolve(null)
+      : api.bible.getUpscalePrompt(selectedChar.id, slotKey).catch(() => null);
+
+    const [copiedFromCache, downloadRes, fetchedPrompt] = await Promise.all([
+      copyPromise,
+      downloadPromise,
+      promptPromise,
+    ]);
+
+    let finalCopied = copiedFromCache;
+    if (fetchedPrompt) {
+      positivePrompt = fetchedPrompt.upscale_2k_prompt || positivePrompt;
+      negativePrompt = fetchedPrompt.upscale_2k_negative_prompt || negativePrompt;
+      target = fetchedPrompt.upscale_2k_target || target;
+      styleGateMode = fetchedPrompt.style_gate_mode || styleGateMode;
+      if (positivePrompt && !finalCopied) {
+        finalCopied = await copyTextToClipboard(positivePrompt);
+      }
+    }
+
+    setUpscaleKitModal((prev) =>
+      prev && prev.slotKey === slotKey
+        ? {
+            ...prev,
+            positivePrompt,
+            negativePrompt,
+            target,
+            styleGateMode,
+            clipboardCopied: finalCopied,
+            isLoadingPrompt: false,
+            downloadStatus: downloadRes.ok ? "downloaded" : "error",
+            downloadFilename: downloadRes.ok ? downloadRes.filename : null,
+            downloadError: downloadRes.ok ? null : downloadRes.error,
+          }
+        : prev
+    );
+
+    if (downloadRes.ok) {
+      showUpscaleToast(
+        "Upscale 2K Kit Siap",
+        "Foto ter-download & Frozen Prompt ter-copy — proses ke 2K lalu klik Replace"
+      );
+    } else {
+      showUpscaleToast(
+        "Frozen Prompt Siap",
+        finalCopied
+          ? "Frozen Prompt ter-copy. Gunakan tombol Download Foto Lagi di modal."
+          : "Silakan copy Frozen Prompt & download foto dari modal Upscale 2K Kit."
+      );
+    }
+  };
+
+  const handleRetryKitDownload = async (slotKey: "closeup" | "front") => {
+    if (!selectedChar?.id) return;
+    setUpscaleKitModal((prev) =>
+      prev && prev.slotKey === slotKey
+        ? { ...prev, downloadStatus: "downloading", downloadError: null }
+        : prev
+    );
     try {
-      const res = await api.bible.upscaleCharacterAsset(selectedChar.id, {
-        slot_key: stateId ? "state" : slotKey,
-        state_id: stateId,
-      });
-      const patchMeta = {
-        resolution_width: res.resolution_width,
-        resolution_height: res.resolution_height,
-        width: res.resolution_width,
-        height: res.resolution_height,
-        is_2k: res.is_2k,
-        previous_1k_url: res.previous_1k_url ?? null,
-        provider: res.provider,
-        model: res.model,
-      };
-      if (stateId) {
-        onPatchCharacterStateAsset?.(selectedChar.id, stateId, res.image_url, patchMeta);
-      } else {
-        onPatchCharacterAsset?.(selectedChar.id, slotKey, res.image_url, patchMeta);
-      }
-      if (res.is_2k) {
-        showUpscaleToast(
-          "Upscale 2K Selesai",
-          `Upscaled to ${res.resolution_width}×${res.resolution_height} (2K)${res.auto_routed_from ? ` via ${res.provider}` : ""}`
-        );
-      } else {
-        showUpscaleToast(
-          "Resolusi Di Bawah 2K",
-          `Provider mengembalikan ${res.resolution_width}×${res.resolution_height} (< 1920px). Tidak dilabeli 2K.`,
-          true
-        );
-      }
-      if (onSilentRefresh) {
-        await onSilentRefresh();
-      } else {
-        await onRefresh({ silent: true });
-      }
-      await fetchPrompts(selectedChar.id);
+      const filename = await api.bible.downloadCharacterAsset(selectedChar.id, slotKey, selectedChar.name);
+      setUpscaleKitModal((prev) =>
+        prev && prev.slotKey === slotKey
+          ? { ...prev, downloadStatus: "downloaded", downloadFilename: filename, downloadError: null }
+          : prev
+      );
     } catch (err: any) {
-      const msg =
-        err?.response?.data?.detail?.message ||
-        err?.response?.data?.detail ||
-        err?.message ||
-        "Gagal melakukan Upscale 2K.";
-      setUpscaleErrors((prev) => ({ ...prev, [lockKey]: String(msg) }));
-      showUpscaleToast("Upscale 2K Gagal", String(msg), true);
-    } finally {
-      setUpscalingSlots((prev) => ({ ...prev, [lockKey]: false }));
+      setUpscaleKitModal((prev) =>
+        prev && prev.slotKey === slotKey
+          ? { ...prev, downloadStatus: "error", downloadError: err?.message || "Gagal mengunduh file gambar." }
+          : prev
+      );
     }
   };
 
@@ -2430,7 +2520,6 @@ export default function CharacterMatrixTab({
     if (upscalingSlots[lockKey]) return;
 
     setUpscalingSlots((prev) => ({ ...prev, [lockKey]: true }));
-    setUpscaleErrors((prev) => ({ ...prev, [lockKey]: null }));
     try {
       const res = await api.bible.revertCharacterAsset(selectedChar.id, {
         slot_key: stateId ? "state" : slotKey,
@@ -2460,84 +2549,7 @@ export default function CharacterMatrixTab({
       }
     } catch (err: any) {
       const msg = err?.message || "Gagal mengembalikan ke versi 1K.";
-      setUpscaleErrors((prev) => ({ ...prev, [lockKey]: String(msg) }));
       showUpscaleToast("Revert 1K Gagal", String(msg), true);
-    } finally {
-      setUpscalingSlots((prev) => ({ ...prev, [lockKey]: false }));
-    }
-  };
-
-  const handleUpscalePreview = async (slot: "closeup" | "expression" | "front") => {
-    if (!previewToken) return;
-    const lockKey = `preview_${slot}`;
-    if (upscalingSlots[lockKey] || isPreviewGenerating) return;
-    setUpscalingSlots((prev) => ({ ...prev, [lockKey]: true }));
-    setPreviewError(null);
-    setPreviewErrorMsg(null);
-    try {
-      const res = await api.bible.upscaleCharacterPreview(projectId, {
-        preview_token: previewToken,
-        slot,
-        name: newCharName.trim() || "Character",
-        role: newCharRole,
-        base_visual_prompt: newCharPrompt.trim(),
-        dna_seed: newCharSeed,
-      });
-      if (slot === "closeup") setPreviewCloseupUrl(res.image_url);
-      else if (slot === "expression") setPreviewExpressionUrl(res.image_url);
-      else setPreviewFrontUrl(res.image_url);
-      setPreviewSlotMeta((prev) => ({
-        ...prev,
-        [slot]: {
-          resolution_width: res.resolution_width,
-          resolution_height: res.resolution_height,
-          is_2k: res.is_2k,
-          previous_1k_url: res.previous_1k_url ?? null,
-        },
-      }));
-      showUpscaleToast(
-        res.is_2k ? "Preview Upscale 2K Selesai" : "Resolusi Di Bawah 2K",
-        res.is_2k
-          ? `Upscaled to ${res.resolution_width}×${res.resolution_height} (2K)`
-          : `Provider mengembalikan ${res.resolution_width}×${res.resolution_height} (< 1920px).`,
-        !res.is_2k
-      );
-    } catch (err: any) {
-      const msg = err?.message || "Gagal upscale preview ke 2K.";
-      setPreviewError(msg);
-      setPreviewErrorMsg(msg);
-    } finally {
-      setUpscalingSlots((prev) => ({ ...prev, [lockKey]: false }));
-    }
-  };
-
-  const handleRevertPreview = async (slot: "closeup" | "expression" | "front") => {
-    if (!previewToken) return;
-    const lockKey = `preview_${slot}`;
-    if (upscalingSlots[lockKey]) return;
-    setUpscalingSlots((prev) => ({ ...prev, [lockKey]: true }));
-    try {
-      const res = await api.bible.revertCharacterPreview(projectId, {
-        preview_token: previewToken,
-        slot,
-      });
-      if (slot === "closeup") setPreviewCloseupUrl(res.image_url);
-      else if (slot === "expression") setPreviewExpressionUrl(res.image_url);
-      else setPreviewFrontUrl(res.image_url);
-      setPreviewSlotMeta((prev) => ({
-        ...prev,
-        [slot]: {
-          resolution_width: res.resolution_width,
-          resolution_height: res.resolution_height,
-          is_2k: res.is_2k,
-          previous_1k_url: null,
-        },
-      }));
-      showUpscaleToast("Preview Dikembalikan ke 1K", `Reverted to ${res.resolution_width}×${res.resolution_height}`);
-    } catch (err: any) {
-      const msg = err?.message || "Gagal revert preview ke 1K.";
-      setPreviewError(msg);
-      setPreviewErrorMsg(msg);
     } finally {
       setUpscalingSlots((prev) => ({ ...prev, [lockKey]: false }));
     }
@@ -2558,8 +2570,9 @@ export default function CharacterMatrixTab({
     const isRendering = !!renderingTargets[targetKey];
     const isUploading = !!uploadingSlots[cfg.slot];
     const isUpscaling = !!upscalingSlots[cfg.slot];
+    const isUpscale2kSupportedSlot = cfg.slot === "closeup" || cfg.slot === "front";
     const statusText = pollStatus[targetKey];
-    const errorMsg = upscaleErrors[cfg.slot] || uploadErrors[cfg.slot] || targetErrors[targetKey];
+    const errorMsg = uploadErrors[cfg.slot] || targetErrors[targetKey];
     const imageUrl = cfg.imageUrl;
     const promptItem = sheetPrompts[cfg.slot];
     const meta = selectedChar?.sheet_metadata?.[cfg.slot];
@@ -2569,7 +2582,7 @@ export default function CharacterMatrixTab({
     const is2k = !!meta?.is_2k || (!!resW && !!resH && Math.max(resW, resH) >= 1920);
     const hasPrev1k = !!meta?.previous_1k_url;
     const resBadgeLabel = is2k
-      ? `2K • ${resW || 2048}×${resH || 2048}`
+      ? `2K Ready • ${resW || (cfg.slot === "closeup" ? 2048 : 1536)}×${resH || 2048}`
       : resW && resH
       ? `1K • ${resW}×${resH}`
       : cfg.aspect === "16:9"
@@ -2683,7 +2696,7 @@ export default function CharacterMatrixTab({
                 )}
                 title={is2k ? "Native 2K Verified" : "Standard 1K Render"}
               >
-                {is2k ? "2K Ready" : resBadgeLabel}
+                {resBadgeLabel}
               </span>
               <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/img:opacity-100 transition-opacity flex items-center justify-center">
                 <ZoomIn className="w-5 h-5 text-amber-400" />
@@ -2829,12 +2842,15 @@ export default function CharacterMatrixTab({
             </button>
           </div>
 
-          {/* Row 3: Upscale Quality 2K & Revert 1K Controls */}
-          {!isLocked && imageUrl && (
+          {/* Row 3: Manual Upscale 2K Kit & Revert 1K Controls (Card 1 Close-Up & Card 3 Front View ONLY) */}
+          {!isLocked && imageUrl && isUpscale2kSupportedSlot && (
             <div className="flex items-center gap-1.5">
               <button
                 type="button"
-                onClick={() => handleUpscaleAsset(cfg.slot)}
+                onClick={() => {
+                  if (is2k) return;
+                  handleOpenUpscale2kKit(cfg.slot as "closeup" | "front");
+                }}
                 disabled={isBatchActive || isRendering || isUploading || isUpscaling || is2k}
                 className={cn(
                   "flex-1 py-1.5 px-2 rounded-lg border font-bold flex items-center justify-center gap-1 transition-colors disabled:opacity-60",
@@ -2849,18 +2865,13 @@ export default function CharacterMatrixTab({
                     ? `Sudah 2K (${resBadgeLabel})`
                     : isBatchActive
                     ? "Dinonaktifkan saat Batch Orchestrator sedang aktif"
-                    : "Refine & Upscale aset ini ke resolusi native 2K via Cloud API"
+                    : "Download foto 1K, copy Frozen Prompt 2K, & buka Upscale 2K Kit"
                 }
               >
-                {isUpscaling ? (
-                  <>
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                    <span>Upscaling 2K...</span>
-                  </>
-                ) : is2k ? (
+                {is2k ? (
                   <>
                     <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                    <span>2K Ready ({resW}×{resH})</span>
+                    <span>2K Ready ({resW || (cfg.slot === "closeup" ? 2048 : 1536)}×{resH || 2048})</span>
                   </>
                 ) : (
                   <>
@@ -2874,11 +2885,15 @@ export default function CharacterMatrixTab({
                 <button
                   type="button"
                   onClick={() => handleRevertAsset(cfg.slot)}
-                  disabled={isBatchActive || isUpscaling || isRendering}
+                  disabled={isBatchActive || isUpscaling || isRendering || isUploading}
                   className="py-1.5 px-2 rounded-lg bg-canvas hover:bg-elevated border border-border hover:border-amber-500/40 text-obsidian-secondary hover:text-amber-300 font-semibold flex items-center justify-center gap-1 transition-colors disabled:opacity-50"
                   title="Kembalikan ke versi 1K sebelumnya"
                 >
-                  <RotateCcw className="w-3 h-3" />
+                  {isUpscaling ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <RotateCcw className="w-3 h-3" />
+                  )}
                   <span>Revert 1K</span>
                 </button>
               )}
@@ -3681,7 +3696,7 @@ export default function CharacterMatrixTab({
               ? `1K • ${stW}×${stH}`
               : "1K • 1024×1024";
             const statusText = pollStatus[targetKey];
-            const errorMsg = upscaleErrors[targetKey] || targetErrors[targetKey];
+            const errorMsg = targetErrors[targetKey];
 
             return (
               <div
@@ -3801,47 +3816,17 @@ export default function CharacterMatrixTab({
                           )}
                         </div>
                       </div>
-                      {!isLocked && (
+                      {!isLocked && stPrev1k && (
                         <div className="flex items-center gap-1.5">
                           <button
                             type="button"
-                            onClick={() => handleUpscaleAsset("state", st.id)}
-                            disabled={isBatchActive || isRendering || isStateUpscaling || stIs2k}
-                            className={cn(
-                              "flex-1 py-1 px-2 rounded-lg border text-[10px] font-bold flex items-center justify-center gap-1 transition-colors disabled:opacity-60",
-                              stIs2k
-                                ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300 cursor-default"
-                                : "bg-indigo-500/15 hover:bg-indigo-500/25 border-indigo-400/40 text-indigo-300"
-                            )}
+                            onClick={() => handleRevertAsset("state", st.id)}
+                            disabled={isBatchActive || isStateUpscaling || isRendering}
+                            className="py-1 px-2 rounded-lg bg-panel hover:bg-elevated border border-border text-[10px] font-semibold text-obsidian-secondary hover:text-amber-300 flex items-center gap-1"
                           >
-                            {isStateUpscaling ? (
-                              <>
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                                <span>Upscaling 2K...</span>
-                              </>
-                            ) : stIs2k ? (
-                              <>
-                                <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                                <span>2K Ready</span>
-                              </>
-                            ) : (
-                              <>
-                                <Sparkles className="w-3 h-3 text-indigo-300" />
-                                <span>Upscale 2K</span>
-                              </>
-                            )}
+                            <RotateCcw className="w-3 h-3" />
+                            <span>Revert 1K</span>
                           </button>
-                          {stPrev1k && (
-                            <button
-                              type="button"
-                              onClick={() => handleRevertAsset("state", st.id)}
-                              disabled={isBatchActive || isStateUpscaling || isRendering}
-                              className="py-1 px-2 rounded-lg bg-panel hover:bg-elevated border border-border text-[10px] font-semibold text-obsidian-secondary hover:text-amber-300 flex items-center gap-1"
-                            >
-                              <RotateCcw className="w-3 h-3" />
-                              <span>Revert 1K</span>
-                            </button>
-                          )}
                         </div>
                       )}
                     </div>
@@ -4291,60 +4276,17 @@ export default function CharacterMatrixTab({
                       )}
                     </div>
 
-                    {/* Independent Generate / Re-roll Close-Up + Upscale 2K Buttons */}
+                    {/* Independent Generate / Re-roll Close-Up Button */}
                     <div className="flex items-center gap-1.5">
                       <button
                         type="button"
                         onClick={() => handleGeneratePreview("closeup")}
-                        disabled={isPreviewGenerating || !!upscalingSlots["preview_closeup"] || !newCharName.trim()}
+                        disabled={isPreviewGenerating || !newCharName.trim()}
                         className="flex-1 py-1.5 px-2 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-[10px] text-amber-300 hover:text-amber-200 font-bold flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50"
                       >
                         <RefreshCw className={cn("w-3 h-3 text-amber-400", isRollingCloseup && "animate-spin")} />
                         <span>{previewCloseupUrl ? "Re-roll Close-Up (Slot 1)" : "Generate Close-Up (Master Anchor)"}</span>
                       </button>
-
-                      {previewCloseupUrl && previewToken && (
-                        <button
-                          type="button"
-                          onClick={() => handleUpscalePreview("closeup")}
-                          disabled={isPreviewGenerating || isRollingCloseup || !!upscalingSlots["preview_closeup"] || !!previewSlotMeta.closeup?.is_2k}
-                          className={cn(
-                            "py-1.5 px-2.5 rounded-lg border text-[10px] font-bold flex items-center justify-center gap-1 transition-colors disabled:opacity-60",
-                            previewSlotMeta.closeup?.is_2k
-                              ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300 cursor-default"
-                              : "bg-indigo-500/15 hover:bg-indigo-500/25 border-indigo-400/40 text-indigo-300"
-                          )}
-                        >
-                          {upscalingSlots["preview_closeup"] ? (
-                            <>
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                              <span>Upscaling 2K...</span>
-                            </>
-                          ) : previewSlotMeta.closeup?.is_2k ? (
-                            <>
-                              <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                              <span>2K Ready</span>
-                            </>
-                          ) : (
-                            <>
-                              <Sparkles className="w-3 h-3 text-indigo-300" />
-                              <span>Upscale 2K</span>
-                            </>
-                          )}
-                        </button>
-                      )}
-
-                      {previewSlotMeta.closeup?.previous_1k_url && previewToken && (
-                        <button
-                          type="button"
-                          onClick={() => handleRevertPreview("closeup")}
-                          disabled={isPreviewGenerating || !!upscalingSlots["preview_closeup"]}
-                          className="py-1.5 px-2 rounded-lg bg-canvas hover:bg-elevated border border-border text-[10px] font-semibold text-obsidian-secondary hover:text-amber-300 flex items-center gap-1"
-                        >
-                          <RotateCcw className="w-3 h-3" />
-                          <span>Revert 1K</span>
-                        </button>
-                      )}
                     </div>
                   </div>
 
@@ -4438,44 +4380,12 @@ export default function CharacterMatrixTab({
                           <button
                             type="button"
                             onClick={() => handleGeneratePreview("expression")}
-                            disabled={isPreviewGenerating || !!upscalingSlots["preview_expression"] || !newCharName.trim()}
+                            disabled={isPreviewGenerating || !newCharName.trim()}
                             className="flex-1 py-1 px-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[9px] text-obsidian-secondary hover:text-amber-300 font-semibold flex items-center justify-center gap-1 transition-colors disabled:opacity-50"
                           >
                             <RefreshCw className={cn("w-2.5 h-2.5 text-amber-400", isRollingExpression && "animate-spin")} />
                             <span>Re-roll Expression</span>
                           </button>
-                          {previewExpressionUrl && previewToken && (
-                            <button
-                              type="button"
-                              onClick={() => handleUpscalePreview("expression")}
-                              disabled={isPreviewGenerating || isRollingExpression || !!upscalingSlots["preview_expression"] || !!previewSlotMeta.expression?.is_2k}
-                              className={cn(
-                                "py-1 px-1.5 rounded border text-[9px] font-bold flex items-center gap-1 disabled:opacity-60",
-                                previewSlotMeta.expression?.is_2k
-                                  ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
-                                  : "bg-indigo-500/15 hover:bg-indigo-500/25 border-indigo-400/40 text-indigo-300"
-                              )}
-                            >
-                              {upscalingSlots["preview_expression"] ? (
-                                <Loader2 className="w-2.5 h-2.5 animate-spin" />
-                              ) : previewSlotMeta.expression?.is_2k ? (
-                                <span>2K Ready</span>
-                              ) : (
-                                <span>Upscale 2K</span>
-                              )}
-                            </button>
-                          )}
-                          {previewSlotMeta.expression?.previous_1k_url && previewToken && (
-                            <button
-                              type="button"
-                              onClick={() => handleRevertPreview("expression")}
-                              disabled={isPreviewGenerating || !!upscalingSlots["preview_expression"]}
-                              className="py-1 px-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[9px] text-obsidian-secondary hover:text-amber-300"
-                              title="Revert 1K"
-                            >
-                              Revert 1K
-                            </button>
-                          )}
                         </div>
                       </div>
 
@@ -4557,44 +4467,12 @@ export default function CharacterMatrixTab({
                           <button
                             type="button"
                             onClick={() => handleGeneratePreview("front")}
-                            disabled={isPreviewGenerating || !!upscalingSlots["preview_front"] || !newCharName.trim()}
+                            disabled={isPreviewGenerating || !newCharName.trim()}
                             className="flex-1 py-1 px-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[9px] text-obsidian-secondary hover:text-amber-300 font-semibold flex items-center justify-center gap-1 transition-colors disabled:opacity-50"
                           >
                             <RefreshCw className={cn("w-2.5 h-2.5 text-amber-400", isRollingFront && "animate-spin")} />
                             <span>Re-roll Full Body</span>
                           </button>
-                          {previewFrontUrl && previewToken && (
-                            <button
-                              type="button"
-                              onClick={() => handleUpscalePreview("front")}
-                              disabled={isPreviewGenerating || isRollingFront || !!upscalingSlots["preview_front"] || !!previewSlotMeta.front?.is_2k}
-                              className={cn(
-                                "py-1 px-1.5 rounded border text-[9px] font-bold flex items-center gap-1 disabled:opacity-60",
-                                previewSlotMeta.front?.is_2k
-                                  ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
-                                  : "bg-indigo-500/15 hover:bg-indigo-500/25 border-indigo-400/40 text-indigo-300"
-                              )}
-                            >
-                              {upscalingSlots["preview_front"] ? (
-                                <Loader2 className="w-2.5 h-2.5 animate-spin" />
-                              ) : previewSlotMeta.front?.is_2k ? (
-                                <span>2K Ready</span>
-                              ) : (
-                                <span>Upscale 2K</span>
-                              )}
-                            </button>
-                          )}
-                          {previewSlotMeta.front?.previous_1k_url && previewToken && (
-                            <button
-                              type="button"
-                              onClick={() => handleRevertPreview("front")}
-                              disabled={isPreviewGenerating || !!upscalingSlots["preview_front"]}
-                              className="py-1 px-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[9px] text-obsidian-secondary hover:text-amber-300"
-                              title="Revert 1K"
-                            >
-                              Revert 1K
-                            </button>
-                          )}
                         </div>
                       </div>
                     </div>
@@ -5943,6 +5821,204 @@ export default function CharacterMatrixTab({
               <p className="text-[11px] text-obsidian-secondary leading-relaxed font-mono">
                 {batchLockToast.message}
               </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Manual Upscale 2K Kit Modal (Card 1 Close-Up & Card 3 Front View) */}
+      {upscaleKitModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="w-full max-w-xl max-h-[92vh] flex flex-col rounded-2xl bg-panel border border-indigo-500/40 shadow-2xl text-obsidian-primary font-mono text-xs overflow-hidden">
+            {/* Modal Header */}
+            <div className="flex items-start justify-between gap-2 p-4 border-b border-border bg-canvas/70">
+              <div className="space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-cinzel font-bold text-indigo-300 text-sm flex items-center gap-1.5">
+                    <Sparkles className="w-4 h-4 text-indigo-400" />
+                    <span>Upscale 2K Kit</span>
+                  </span>
+                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-500/15 text-indigo-200 border border-indigo-400/30">
+                    {upscaleKitModal.slotKey === "closeup"
+                      ? `Card 1: Close-Up • ${upscaleKitModal.target.width}×${upscaleKitModal.target.height} (${upscaleKitModal.target.aspect_ratio})`
+                      : `Card 3: Front View • ${upscaleKitModal.target.width}×${upscaleKitModal.target.height} (${upscaleKitModal.target.aspect_ratio})`}
+                  </span>
+                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 uppercase">
+                    {(upscaleKitModal.styleGateMode || "full").toUpperCase()}
+                  </span>
+                </div>
+                <p className="text-[11px] text-obsidian-muted font-sans">
+                  Proses gambar 1K ke 2K di tool pilihan Anda menggunakan Frozen Prompt di bawah, lalu tukar hasilnya via <strong className="text-emerald-300">Replace Hasil 2K</strong>.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setUpscaleKitModal(null)}
+                className="p-1.5 rounded-lg text-obsidian-muted hover:text-obsidian-primary hover:bg-canvas transition-colors"
+                title="Tutup modal"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Scrollable Body */}
+            <div className="p-4 space-y-3 overflow-y-auto flex-1">
+              {/* Status Strip: Download & Clipboard + Fallback Download */}
+              <div className="p-3 rounded-xl bg-canvas border border-border flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <div className="space-y-1 text-[11px]">
+                  <div className="flex items-center gap-1.5">
+                    {upscaleKitModal.downloadStatus === "downloading" ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 text-amber-400 animate-spin shrink-0" />
+                        <span className="text-amber-300">Mengunduh foto 1K...</span>
+                      </>
+                    ) : upscaleKitModal.downloadStatus === "downloaded" ? (
+                      <>
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        <span className="text-emerald-300">
+                          Foto 1K ter-download{upscaleKitModal.downloadFilename ? ` (${upscaleKitModal.downloadFilename})` : ""}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                        <span className="text-amber-300">
+                          {upscaleKitModal.downloadError || "Gunakan tombol Download Foto Lagi di samping."}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    {upscaleKitModal.clipboardCopied ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        <span className="text-emerald-300">Frozen Upscale 2K Prompt ter-copy ke clipboard</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5 text-obsidian-muted shrink-0" />
+                        <span className="text-obsidian-secondary">Tap Copy Frozen Prompt di bawah jika clipboard belum terisi</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => handleRetryKitDownload(upscaleKitModal.slotKey)}
+                  disabled={upscaleKitModal.downloadStatus === "downloading"}
+                  className="px-3 py-1.5 rounded-lg bg-panel hover:bg-elevated border border-border hover:border-indigo-400/50 text-obsidian-primary text-[11px] font-bold flex items-center justify-center gap-1.5 shrink-0 transition-colors disabled:opacity-50"
+                >
+                  <Download className="w-3.5 h-3.5 text-indigo-300" />
+                  <span>Download Foto Lagi</span>
+                </button>
+              </div>
+
+              {/* Frozen Upscale 2K Prompt (Positive) */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-amber-400">
+                    Frozen Upscale 2K Prompt (Positive)
+                  </span>
+                  <button
+                    type="button"
+                    disabled={!upscaleKitModal.positivePrompt || !!upscaleKitModal.isLoadingPrompt}
+                    onClick={async () => {
+                      const ok = await copyTextToClipboard(upscaleKitModal.positivePrompt);
+                      setUpscaleKitModal((prev) =>
+                        prev ? { ...prev, clipboardCopied: ok || prev.clipboardCopied, copiedField: ok ? "pos" : null } : prev
+                      );
+                      setTimeout(() => {
+                        setUpscaleKitModal((prev) => (prev && prev.copiedField === "pos" ? { ...prev, copiedField: null } : prev));
+                      }, 2000);
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-600 text-canvas font-bold text-[11px] flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                  >
+                    {upscaleKitModal.copiedField === "pos" ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{upscaleKitModal.copiedField === "pos" ? "Copied ✓" : "Copy Frozen Prompt"}</span>
+                  </button>
+                </div>
+                {upscaleKitModal.isLoadingPrompt ? (
+                  <div className="p-4 rounded-xl bg-canvas border border-border flex items-center gap-2 text-obsidian-muted">
+                    <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+                    <span>Memuat Frozen Upscale 2K Prompt...</span>
+                  </div>
+                ) : (
+                  <textarea
+                    readOnly
+                    rows={5}
+                    value={upscaleKitModal.positivePrompt}
+                    onFocus={(e) => e.currentTarget.select()}
+                    className="w-full rounded-xl bg-canvas border border-border p-3 text-[11px] leading-relaxed text-obsidian-primary focus:outline-none focus:border-indigo-400/60 resize-y"
+                  />
+                )}
+              </div>
+
+              {/* Frozen Negative Prompt (if non-empty) */}
+              {upscaleKitModal.negativePrompt?.trim() && (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-rose-300">
+                      Frozen Negative Prompt
+                    </span>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const ok = await copyTextToClipboard(upscaleKitModal.negativePrompt);
+                        setUpscaleKitModal((prev) =>
+                          prev ? { ...prev, copiedField: ok ? "neg" : null } : prev
+                        );
+                        setTimeout(() => {
+                          setUpscaleKitModal((prev) => (prev && prev.copiedField === "neg" ? { ...prev, copiedField: null } : prev));
+                        }, 2000);
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-canvas hover:bg-elevated border border-border text-obsidian-secondary hover:text-obsidian-primary font-semibold text-[11px] flex items-center gap-1.5 transition-colors"
+                    >
+                      {upscaleKitModal.copiedField === "neg" ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{upscaleKitModal.copiedField === "neg" ? "Copied ✓" : "Copy Negative"}</span>
+                    </button>
+                  </div>
+                  <textarea
+                    readOnly
+                    rows={3}
+                    value={upscaleKitModal.negativePrompt}
+                    onFocus={(e) => e.currentTarget.select()}
+                    className="w-full rounded-xl bg-canvas border border-border p-3 text-[11px] leading-relaxed text-obsidian-secondary focus:outline-none focus:border-rose-400/50 resize-y"
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 border-t border-border bg-canvas/70 flex flex-wrap items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => setUpscaleKitModal(null)}
+                className="px-3.5 py-2 rounded-xl bg-panel hover:bg-elevated border border-border text-obsidian-secondary hover:text-obsidian-primary font-semibold text-xs transition-colors"
+              >
+                Tutup
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const slot = upscaleKitModal.slotKey;
+                  document.getElementById(`upload-sheet-${slot}`)?.click();
+                }}
+                disabled={!!uploadingSlots[upscaleKitModal.slotKey]}
+                className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-canvas font-bold text-xs flex items-center gap-2 shadow-lg transition-colors disabled:opacity-50"
+              >
+                {uploadingSlots[upscaleKitModal.slotKey] ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Mengunggah Hasil 2K...</span>
+                  </>
+                ) : (
+                  <>
+                    <Upload className="w-4 h-4" />
+                    <span>Replace Hasil 2K</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </div>

@@ -743,3 +743,225 @@ def test_upscale_2k_skips_misconfigured_seedream_and_isolates_failure(
         )
     assert res_prev.status_code == 502
     assert json.loads(manifest_path.read_text(encoding="utf-8")) == orig_manifest
+
+
+def test_manual_upscale_2k_kit_prompts_download_upload_and_revert(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    """Test Manual Upscale 2K Kit: sheet-prompts preload, /upscale-prompt, /download-asset, PIL upload 2K/1K detection & /revert-asset."""
+    import io
+    from backend.app.core.config import get_settings
+    from backend.app.infrastructure.database.models.character import CharacterModel
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session
+
+    settings = get_settings()
+    storage_dir = settings.effective_preview_storage_path
+    storage_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Create projects across Style Gate modes: full (#Style 02), light_override (#Style 12), strict_bypass (#Style 15)
+    def _create_char(style_code: str, name: str):
+        p_resp = client.post(
+            "/api/v1/projects",
+            json={"title": f"Kit {style_code}", "target_style_code": style_code},
+            headers=auth_headers,
+        )
+        assert p_resp.status_code == 201
+        pid = p_resp.json()["data"]["id"]
+        c_resp = client.post(
+            f"/api/v1/projects/{pid}/characters",
+            json={
+                "name": name,
+                "role": "PROTAGONIST",
+                "base_prompt": "32yo woman with sharp eyes, dark braided hair, olive jacket",
+                "dna_seed": 778899,
+            },
+            headers=auth_headers,
+        )
+        assert c_resp.status_code == 201
+        cid = c_resp.json()["data"]["id"]
+        return pid, cid
+
+    pid_full, cid_full = _create_char("#Style 02", "Sari Nusantara")
+    pid_12, cid_12 = _create_char("#Style 12", "Vex Metahuman")
+    pid_15, cid_15 = _create_char("#Style 15", "Ren Anime")
+
+    # Apply manual sheet_override on Card 1 for full mode
+    ov = client.put(
+        f"/api/v1/projects/{pid_full}/characters/{cid_full}/sheet-overrides",
+        json={"slot_key": "closeup", "prompt_override": "MANUAL_KIT_OVERRIDE_CLOSEUP"},
+        headers=auth_headers,
+    )
+    assert ov.status_code == 200
+
+    # 2. Assert GET /sheet-prompts & GET /upscale-prompt NEVER invoke AI image providers
+    with patch("backend.app.api.v1.bible.UniversalImageAdapter") as MockAdapterCls, \
+         patch("backend.app.api.v1.bible.get_image_provider") as MockGetProv:
+        # GET /sheet-prompts preload
+        sp_resp = client.get(f"/api/v1/bible/characters/{cid_full}/sheet-prompts", headers=auth_headers)
+        assert sp_resp.status_code == 200, sp_resp.text
+        prompts_map = sp_resp.json()["data"]["prompts"]
+
+        # Only closeup & front have upscale_2k_* fields
+        for allowed_slot, expected_target in (
+            ("closeup", {"width": 2048, "height": 2048, "aspect_ratio": "1:1"}),
+            ("front", {"width": 1536, "height": 2048, "aspect_ratio": "3:4"}),
+        ):
+            item = prompts_map[allowed_slot]
+            assert item["upscale_2k_target"] == expected_target
+            assert item["style_gate_mode"] == "full"
+            assert UPSCALE_2K_LOCK_PREFIX in item["upscale_2k_prompt"]
+            assert item["upscale_2k_negative_prompt"]
+
+        assert "MANUAL_KIT_OVERRIDE_CLOSEUP" in prompts_map["closeup"]["upscale_2k_prompt"]
+        for disallowed_slot in ("expression", "side", "three_quarter", "back", "tpose", "action"):
+            assert "upscale_2k_prompt" not in prompts_map[disallowed_slot]
+            assert "upscale_2k_target" not in prompts_map[disallowed_slot]
+
+        # GET /upscale-prompt read-only endpoint for closeup & front
+        up_c1 = client.get(
+            f"/api/v1/bible/characters/{cid_full}/upscale-prompt?slot_key=closeup",
+            headers=auth_headers,
+        )
+        assert up_c1.status_code == 200
+        assert up_c1.json()["upscale_2k_target"] == {"width": 2048, "height": 2048, "aspect_ratio": "1:1"}
+        assert "MANUAL_KIT_OVERRIDE_CLOSEUP" in up_c1.json()["upscale_2k_prompt"]
+
+        up_c3 = client.get(
+            f"/api/v1/bible/characters/{cid_full}/upscale-prompt?slot_key=front",
+            headers=auth_headers,
+        )
+        assert up_c3.status_code == 200
+        assert up_c3.json()["upscale_2k_target"] == {"width": 1536, "height": 2048, "aspect_ratio": "3:4"}
+
+        # Reject all other slots with HTTP 400
+        for bad_slot in ("expression", "side", "three_quarter", "back", "tpose", "action", "state", "unknown"):
+            bad_res = client.get(
+                f"/api/v1/bible/characters/{cid_full}/upscale-prompt?slot_key={bad_slot}",
+                headers=auth_headers,
+            )
+            assert bad_res.status_code in (400, 422), f"Expected 400/422 for {bad_slot}, got {bad_res.status_code}"
+
+        # Style Gate compliance: #Style 12 (light_override, strips cgi/3d render/unreal engine) & #Style 15 (strict_bypass)
+        up_12 = client.get(
+            f"/api/v1/bible/characters/{cid_12}/upscale-prompt?slot_key=closeup",
+            headers=auth_headers,
+        )
+        assert up_12.status_code == 200
+        d12 = up_12.json()
+        assert d12["style_gate_mode"] == "light_override"
+        neg12 = {t.strip().lower() for t in d12["upscale_2k_negative_prompt"].split(",")}
+        assert "cgi" not in neg12
+        assert "3d render" not in neg12
+        assert "unreal engine" not in neg12
+
+        up_15 = client.get(
+            f"/api/v1/bible/characters/{cid_15}/upscale-prompt?slot_key=front",
+            headers=auth_headers,
+        )
+        assert up_15.status_code == 200
+        d15 = up_15.json()
+        assert d15["style_gate_mode"] == "strict_bypass"
+        assert "visible pores on cheeks" not in d15["upscale_2k_prompt"]
+        assert "Hasselblad" not in d15["upscale_2k_prompt"]
+
+        MockAdapterCls.assert_not_called()
+        MockGetProv.assert_not_called()
+
+    # 3. Seed 1K files for closeup & front and test GET /download-asset
+    c1_1k_path = storage_dir / f"kit_c1_1k_{uuid.uuid4().hex[:6]}.png"
+    c3_1k_path = storage_dir / f"kit_c3_1k_{uuid.uuid4().hex[:6]}.png"
+    Image.new("RGB", (1024, 1024), (120, 120, 120)).save(c1_1k_path, format="PNG")
+    Image.new("RGB", (768, 1024), (120, 120, 120)).save(c3_1k_path, format="PNG")
+    c1_1k_url = f"/api/v1/assets/previews/{c1_1k_path.name}"
+    c3_1k_url = f"/api/v1/assets/previews/{c3_1k_path.name}"
+
+    engine = create_engine(f"sqlite:///{settings.database_path}")
+    with Session(engine) as db:
+        c = db.execute(select(CharacterModel).where(CharacterModel.id == uuid.UUID(cid_full))).scalar_one()
+        c.closeup_image_url = c1_1k_url
+        c.front_image_url = c3_1k_url
+        c.sheet_metadata = {
+            "closeup": {"image_url": c1_1k_url, "width": 1024, "height": 1024, "is_2k": False},
+            "front": {"image_url": c3_1k_url, "width": 768, "height": 1024, "is_2k": False},
+        }
+        db.commit()
+
+    dl_c1 = client.get(
+        f"/api/v1/bible/characters/{cid_full}/download-asset?slot_key=closeup",
+        headers=auth_headers,
+    )
+    assert dl_c1.status_code == 200
+    assert "attachment" in dl_c1.headers.get("content-disposition", "").lower()
+    assert "sari-nusantara_closeup_1k.png" in dl_c1.headers.get("content-disposition", "")
+    assert dl_c1.headers.get("cache-control") == "no-store"
+
+    dl_c3 = client.get(
+        f"/api/v1/bible/characters/{cid_full}/download-asset?slot_key=front",
+        headers=auth_headers,
+    )
+    assert dl_c3.status_code == 200
+    assert "attachment" in dl_c3.headers.get("content-disposition", "").lower()
+    assert "sari-nusantara_front_1k.png" in dl_c3.headers.get("content-disposition", "")
+
+    for bad_slot in ("expression", "side", "back", "state"):
+        dl_bad = client.get(
+            f"/api/v1/bible/characters/{cid_full}/download-asset?slot_key={bad_slot}",
+            headers=auth_headers,
+        )
+        assert dl_bad.status_code in (400, 422)
+
+    # 4. Manual Replace via upload-sheet: 2048x2048 -> is_2k=True + previous_1k_url saved; <1920 -> is_2k=False
+    buf_2k = io.BytesIO()
+    Image.new("RGB", (2048, 2048), (180, 180, 180)).save(buf_2k, format="PNG")
+    up_2k_resp = client.post(
+        f"/api/v1/bible/characters/{cid_full}/upload-sheet",
+        data={"slot": "closeup"},
+        files={"file": ("upscaled_closeup.png", buf_2k.getvalue(), "image/png")},
+        headers=auth_headers,
+    )
+    assert up_2k_resp.status_code == 200, up_2k_resp.text
+    u2k = up_2k_resp.json()
+    assert u2k["is_2k"] is True
+    assert u2k["resolution_width"] == 2048
+    assert u2k["resolution_height"] == 2048
+    assert u2k["previous_1k_url"] == c1_1k_url
+    assert u2k["sheet_metadata"]["is_2k"] is True
+    assert u2k["sheet_metadata"]["previous_1k_url"] == c1_1k_url
+    assert u2k["sheet_metadata"]["source"] == "manual_upload"
+
+    # Card 1's new 2K URL must immediately become Master Anchor for downstream Cards 2-8
+    with Session(engine) as db:
+        c_2k = db.execute(select(CharacterModel).where(CharacterModel.id == uuid.UUID(cid_full))).scalar_one()
+        assert c_2k.closeup_image_url == u2k["image_url"]
+        compiled_side = compile_sheet_prompt(c_2k, None, None, "side")
+        assert compiled_side["ref_candidates"][0][1] == u2k["image_url"]
+
+    # Manual Replace with < 1920px on front -> is_2k=False + previous_1k_url preserved
+    buf_1k = io.BytesIO()
+    Image.new("RGB", (960, 1280), (140, 140, 140)).save(buf_1k, format="PNG")
+    up_1k_resp = client.post(
+        f"/api/v1/bible/characters/{cid_full}/upload-sheet",
+        data={"slot": "front"},
+        files={"file": ("front_1k.png", buf_1k.getvalue(), "image/png")},
+        headers=auth_headers,
+    )
+    assert up_1k_resp.status_code == 200, up_1k_resp.text
+    u1k = up_1k_resp.json()
+    assert u1k["is_2k"] is False
+    assert u1k["resolution_width"] == 960
+    assert u1k["resolution_height"] == 1280
+    assert u1k["previous_1k_url"] == c3_1k_url
+
+    # 5. POST /revert-asset reverts Card 1 back to 1K cleanly
+    rev_c1 = client.post(
+        f"/api/v1/bible/characters/{cid_full}/revert-asset",
+        json={"slot_key": "closeup"},
+        headers=auth_headers,
+    )
+    assert rev_c1.status_code == 200, rev_c1.text
+    rc1 = rev_c1.json()
+    assert rc1["image_url"] == c1_1k_url
+    assert rc1["is_2k"] is False
+    assert rc1["resolution_width"] == 1024
+    assert rc1["resolution_height"] == 1024
