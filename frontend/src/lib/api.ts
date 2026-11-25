@@ -232,10 +232,16 @@ export interface Scene {
   narrative_goal: string;
   duration_target: number;
   status: string;
+  dialogue?: string | null;
+  speaking_character?: string | null;
   preview_url?: string | null;
   preview_provider?: string | null;
   act_number: number;
   shots_count?: number;
+  camera_code?: string | null;
+  lighting_code?: string | null;
+  transition_type?: string | null;
+  audio_lead_seconds?: number | null;
   // Compatibility fields
   slug?: string;
   title?: string;
@@ -253,18 +259,66 @@ export interface Shot {
   scene_id: string;
   shot_number: number;
   composition_code?: string;
+  comp_code?: string;
   camera_code?: string;
   lens_code?: string;
   lighting_code?: string;
+  light_code?: string;
   action_code?: string;
+  act_code?: string;
   speed_code?: string;
   duration_seconds: number;
   prompt_compiled?: string;
   prompt_override?: string;
   preview_url?: string | null;
+  fg_bg_layers?: Record<string, any>;
+  custom_background?: string | null;
+  effective_background_url?: string | null;
+  background_source?: "inherited" | "custom" | string;
+  dialogue?: string | null;
+  transition_type?: string;
   status: string;
   created_at: string;
   updated_at?: string;
+}
+
+export interface DirectorPolishTake {
+  take_id: string;
+  label: string;
+  angle_rationale?: string;
+  slugline: string;
+  narrative_goal: string;
+  dialogue?: string | null;
+  camera_code: string;
+  lighting_code: string;
+  transition_type: string;
+  director_notes: string;
+  word_count?: number;
+  estimated_duration_seconds?: number;
+  passes_duration_limit?: boolean;
+}
+
+export interface DirectorPolishResult {
+  scene_id: string;
+  scene_number: number;
+  original: {
+    slugline: string;
+    narrative_goal: string;
+    dialogue?: string | null;
+    camera_code?: string;
+    lighting_code?: string;
+  };
+  suggestions: {
+    slugline: string;
+    narrative_goal: string;
+    dialogue?: string | null;
+    camera_code?: string;
+    lighting_code?: string;
+    transition_type?: string;
+    director_notes: string;
+  };
+  options?: DirectorPolishTake[];
+  message: string;
 }
 
 export interface CharacterState {
@@ -380,20 +434,46 @@ export interface MatrixCatalog {
   speeds: Array<{ code: string; name: string; fps?: number; timing?: string; [key: string]: unknown }>;
 }
 
+export interface QCSubScores {
+  narrative_pacing: number;
+  continuity_dna: number;
+  optical_coverage: number;
+  asset_readiness: number;
+}
+
+export interface QCIssue {
+  category: string;
+  severity: "CRITICAL" | "WARNING" | "INFO" | string;
+  message: string;
+  suggestion: string;
+}
+
 export interface QCReport {
   id?: string;
+  scene_id?: string;
+  scene_number?: number;
   overall_score: number;
+  overall_score_100?: number;
   passed?: boolean;
   biometric_score?: number;
   aesthetic_score?: number;
   acoustic_score?: number;
-  status?: "PASSED" | "FLAGGED" | "FAILED";
+  status?: "PASS" | "WARN" | "FAIL" | "PENDING" | "PASSED" | "FLAGGED" | "FAILED";
+  asset_status?: "ready" | "partial" | "pending_asset" | string;
+  sub_scores?: QCSubScores;
+  issues?: QCIssue[];
   metrics?: {
-    face_similarity_insightface?: number;
-    clip_text_video_score?: number;
-    aesthetic_score?: number;
-    temporal_jitter_variance?: number;
-    audio_snr_db?: number;
+    face_similarity_insightface?: number | null;
+    clip_text_video_score?: number | null;
+    aesthetic_score?: number | null;
+    temporal_jitter_variance?: number | null;
+    audio_snr_db?: number | null;
+    asset_readiness_ratio?: number;
+    dialogue_word_count?: number;
+    dialogue_max_words?: number;
+    shots_count?: number;
+    shot_duration_total?: number;
+    style_code?: string;
   };
   critical_defects?: string[];
   warnings?: string[];
@@ -401,7 +481,27 @@ export interface QCReport {
   findings_json?: string[];
 }
 
+export interface ProjectQCSummary {
+  project_id: string;
+  continuum_score: number;
+  total_scenes: number;
+  pass_count: number;
+  warn_count: number;
+  fail_count: number;
+  pending_asset_count: number;
+  status: "PASS" | "WARN" | "FAIL" | "EMPTY" | string;
+  top_gaps: Array<{ message: string; affected_scenes: number }>;
+  scene_audits: Array<{
+    scene_id: string;
+    scene_number: number;
+    overall_score_100: number;
+    status: string;
+    asset_status: string;
+  }>;
+}
+
 export interface QCEvaluateInput {
+  scene_id?: string;
   shot_id?: string;
   asset_id?: string;
   face_similarity?: number;
@@ -412,8 +512,56 @@ export interface QCEvaluateInput {
   prompt?: string;
 }
 
+export interface AudioScriptCue {
+  cue_number: number;
+  scene_id: string;
+  act_number: number;
+  scene_number: number;
+  slugline: string;
+  shot_id?: string | null;
+  shot_number: number;
+  speaker: string;
+  voice_profile: string;
+  has_voice_dna: boolean;
+  active_state_code: string;
+  emotion_cue: string;
+  text: string;
+  is_sfx: boolean;
+  word_count: number;
+  estimated_duration_seconds: number;
+  passes_duration_limit: boolean;
+  transition_type: string;
+  audio_lead_seconds: number;
+  shot_start_seconds: number;
+  shot_end_seconds: number;
+  start_seconds: number;
+  end_seconds: number;
+  speaking_rate_wps: number;
+  prosody_rate: string;
+  prosody_pitch: string;
+  pause_before_ms: number;
+  pause_after_ms: number;
+  ssml: string;
+}
+
+export interface AudioScriptData {
+  project_id: string;
+  project_title: string;
+  total_scenes: number;
+  total_cues: number;
+  spoken_cues: number;
+  sfx_cues: number;
+  total_runtime_seconds: number;
+  cues: AudioScriptCue[];
+}
+
 export interface TranspileInput {
-  provider_target: "veo" | "kling" | "runway" | "sora" | "comfyui" | "9router" | "sd35" | "flux" | string;
+  provider_target: "google_flow" | "veo" | "kling" | "seedance" | "runway" | "sora" | "comfyui" | "9router" | "flux" | string;
+  project_id?: string;
+  scene_id?: string;
+  shot_id?: string;
+  character_id?: string;
+  state_number?: number;
   style_code?: string;
   camera_code?: string;
   lens_code?: string;
@@ -422,32 +570,69 @@ export interface TranspileInput {
   act_code?: string;
   speed_code?: string;
   character_dna?: string;
+  character_name?: string;
   state_code?: string;
   wardrobe?: string;
+  physical_damage?: string;
+  emotional_anchor?: string;
   env_dna?: string;
   action_description?: string;
+  slugline?: string;
+  narrative_goal?: string;
   fg_description?: string;
   bg_description?: string;
   dialogue?: string | null;
   transition_type?: string;
+  audio_lead_seconds?: number | null;
   aspect_ratio?: string;
   preset_rules?: Record<string, any>;
   is_non_verbal?: boolean;
   model?: string;
+  genre?: string;
 }
 
 export interface TranspileResult {
   positive: string;
   negative: string;
+  positive_prompt?: string;
+  negative_prompt?: string;
   engine: string;
+  compiled_engines?: Record<string, { engine: string; positive_prompt: string; negative_prompt: string }>;
+  rag_references?: Array<Record<string, unknown>>;
   metadata?: {
     target_engine?: string;
     aspect_ratio?: string;
     codes?: Record<string, string>;
+    engine_params?: Record<string, unknown>;
+    audio_bridge?: Record<string, unknown>;
+    continuity_sources?: {
+      style_code?: string;
+      character_name?: string | null;
+      state_code?: string;
+      has_character_dna?: boolean;
+      has_wardrobe_dna?: boolean;
+      director_rag_hits?: number;
+      screenwriter_rag_hits?: number;
+    };
+    screenwriter_cues?: string | null;
     parameters?: Record<string, unknown>;
     prompt_tokens_est?: number;
     [key: string]: unknown;
   };
+}
+
+export interface DialogueAlternative {
+  id: string;
+  label: string;
+  style_note?: string;
+  dialogue: string;
+  word_count: number;
+  syllable_count?: number;
+  estimated_duration_seconds: number;
+  passes_duration_limit: boolean;
+  max_allowed_words?: number;
+  transition_type: string;
+  audio_lead_seconds: number;
 }
 
 export interface DialogueCalibrationResult {
@@ -464,6 +649,8 @@ export interface DialogueCalibrationResult {
   transition_type?: string;
   audio_lead_seconds: number;
   analysis?: string;
+  trimmed_suggestion?: string | null;
+  alternatives?: DialogueAlternative[];
 }
 
 export interface FlowAccount {
@@ -702,7 +889,11 @@ export async function apiRequest<T = unknown>(
     return null as unknown as T;
   }
 
-  return response.json();
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    return response.json();
+  }
+  return (await response.text()) as unknown as T;
 }
 
 /* =====================================================================
@@ -940,6 +1131,8 @@ export const api = {
         name: string;
         role: string;
         base_prompt: string;
+        narrative_summary?: string;
+        voice_dna_profile?: string;
         face_ref_asset_id?: string;
         voice_ref_asset_id?: string;
         dna_seed?: number;
@@ -960,6 +1153,7 @@ export const api = {
           name?: string;
           role?: string;
           archetype_and_bio?: string;
+          voice_dna_profile?: string;
           base_visual_prompt?: string;
           dna_seed?: number;
         };
@@ -969,6 +1163,7 @@ export const api = {
         name: string;
         role_suggestion: string;
         archetype_and_bio: string;
+        voice_dna_profile?: string;
         base_visual_prompt: string;
       };
     }> => {
@@ -1104,7 +1299,7 @@ export const api = {
         target_type: "turnaround" | "sheet" | "state" | string;
         angle?: "front" | "side" | "three_quarter" | "back" | "tpose" | "action" | "expression" | string;
         state_id?: string;
-        provider?: "ag_gemini_flash" | "9router" | "sd35_large_hf" | "google_flow" | string;
+        provider?: "ag_gemini_flash" | "9router" | "google_flow" | string;
         model?: string;
         prompt_override?: string;
         aspect_ratio?: string;
@@ -1263,20 +1458,27 @@ export const api = {
     calibrateDialogue: async (
       sceneId: string,
       rawText: string,
-      maxSeconds: number = 5.0
+      maxSeconds: number = 5.0,
+      characterName?: string | null
     ): Promise<{ data: DialogueCalibrationResult }> => {
       return apiRequest<{ data: DialogueCalibrationResult }>(`/scenes/${sceneId}/calibrate-dialogue`, {
         method: "POST",
-        body: JSON.stringify({ raw_text: rawText, max_seconds: maxSeconds }),
+        body: JSON.stringify({
+          raw_text: rawText,
+          max_seconds: maxSeconds,
+          ...(characterName ? { character_name: characterName } : {}),
+        }),
       });
     },
     autoSplit: async (
       sceneId: string,
-      targetDuration?: number
+      targetDuration?: number,
+      coverageStyle: string = "classic_coverage"
     ): Promise<{
       data: {
         scene_id: string;
         target_duration: number;
+        coverage_style?: string;
         shots_count: number;
         message: string;
         shots: Shot[];
@@ -1286,13 +1488,14 @@ export const api = {
         data: {
           scene_id: string;
           target_duration: number;
+          coverage_style?: string;
           shots_count: number;
           message: string;
           shots: Shot[];
         };
       }>(`/scenes/${sceneId}/auto-split`, {
         method: "POST",
-        body: JSON.stringify({ target_duration: targetDuration }),
+        body: JSON.stringify({ target_duration: targetDuration, coverage_style: coverageStyle }),
       });
     },
     listShots: async (sceneId: string): Promise<{ data: Shot[] }> => {
@@ -1315,6 +1518,36 @@ export const api = {
         method: "DELETE",
       });
     },
+    resetShotBackground: async (
+      shotId: string
+    ): Promise<{ status: string; background_source: string; message: string }> => {
+      return apiRequest(`/shots/${shotId}/reset-background`, { method: "POST" });
+    },
+    setShotCustomBackground: async (
+      shotId: string,
+      customBackground: string
+    ): Promise<{ status: string; custom_background: string; message: string }> => {
+      return apiRequest(`/shots/${shotId}/custom-background`, {
+        method: "POST",
+        body: JSON.stringify({ custom_background: customBackground }),
+      });
+    },
+    directorPolish: async (
+      sceneId: string,
+      payload?: {
+        slugline?: string;
+        narrative_goal?: string;
+        dialogue?: string;
+        style_code?: string;
+        camera_code?: string;
+        lighting_code?: string;
+      }
+    ): Promise<{ status: string; data: DirectorPolishResult }> => {
+      return apiRequest(`/scenes/${sceneId}/director-polish`, {
+        method: "POST",
+        body: JSON.stringify(payload || {}),
+      });
+    },
     generatePreview: async (
       sceneId: string,
       payload?: {
@@ -1322,7 +1555,7 @@ export const api = {
         negative_prompt?: string;
         steps?: number;
         aspect_ratio?: string;
-        provider?: "9router" | "sd35_large_hf" | "mock" | string;
+        provider?: "9router" | "mock" | string;
         model?: string;
         enable_fallback?: boolean;
       }
@@ -1374,7 +1607,7 @@ export const api = {
         negative_prompt?: string;
         steps?: number;
         aspect_ratio?: string;
-        provider?: "9router" | "sd35_large_hf" | "mock" | string;
+        provider?: "9router" | "mock" | string;
         model?: string;
         enable_fallback?: boolean;
       }
@@ -1406,7 +1639,7 @@ export const api = {
         negative_prompt?: string;
         steps?: number;
         aspect_ratio?: string;
-        provider?: "9router" | "sd35_large_hf" | "mock" | string;
+        provider?: "9router" | "mock" | string;
         model?: string;
         enable_fallback?: boolean;
       }
@@ -1481,12 +1714,33 @@ export const api = {
         premise?: string;
         clear_existing?: boolean;
         structure_type?: string;
+        enable_cold_open?: boolean;
+        selected_treatment?: any;
       }
     ): Promise<{ data: any }> => {
       return apiRequest<{ data: any }>(`/projects/${projectId}/blueprint/treatment`, {
         method: "POST",
         body: JSON.stringify(payload),
       });
+    },
+    generateTreatmentVariants: async (
+      projectId: string,
+      payload: {
+        total_scenes: number;
+        duration_mode?: string;
+        premise?: string;
+        clear_existing?: boolean;
+        structure_type?: string;
+        enable_cold_open?: boolean;
+      }
+    ): Promise<{ data: { variants: any[]; structure_type: string; total_scenes: number } }> => {
+      return apiRequest<{ data: { variants: any[]; structure_type: string; total_scenes: number } }>(
+        `/projects/${projectId}/blueprint/treatment-variants`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        }
+      );
     },
     generateAct: async (
       projectId: string,
@@ -1496,6 +1750,7 @@ export const api = {
         duration_mode?: string;
         auto_split_shots?: boolean;
         structure_type?: string;
+        enable_cold_open?: boolean;
       }
     ): Promise<{
       data: {
@@ -1564,6 +1819,7 @@ export const api = {
         auto_split_shots?: boolean;
         clear_existing?: boolean;
         structure_type?: string;
+        enable_cold_open?: boolean;
       }
     ): Promise<{ data: any }> => {
       return apiRequest<{ data: any }>(`/projects/${projectId}/blueprint/batch-write`, {
@@ -1628,9 +1884,10 @@ export const api = {
     },
   },
 
-  // Automated QC Scorecard
+  // Automated QC Scorecard & Real Continuity Audits
   qc: {
     evaluate: async (payload: {
+      scene_id?: string;
       shot_id?: string;
       asset_id?: string;
       face_similarity?: number;
@@ -1645,12 +1902,35 @@ export const api = {
         body: JSON.stringify(payload),
       });
     },
+    auditScene: async (sceneId: string): Promise<{ data: QCReport }> => {
+      return apiRequest<{ data: QCReport }>(`/qc/audit-scene/${sceneId}`, {
+        method: "POST",
+      });
+    },
+    getProjectSummary: async (projectId: string): Promise<{ data: ProjectQCSummary }> => {
+      return apiRequest<{ data: ProjectQCSummary }>(`/projects/${projectId}/qc/summary`);
+    },
   },
 
-  // Export
+  // Export & Stage S13-S15 Audio/Subtitle Script Engine
   export: {
     getProjectPackage: async (projectId: string, format: "json" | "markdown" = "json"): Promise<unknown> => {
       return apiRequest(`/projects/${projectId}/export?format=${format}`);
+    },
+    getAudioScript: async (
+      projectId: string,
+      format: "json" | "ssml" | "markdown" = "json"
+    ): Promise<{ data: AudioScriptData } | string> => {
+      return apiRequest(`/projects/${projectId}/audio-script?format=${format}`);
+    },
+    getSubtitles: async (
+      projectId: string,
+      format: "srt" | "vtt" = "srt",
+      includeSfx: boolean = false
+    ): Promise<string> => {
+      return apiRequest<string>(
+        `/projects/${projectId}/subtitles?format=${format}&include_sfx=${includeSfx ? "true" : "false"}`
+      );
     },
   },
 

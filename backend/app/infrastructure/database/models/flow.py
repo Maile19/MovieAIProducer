@@ -90,6 +90,11 @@ class FlowImageJobModel(Base):
         GUID,
         nullable=True,
     )
+    shot_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID,
+        nullable=True,
+        index=True,
+    )
     character_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID,
         nullable=True,

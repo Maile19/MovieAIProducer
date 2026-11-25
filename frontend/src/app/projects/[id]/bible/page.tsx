@@ -24,6 +24,7 @@ import {
   RefreshCw,
   Film,
   Grid,
+  AlertTriangle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -39,6 +40,7 @@ export default function ProductionBiblePage() {
   const [bible, setBible] = useState<MasterProductionBible | null>(null);
   const [characters, setCharacters] = useState<Character[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const hasLoadedRef = useRef(false);
 
   const loadBibleData = useCallback(async (options?: { silent?: boolean }) => {
@@ -47,64 +49,43 @@ export default function ProductionBiblePage() {
       if (isInitial && !options?.silent) {
         setIsLoading(true);
       }
+      setLoadError(null);
       const [projRes, bibleRes, charRes] = await Promise.allSettled([
         api.projects.get(projectId),
         api.bible.get(projectId),
         api.bible.listCharacters(projectId),
       ]);
 
+      const errors: string[] = [];
+
       if (projRes.status === "fulfilled" && projRes.value?.data) {
         setProject(projRes.value.data);
-      } else if (!project) {
-        setProject({
-          id: projectId,
-          title: "Cyberpunk Hollywood Master Cut",
-          slug: "cyberpunk-master",
-          status: "IN_PRODUCTION",
-          aspect_ratio: "2.39:1",
-          target_style_code: "#Style 01",
-          operational_stage: 4,
-          stage_name: "Character Profile & Voice DNA",
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        });
+      } else {
+        const msg = projRes.status === "rejected" ? projRes.reason?.message : "Project response was empty";
+        errors.push(`Project load failed: ${msg || "Unknown error"}`);
       }
 
       if (bibleRes.status === "fulfilled" && bibleRes.value?.data) {
         setBible(bibleRes.value.data);
-      } else if (!bible) {
-        setBible({
-          id: "bible_1",
-          project_id: projectId,
-          version: 1,
-          is_locked: false,
-          style_parameters: {
-            master_style_code: "#Style 01",
-            aspect_ratio: "2.39:1",
-            render_pipeline: "Photorealistic 35mm Film Grain",
-            film_stock: "Kodak Vision3 5219 500T",
-            anamorphic_squeeze: "2.0x Horizontal",
-            halation_level: 0.35,
-          },
-          world_rules: {
-            gravity: "earth_standard",
-            atmosphere: "naturalistic",
-          },
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        });
+      } else {
+        const msg = bibleRes.status === "rejected" ? bibleRes.reason?.message : "Bible response was empty";
+        errors.push(`Master Production Bible load failed: ${msg || "Unknown error"}`);
       }
 
       if (charRes.status === "fulfilled" && charRes.value?.data) {
         setCharacters(charRes.value.data);
       }
+
+      if (errors.length > 0) {
+        setLoadError(errors.join(" | "));
+      }
       hasLoadedRef.current = true;
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      setLoadError(err?.message || "Failed to load Master Production Bible from server.");
     } finally {
       setIsLoading(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
   const handlePatchCharacterAsset = useCallback(
@@ -222,6 +203,36 @@ export default function ProductionBiblePage() {
     );
   }
 
+  if (loadError && (!project || !bible)) {
+    return (
+      <AppShell activeProjectId={projectId}>
+        <div className="max-w-lg mx-auto my-16 p-6 rounded-2xl bg-panel border border-rose-500/40 text-center space-y-4">
+          <AlertTriangle className="w-10 h-10 text-rose-400 mx-auto" />
+          <h2 className="font-cinzel text-lg font-bold text-obsidian-primary uppercase">
+            Failed to Load Master Production Bible
+          </h2>
+          <p className="text-xs font-mono text-rose-300 leading-relaxed">{loadError}</p>
+          <div className="flex items-center justify-center gap-2 pt-2">
+            <Link
+              href="/dashboard"
+              className="px-4 py-2 rounded-lg bg-canvas hover:bg-elevated border border-border text-xs font-mono text-obsidian-secondary"
+            >
+              Return to Slate
+            </Link>
+            <button
+              type="button"
+              onClick={() => loadBibleData()}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-canvas font-bold text-xs font-mono cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Retry Load</span>
+            </button>
+          </div>
+        </div>
+      </AppShell>
+    );
+  }
+
   const isLocked = bible?.is_locked || false;
 
   return (
@@ -232,6 +243,21 @@ export default function ProductionBiblePage() {
       stageName={project?.stage_name}
     >
       <div className="space-y-5">
+        {loadError && (
+          <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-between gap-3 text-xs font-mono text-rose-300">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+              <span>{loadError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => loadBibleData()}
+              className="px-3 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 font-bold shrink-0 cursor-pointer"
+            >
+              Retry Load
+            </button>
+          </div>
+        )}
         {/* =========================================================================
          * Header: Master Production Bible Title & Context
          * ========================================================================= */}

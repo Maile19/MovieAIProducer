@@ -14,6 +14,13 @@ from typing import Any
 import httpx
 
 from backend.app.core.config import get_settings
+from backend.app.domain.catalog import STYLE_CATALOG
+from backend.app.domain.screenwriter import (
+    STYLE_FAMILY_WRITING_DIRECTIVES,
+    STYLE_TAXONOMY_FAMILIES,
+    get_style_family,
+)
+from backend.app.services.screenwriter_rag import ScreenwriterRAGClient
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +205,22 @@ class HermesNovaEngine:
 
         return tags[:15]
 
+    @staticmethod
+    def _resolve_style_writing_context(target_style_code: str, target_style_desc: str = "") -> dict[str, str]:
+        """Resolve #Style 01-18 metadata, taxonomy family, and Screenwriter craft directives."""
+        cleaned_code = (target_style_code or "#Style 01").strip()
+        catalog_entry = next((s for s in STYLE_CATALOG if s.get("code", "").upper() == cleaned_code.upper()), None) or STYLE_CATALOG[0]
+        style_family = get_style_family(cleaned_code)
+        family_name = STYLE_TAXONOMY_FAMILIES.get(style_family, {}).get("name", style_family)
+        return {
+            "style_code": catalog_entry.get("code") or cleaned_code,
+            "style_name": catalog_entry.get("name") or target_style_desc or "Hollywood Cinematic",
+            "aesthetic_directives": target_style_desc or catalog_entry.get("aesthetic_directives", ""),
+            "style_family": style_family,
+            "family_name": family_name,
+            "writing_directive": STYLE_FAMILY_WRITING_DIRECTIVES.get(style_family, ""),
+        }
+
     async def generate_10_titles(
         self,
         preset_name: str,
@@ -207,29 +230,44 @@ class HermesNovaEngine:
         aspect_ratio: str = "16:9",
         seed_premise: str = "",
     ) -> dict[str, Any]:
-        """Generate exactly 10 high-CTR YouTube title recommendations."""
+        """Generate exactly 10 high-CTR, style-aligned production title recommendations."""
+        style_ctx = self._resolve_style_writing_context(target_style_code, target_style_desc)
+        rag_res = await ScreenwriterRAGClient.retrieve_structure_rules(
+            style_code=style_ctx["style_code"],
+            query=f"{category} {preset_name} {seed_premise}".strip(),
+            top_k=2,
+        )
+        sw_block = str(rag_res.get("prompt_block") or "").strip()
+        sw_directives = rag_res.get("writing_directives") or {}
+        resolved_family = rag_res.get("style_family") or style_ctx["style_family"]
+        pacing_rule = sw_directives.get("pacing_rules") or STYLE_FAMILY_WRITING_DIRECTIVES.get(resolved_family, style_ctx["writing_directive"])
+
         system_prompt = (
-            "You are Hermes Nova, Principal YouTube Algorithmic Growth & Content Strategy Agent. "
-            "Your objective is to generate EXACTLY 10 irresistible, high-CTR YouTube video titles optimized "
-            "for algorithmic recommendations, curiosity gap, and search popularity in 2026.\n\n"
+            "You are Hermes Nova co-piloted by Polya AI Master Screenwriter & Audience Growth Strategist. "
+            "Your objective is to generate EXACTLY 10 compelling, high-CTR production titles optimized for BOTH algorithmic intrigue "
+            "and downstream feature/episodic screenplay prestige (8-10 minute / 50+ scene dramatic arcs).\n\n"
             "Rules:\n"
             "1. Output MUST be strictly valid JSON with keys 'recommendations' (array of EXACTLY 10 objects) "
             "and 'seo_description_tags' (array of 12-15 high-volume YouTube hashtags and search keywords formatted for description SEO).\n"
-            "2. Each object must have: 'rank' (1-10), 'title' (punchy, high curiosity gap), 'trend_hook' (why it works on YouTube), "
+            "2. Each object must have: 'rank' (1-10), 'title' (evocative, high curiosity gap), 'trend_hook' (why it captures viewer psychology and story promise), "
             "'target_keywords' (list of 3-4 search terms), 'hook_score' (float between 8.5 and 9.9).\n"
-            "3. Apply proven YouTube title archetypes: 'The X That Broke Y', 'I Uncovered Z', 'Why Nobody Understands X', "
-            "'The Last X: Awakening', 'What Happens When You X'. Avoid cheap buzzwords and generic corporate phrasing.\n"
-            "4. Align strictly with the visual style and genre context provided."
+            "3. Honor the resolved #Style taxonomy family and dramatic tone — NEVER inject cheap clickbait tropes when the style calls for solemn prestige, arthouse restraint, or classical mythology.\n"
+            "4. Ensure every title implies a central dramatic question capable of sustaining a multi-act screenplay."
         )
 
         user_content = (
             f"Production Context:\n"
             f"- Preset: {preset_name} (Category: {category})\n"
-            f"- Visual Style: {target_style_code} ({target_style_desc})\n"
+            f"- Visual Style: {style_ctx['style_code']} — {style_ctx['style_name']} ({style_ctx['aesthetic_directives']})\n"
+            f"- Style Taxonomy Family: {resolved_family} ({style_ctx['family_name']})\n"
+            f"- Style Writing DNA: {pacing_rule}\n"
             f"- Aspect Ratio: {aspect_ratio}\n"
-            f"- Seed Premise: {seed_premise or 'High stakes conflict with unique aesthetic hook'}\n\n"
-            f"Generate 10 standout titles now in JSON format."
+            f"- Target Runtime Horizon: 8-10 minutes / 50-500 scenes\n"
+            f"- Seed Premise: {seed_premise or 'High stakes conflict with unique aesthetic hook'}\n"
         )
+        if sw_block:
+            user_content += f"\n[SCREENWRITER CRAFT & DRAMATURGY]\n{sw_block}\n"
+        user_content += "\nGenerate 10 standout, style-authentic titles now in JSON format."
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -285,21 +323,34 @@ class HermesNovaEngine:
         seed_premise: str = "",
         trend_keywords: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Generate exactly 10 YouTube-retention optimized premise synopses."""
+        """Generate exactly 10 style-grounded, dramatic premise synopses wired into Screenwriter RAG (8766)."""
+        style_ctx = self._resolve_style_writing_context(target_style_code)
+        rag_res = await ScreenwriterRAGClient.retrieve_treatment_beats(
+            style_code=style_ctx["style_code"],
+            genre_tone=preset_name,
+            premise=f"{locked_title} {seed_premise}".strip(),
+            top_k=3,
+        )
+        sw_block = str(rag_res.get("prompt_block") or "").strip()
+        sw_directives = rag_res.get("writing_directives") or {}
+        resolved_family = rag_res.get("style_family") or style_ctx["style_family"]
+        pacing_rule = sw_directives.get("pacing_rules") or STYLE_FAMILY_WRITING_DIRECTIVES.get(resolved_family, style_ctx["writing_directive"])
+
         system_prompt = (
-            "You are Hermes Nova, Principal YouTube Script Architect & Audience Retention Strategist. "
-            "Your objective is to generate EXACTLY 10 distinct, narrative-rich Logline / Premise Synopsis "
-            "variations for the locked production title. Each variation must provide an undeniable cold open hook "
-            "and emotional cliffhanger that maximizes YouTube viewer retention.\n\n"
+            "You are Hermes Nova co-piloted by Polya AI Master Screenwriter & Dramatic Story Architect. "
+            "Your objective is to generate EXACTLY 10 distinct, dramatic Logline / Premise Synopsis "
+            "variations for the locked production title. Each variation must establish an unmistakable protagonist flaw/desire, "
+            "an escalating central dramatic conflict, an irreversible value shift capable of carrying an 8-10 minute (50-500 scene) screenplay, "
+            "AND an arresting opening hook.\n\n"
             "Rules:\n"
             "1. Output MUST be strictly valid JSON with key 'synopses' containing an array of EXACTLY 10 objects.\n"
             "2. Each object must have:\n"
             "   - 'rank' (1-10)\n"
-            "   - 'angle_label' (e.g. 'High-Retention Cold Open', 'Forbidden Discovery', 'Relentless Chase', 'Moral Dilemma')\n"
-            "   - 'synopsis' (2-3 cinematic sentences detailing the protagonist, the catalyst, the escalating stakes, and the immediate jeopardy)\n"
-            "   - 'retention_hook' (explanation of the first 5-second viewer hook)\n"
-            "   - 'target_audience' (MANDATORY: primary community or demographic, e.g. 'Sci-Fi Thriller & Lore Theorists')\n"
-            "3. Ensure each of the 10 variations explores a genuinely different dramatic angle or pacing archetype.\n"
+            "   - 'angle_label' (e.g. 'Tragic Hubris & Inevitable Cost', 'Forbidden Discovery', 'Relentless Pursuit', 'Moral Reckoning')\n"
+            "   - 'synopsis' (2-3 crisp cinematic sentences detailing protagonist, inciting catalyst, antagonist pressure, value shift, and stakes — strictly honoring the active #Style family)\n"
+            "   - 'retention_hook' (concrete opening visual/sound hook anchored to the story's tone)\n"
+            "   - 'target_audience' (MANDATORY: primary demographic/community)\n"
+            "3. Ensure each of the 10 variations explores a genuinely distinct dramatic angle or structural escalation.\n"
             "4. Never output markdown code fences or conversational text outside the JSON."
         )
 
@@ -307,12 +358,17 @@ class HermesNovaEngine:
             f"Locked Production Data:\n"
             f"- Title: '{locked_title}'\n"
             f"- Preset: {preset_name}\n"
-            f"- Visual Style: {target_style_code}\n"
+            f"- Visual Style: {style_ctx['style_code']} — {style_ctx['style_name']} ({style_ctx['aesthetic_directives']})\n"
+            f"- Style Taxonomy Family: {resolved_family} ({style_ctx['family_name']})\n"
+            f"- Style Writing DNA: {pacing_rule}\n"
+            f"- Target Arc Capacity: 8-10 minute cinematic film / 50-500 scenes\n"
             f"- Aspect Ratio: {aspect_ratio}\n"
             f"- Seed Context: {seed_premise or 'Intense cinematic premise with high stakes'}\n"
-            f"- SEO Keywords: {', '.join(trend_keywords or [locked_title, target_style_code])}\n\n"
-            f"Generate 10 structured premise synopses now in JSON format."
+            f"- SEO Keywords: {', '.join(trend_keywords or [locked_title, style_ctx['style_code']])}\n"
         )
+        if sw_block:
+            user_content += f"\n[SCREENWRITER CRAFT & DRAMATURGY]\n{sw_block}\n"
+        user_content += "\nGenerate 10 structured, dramatic premise synopses now in JSON format."
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -478,7 +534,7 @@ class HermesNovaEngine:
             ),
             (
                 "Ethereal Spiritual Awakening",
-                f"Born without spiritual spiritual roots, an outcast monk meditates beneath the celestial waterfall and absorbs the wandering soul of '{locked_title}'. {base_premise} Now hunted by elder immortals, they must master a forbidden martial path to save the mortal realm.",
+                f"Born without spiritual roots, an outcast monk meditates beneath the celestial waterfall and absorbs the wandering soul of '{locked_title}'. {base_premise} Now hunted by elder immortals, they must master a forbidden martial path to save the mortal realm.",
                 "Mystical aesthetic with awe-inspiring transcendence",
                 "Xianxia and Donghua 3D fandom",
             ),

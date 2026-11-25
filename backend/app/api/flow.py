@@ -32,6 +32,7 @@ class FlowJobCreateRequest(BaseModel):
     reference_image_paths: list[str] | None = Field(default=None, description="Path lokal gambar referensi")
     project_id: uuid.UUID | None = Field(default=None, description="Project ID konteks")
     scene_id: uuid.UUID | None = Field(default=None, description="Scene ID konteks")
+    shot_id: uuid.UUID | None = Field(default=None, description="Shot ID konteks spesifik")
     preferred_account_id: int | None = Field(default=None, ge=1, le=6, description="Nomor akun spesifik (1-6)")
 
 
@@ -113,6 +114,7 @@ async def create_flow_job(
         id=uuid.uuid4(),
         project_id=request.project_id,
         scene_id=request.scene_id,
+        shot_id=request.shot_id,
         prompt=request.prompt.strip(),
         aspect_ratio=aspect_ratio,
         reference_image_paths=request.reference_image_paths,

@@ -134,3 +134,37 @@ class ShotModel(Base):
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+
+
+class DialogueCalibrationCacheModel(Base):
+    """Cache for PolyaScreenwriterEngine dialogue calibration & pacing analysis."""
+
+    __tablename__ = "dialogue_calibration_cache"
+
+    cache_key: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+    )
+    scene_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID,
+        nullable=True,
+        index=True,
+    )
+    raw_text_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    max_seconds: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+    )
+    result_json: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime,
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+

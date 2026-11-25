@@ -507,9 +507,12 @@ def auto_attach_job_result(conn: sqlite3.Connection, job_id: str, image_url: str
         # Introspect columns to support both full production schema and isolated test schemas
         cols = [c[1] for c in conn.execute("PRAGMA table_info(flow_image_jobs)").fetchall()]
         has_scene_id = "scene_id" in cols
+        has_shot_id = "shot_id" in cols
         select_clause = "character_id, asset_slot, target_type, state_id, prompt, reference_image_paths, aspect_ratio"
         if has_scene_id:
             select_clause += ", scene_id"
+        if has_shot_id:
+            select_clause += ", shot_id"
 
         row = conn.execute(
             f"SELECT {select_clause} FROM flow_image_jobs WHERE id = ?",
@@ -527,7 +530,11 @@ def auto_attach_job_result(conn: sqlite3.Connection, job_id: str, image_url: str
         ref_paths_raw = row[5]
         ref_paths = json.loads(ref_paths_raw) if (ref_paths_raw and isinstance(ref_paths_raw, str)) else (ref_paths_raw or [])
         aspect_ratio = row[6] or "16:9"
-        scene_id = str(row[7]) if has_scene_id and len(row) > 7 and row[7] else None
+        idx = 7
+        scene_id = str(row[idx]) if has_scene_id and len(row) > idx and row[idx] else None
+        if has_scene_id:
+            idx += 1
+        direct_shot_id = str(row[idx]) if has_shot_id and len(row) > idx and row[idx] else None
 
         if target_type == "state" and state_id:
             cur = conn.execute(
@@ -591,6 +598,32 @@ def auto_attach_job_result(conn: sqlite3.Connection, job_id: str, image_url: str
             else:
                 logger.warning(f"[AutoAttach] Zero rows updated for character {char_id}")
             return
+
+        if direct_shot_id:
+            shot_row = conn.execute(
+                "SELECT id, fg_bg_layers FROM shots WHERE id = ?",
+                (direct_shot_id,),
+            ).fetchone()
+            now_iso = datetime.now(timezone.utc).isoformat()
+            if shot_row:
+                s_id = str(shot_row[0])
+                raw_layers = shot_row[1]
+                existing_layers = {}
+                if raw_layers:
+                    try:
+                        existing_layers = json.loads(raw_layers) if isinstance(raw_layers, str) else dict(raw_layers)
+                    except Exception:
+                        existing_layers = {}
+                existing_layers["preview_url"] = image_url
+                existing_layers["preview_provider"] = "google_flow"
+                existing_layers["job_id"] = job_id
+                existing_layers["updated_at"] = now_iso
+                conn.execute(
+                    "UPDATE shots SET fg_bg_layers = ? WHERE id = ?",
+                    (json.dumps(existing_layers), s_id),
+                )
+                logger.info(f"[AutoAttach] Attached {job_id} -> direct shot={s_id}")
+                return
 
         if scene_id:
             shot_row = conn.execute(

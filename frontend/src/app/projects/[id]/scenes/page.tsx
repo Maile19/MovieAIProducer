@@ -8,7 +8,8 @@ import ActFilterBar, { ActFilterType } from "@/components/scenes/ActFilterBar";
 import SceneCard from "@/components/scenes/SceneCard";
 import SceneDetailDrawer from "@/components/scenes/SceneDetailDrawer";
 import BlueprintModal, { BlueprintConfig } from "@/components/scenes/BlueprintModal";
-import { api, Project, Scene } from "@/lib/api";
+import AIRenderProviderCard from "@/components/AIRenderProviderCard";
+import { api, Project, Scene, ProjectQCSummary } from "@/lib/api";
 import {
   Grid,
   Film,
@@ -35,6 +36,7 @@ export default function ScenesStoryboardPage() {
   const [isGeneratingBlueprint, setIsGeneratingBlueprint] = useState(false);
   const [isBlueprintModalOpen, setIsBlueprintModalOpen] = useState(false);
   const [currentPage, setCurrentPage] = useState<number>(1);
+  const [qcSummary, setQcSummary] = useState<ProjectQCSummary | null>(null);
 
   // Load project & scenes
   const loadScenesData = useCallback(async (options?: { silent?: boolean }) => {
@@ -43,13 +45,18 @@ export default function ScenesStoryboardPage() {
         setIsLoading(true);
       }
       setError(null);
-      const [projRes, scenesRes] = await Promise.allSettled([
+      const [projRes, scenesRes, qcRes] = await Promise.allSettled([
         api.projects.get(projectId),
         api.scenes.list(projectId),
+        api.qc.getProjectSummary(projectId),
       ]);
 
       if (projRes.status === "fulfilled" && projRes.value?.data) {
         setProject(projRes.value.data);
+      }
+
+      if (qcRes.status === "fulfilled" && qcRes.value?.data) {
+        setQcSummary(qcRes.value.data);
       }
 
       if (scenesRes.status === "fulfilled" && scenesRes.value?.data) {
@@ -105,23 +112,45 @@ export default function ScenesStoryboardPage() {
     }
   };
 
-  // Export full package
-  const handleExportPackage = async (format: "json" | "markdown") => {
+  // Export full package, TTS/SSML script, or SRT/VTT subtitles
+  const handleExportPackage = async (
+    format: "json" | "markdown" | "audio_ssml" | "subtitles_srt" | "subtitles_vtt"
+  ) => {
     try {
-      const res = await api.export.getProjectPackage(projectId, format);
-      const content =
-        format === "json"
-          ? JSON.stringify(res, null, 2)
-          : typeof res === "string"
-          ? res
-          : JSON.stringify(res, null, 2);
+      let content = "";
+      let mimeType = "application/json";
+      let filename = `Hollywood_Storyboard_${projectId}.json`;
 
-      const mimeType = format === "json" ? "application/json" : "text/markdown";
+      if (format === "audio_ssml") {
+        const res = await api.export.getAudioScript(projectId, "ssml");
+        content = typeof res === "string" ? res : JSON.stringify(res, null, 2);
+        mimeType = "application/ssml+xml";
+        filename = `TTS_Delivery_Script_${projectId}.ssml`;
+      } else if (format === "subtitles_srt") {
+        content = await api.export.getSubtitles(projectId, "srt", false);
+        mimeType = "application/x-subrip";
+        filename = `Subtitles_${projectId}.srt`;
+      } else if (format === "subtitles_vtt") {
+        content = await api.export.getSubtitles(projectId, "vtt", false);
+        mimeType = "text/vtt";
+        filename = `Subtitles_${projectId}.vtt`;
+      } else {
+        const res = await api.export.getProjectPackage(projectId, format);
+        content =
+          format === "json"
+            ? JSON.stringify(res, null, 2)
+            : typeof res === "string"
+            ? res
+            : JSON.stringify(res, null, 2);
+        mimeType = format === "json" ? "application/json" : "text/markdown";
+        filename = `Hollywood_Storyboard_${projectId}.${format === "json" ? "json" : "md"}`;
+      }
+
       const blob = new Blob([content], { type: mimeType });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `Hollywood_Storyboard_${projectId}.${format === "json" ? "json" : "md"}`;
+      link.download = filename;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -235,9 +264,36 @@ export default function ScenesStoryboardPage() {
               <span>&bull;</span>
               <span className="text-obsidian-secondary">{totalRuntimeSeconds.toFixed(1)}s Runtime (~{runtimeMinutes}m {runtimeSecs}s)</span>
               <span>&bull;</span>
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/25 text-emerald-400 font-semibold shrink-0">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                QC Continuum: 96%
+              <span
+                className={
+                  qcSummary?.status === "FAIL"
+                    ? "inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500/10 border border-rose-500/25 text-rose-400 font-semibold shrink-0"
+                    : qcSummary?.status === "PASS"
+                    ? "inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/25 text-emerald-400 font-semibold shrink-0"
+                    : qcSummary?.status === "WARN"
+                    ? "inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/25 text-amber-400 font-semibold shrink-0"
+                    : "inline-flex items-center gap-1 px-2 py-0.5 rounded bg-panel border border-border text-obsidian-muted font-semibold shrink-0"
+                }
+                title={
+                  qcSummary && qcSummary.top_gaps?.length > 0
+                    ? `Top gap: ${qcSummary.top_gaps[0].message}`
+                    : "Real project-wide QC Continuum score"
+                }
+              >
+                <span
+                  className={
+                    qcSummary?.status === "FAIL"
+                      ? "w-1.5 h-1.5 rounded-full bg-rose-500"
+                      : qcSummary?.status === "PASS"
+                      ? "w-1.5 h-1.5 rounded-full bg-emerald-500"
+                      : qcSummary?.status === "WARN"
+                      ? "w-1.5 h-1.5 rounded-full bg-amber-500"
+                      : "w-1.5 h-1.5 rounded-full bg-obsidian-muted"
+                  }
+                />
+                {qcSummary && qcSummary.total_scenes > 0
+                  ? `QC Continuum: ${Math.round(qcSummary.continuum_score)}%`
+                  : "QC Continuum: Pending"}
               </span>
             </div>
           </div>
@@ -267,6 +323,11 @@ export default function ScenesStoryboardPage() {
             </button>
           </div>
         </div>
+
+        {/* =========================================================================
+         * AI Render Provider Card (Global Acuan SQLite)
+         * ========================================================================= */}
+        <AIRenderProviderCard projectId={projectId} />
 
         {/* =========================================================================
          * Act Filter Bar & Blueprint Generation
@@ -341,6 +402,8 @@ export default function ScenesStoryboardPage() {
                 scene={scene}
                 isSelected={selectedScene?.id === scene.id}
                 onSelect={(s) => setSelectedScene(s)}
+                structureType={structureType}
+                totalActs={totalActs}
               />
             ))}
           </div>

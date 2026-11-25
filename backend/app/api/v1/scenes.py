@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+import hashlib
+import json
 import math
 from typing import Any
 import uuid
@@ -14,19 +16,28 @@ from backend.app.domain.screenwriter import (
     PolyaScreenwriterEngine,
     extract_project_narrative_context,
     get_act_bounds,
+    get_style_family,
+    parse_structured_slugline,
     _determine_scene_duration,
 )
 from backend.app.domain.story_writer import StagedStoryWriter
 from backend.app.infrastructure.database.models.auth import UserModel
-from backend.app.infrastructure.database.models.character import CharacterModel
+from backend.app.infrastructure.database.models.character import (
+    CharacterModel,
+    CharacterStateModel,
+)
 from backend.app.infrastructure.database.models.project import MasterProductionBibleModel, ProjectModel
-from backend.app.infrastructure.database.models.story import SceneModel, ShotModel
+from backend.app.infrastructure.database.models.story import (
+    DialogueCalibrationCacheModel,
+    SceneModel,
+    ShotModel,
+)
 
 router = APIRouter(tags=["Scenes & Storyboard"])
 
 
 class SceneCreateRequest(BaseModel):
-    act_number: int = Field(default=1, ge=1, le=4, description="Act 1 to 4")
+    act_number: int = Field(default=1, ge=1, le=5, description="Act 1 to 5")
     scene_number: int = Field(default=1, ge=1, le=1000, description="Scene number 1 to 1000")
     slugline: str = Field(default="INT. LOCATION - DAY", max_length=255)
     narrative_goal: str = Field(default="", description="Dramatic goal of the scene")
@@ -44,11 +55,29 @@ class SceneUpdateRequest(BaseModel):
     narrative_goal: str | None = None
     duration_target: float | None = Field(default=None, ge=1.0, le=60.0)
     status: str | None = None
+    dialogue: str | None = None
+    camera_code: str | None = None
+    lighting_code: str | None = None
+    transition_type: str | None = None
+    audio_lead_seconds: float | None = None
     auto_split_shots: bool = Field(default=False, description="If True, automatically generate or adjust shots to match target duration")
+
+
+class DirectorPolishRequest(BaseModel):
+    slugline: str | None = None
+    narrative_goal: str | None = None
+    dialogue: str | None = None
+    style_code: str = "#Style 01"
+    camera_code: str | None = None
+    lighting_code: str | None = None
 
 
 class SceneAutoSplitRequest(BaseModel):
     target_duration: float | None = Field(default=None, ge=1.0, le=60.0, description="Target duration in seconds (5.0, 10.0, 15.0)")
+    coverage_style: str = Field(
+        default="classic_coverage",
+        description="Coverage strategy: classic_coverage | visceral_oner | rapid_montage | intimate_subtext",
+    )
 
 
 class BlueprintTreatmentRequest(BaseModel):
@@ -57,6 +86,14 @@ class BlueprintTreatmentRequest(BaseModel):
     premise: str = Field(default="", description="Story premise / concept from director")
     clear_existing: bool = Field(default=False, description="Clear existing scenes if re-generating")
     structure_type: str = Field(default="4_act", description="3_act | 4_act | youtube_viral | 5_act")
+    enable_cold_open: bool | None = Field(
+        default=None,
+        description="Explicit 30s Cold Open override; defaults to True for youtube_viral or preset cold_open_30s",
+    )
+    selected_treatment: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional user-selected pitch variant from /blueprint/treatment-variants to lock directly",
+    )
 
 
 class BlueprintActGenerateRequest(BaseModel):
@@ -65,6 +102,10 @@ class BlueprintActGenerateRequest(BaseModel):
     duration_mode: str = Field(default="dynamic", description="dynamic | flat_10s | flat_15s | flat_5s")
     auto_split_shots: bool = Field(default=True, description="Auto-split shots per scene")
     structure_type: str = Field(default="4_act", description="3_act | 4_act | youtube_viral | 5_act")
+    enable_cold_open: bool | None = Field(
+        default=None,
+        description="Explicit 30s Cold Open override; defaults to True for youtube_viral or preset cold_open_30s",
+    )
 
 
 class BlueprintBatchWriteRequest(BaseModel):
@@ -74,6 +115,10 @@ class BlueprintBatchWriteRequest(BaseModel):
     auto_split_shots: bool = Field(default=True)
     clear_existing: bool = Field(default=True)
     structure_type: str = Field(default="4_act")
+    enable_cold_open: bool | None = Field(
+        default=None,
+        description="Explicit 30s Cold Open override; defaults to True for youtube_viral or preset cold_open_30s",
+    )
 
 
 class StructureRecommendationRequest(BaseModel):
@@ -125,52 +170,76 @@ async def _perform_auto_split(
     scene: SceneModel,
     target_duration: float,
     session: AsyncSession,
+    coverage_style: str = "classic_coverage",
 ) -> list[ShotModel]:
-    """Auto-split/configure shots for multi-shot assembly (2 shots for 10s, 3 shots for 15s)."""
-    if target_duration <= 5.0:
-        needed_shots = 1
-    elif target_duration <= 10.0:
-        needed_shots = 2
-    else:
-        needed_shots = 3
+    """Dual-brain auto-split shots via Screenwriter (8766) + Director (8765), preserving shot IDs cleanly."""
+    ctx_info = await _resolve_scene_speaker_and_style(scene=scene, session=session)
 
-    shot_duration = 5.0
-
-    # Query existing shots for this scene
     stmt = (
         select(ShotModel)
         .where(ShotModel.scene_id == scene.id)
         .order_by(ShotModel.shot_number.asc())
     )
     existing_shots = list((await session.execute(stmt)).scalars().all())
+    existing_dlg = _extract_scene_dialogue(existing_shots)
+
+    writer = PolyaScreenwriterEngine()
+    planned = await writer.plan_scene_shot_split(
+        scene_number=scene.scene_number,
+        slugline=scene.slugline,
+        narrative_goal=scene.narrative_goal,
+        dialogue=existing_dlg,
+        target_duration=target_duration,
+        coverage_style=coverage_style,
+        style_code=ctx_info["style_code"],
+        act_number=scene.act_number,
+        voice_dna_profile=ctx_info["voice_dna_profile"],
+        active_state=ctx_info["active_state"],
+        speaking_character=ctx_info["speaker_name"],
+    )
 
     now = datetime.now(timezone.utc)
     configured_shots: list[ShotModel] = []
 
-    for i in range(needed_shots):
-        template = SHOT_CAMERA_TEMPLATES[min(i, len(SHOT_CAMERA_TEMPLATES) - 1)]
+    for i, plan in enumerate(planned):
         if i < len(existing_shots):
             shot = existing_shots[i]
-            shot.duration_seconds = shot_duration
-            shot.shot_number = i + 1
+            shot.shot_number = plan["shot_number"]
+            shot.duration_seconds = plan["duration_seconds"]
+            shot.camera_code = plan["camera_code"]
+            shot.lens_code = plan["lens_code"]
+            shot.comp_code = plan["comp_code"]
+            shot.light_code = plan["light_code"]
+            shot.act_code = plan["act_code"]
+            shot.speed_code = plan["speed_code"]
+            if not shot.dialogue and plan.get("dialogue"):
+                shot.dialogue = plan["dialogue"]
+            shot.transition_type = plan.get("transition_type") or shot.transition_type
             configured_shots.append(shot)
         else:
             new_shot = ShotModel(
                 id=uuid.uuid4(),
                 scene_id=scene.id,
-                shot_number=i + 1,
-                duration_seconds=shot_duration,
-                camera_code=template["camera_code"],
-                lens_code=template["lens_code"],
-                comp_code=template["comp_code"],
-                light_code=template["light_code"],
-                act_code=template["act_code"],
-                speed_code=template["speed_code"],
+                shot_number=plan["shot_number"],
+                duration_seconds=plan["duration_seconds"],
+                camera_code=plan["camera_code"],
+                lens_code=plan["lens_code"],
+                comp_code=plan["comp_code"],
+                light_code=plan["light_code"],
+                act_code=plan["act_code"],
+                speed_code=plan["speed_code"],
+                dialogue=plan.get("dialogue"),
+                transition_type=plan.get("transition_type") or "NONE",
                 status="PLANNED",
                 created_at=now,
             )
             session.add(new_shot)
             configured_shots.append(new_shot)
+
+    # Remove excess shots if switching to a tighter coverage style (e.g. visceral_oner)
+    if len(existing_shots) > len(planned):
+        for extra in existing_shots[len(planned) :]:
+            await session.delete(extra)
 
     await session.commit()
     for s in configured_shots:
@@ -206,14 +275,30 @@ async def _resolve_project(project_id: str, session: AsyncSession) -> ProjectMod
     return project
 
 
+def _extract_scene_dialogue(shots: list[ShotModel]) -> str | None:
+    """Extract Screenwriter-generated dialogue text from a scene's ordered shots."""
+    lines: list[str] = []
+    for sh in shots:
+        raw = (sh.dialogue or "").strip()
+        if not raw:
+            continue
+        if raw.startswith("Environmental cue:") and lines:
+            continue
+        if raw not in lines:
+            lines.append(raw)
+    if not lines:
+        return None
+    return "\n".join(lines)
+
+
 @router.get("/projects/{project_id}/scenes", status_code=status.HTTP_200_OK)
 async def list_project_scenes(
     project_id: str,
-    act: int | None = Query(default=None, ge=1, le=4, description="Filter by Act 1-4"),
+    act: int | None = Query(default=None, ge=1, le=5, description="Filter by Act 1-5"),
     current_user: UserModel = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """Retrieve scenes for project, organized by 4-Act structure."""
+    """Retrieve scenes for project across 3-Act, 4-Act, 5-Act, or YouTube structures."""
     project = await _resolve_project(project_id, session)
 
     stmt = select(SceneModel).where(SceneModel.project_id == project.id)
@@ -239,9 +324,11 @@ async def list_project_scenes(
 
         preview_url = None
         preview_provider = None
+        audio_lead_seconds = None
         if primary_shot and isinstance(primary_shot.fg_bg_layers, dict):
             preview_url = primary_shot.fg_bg_layers.get("preview_url")
             preview_provider = primary_shot.fg_bg_layers.get("preview_provider")
+            audio_lead_seconds = primary_shot.fg_bg_layers.get("audio_lead_seconds")
 
         data.append(
             {
@@ -254,6 +341,11 @@ async def list_project_scenes(
                 "duration_target": s.duration_target,
                 "status": s.status,
                 "shots_count": shot_count,
+                "dialogue": _extract_scene_dialogue(scene_shots),
+                "camera_code": primary_shot.camera_code if primary_shot else None,
+                "lighting_code": primary_shot.light_code if primary_shot else None,
+                "transition_type": primary_shot.transition_type if primary_shot else None,
+                "audio_lead_seconds": audio_lead_seconds,
                 "preview_url": preview_url,
                 "preview_provider": preview_provider,
                 "created_at": s.created_at.isoformat(),
@@ -374,12 +466,118 @@ async def recommend_narrative_structure(
         project_ctx = None
 
     writer = PolyaScreenwriterEngine()
-    advisory = writer.analyze_narrative_structure(
+    advisory = await writer.analyze_narrative_structure_hybrid(
         project_context=project_ctx,
         title=project.title,
         total_scenes=total_scenes,
     )
     return {"data": advisory}
+
+
+async def _load_cast_with_states(
+    project_id: uuid.UUID,
+    session: AsyncSession,
+) -> tuple[list[dict[str, Any]], list[CharacterModel], dict[uuid.UUID, list[CharacterStateModel]]]:
+    """Fetch project characters alongside their #State 01-#State 05 progression records."""
+    char_stmt = select(CharacterModel).where(CharacterModel.project_id == project_id)
+    characters_list = list((await session.execute(char_stmt)).scalars().all())
+    char_ids = [c.id for c in characters_list]
+    states_by_char: dict[uuid.UUID, list[CharacterStateModel]] = {}
+    if char_ids:
+        states_stmt = (
+            select(CharacterStateModel)
+            .where(CharacterStateModel.character_id.in_(char_ids))
+            .order_by(CharacterStateModel.state_code.asc())
+        )
+        for st in (await session.execute(states_stmt)).scalars().all():
+            states_by_char.setdefault(st.character_id, []).append(st)
+
+    chars_data = [
+        {
+            "name": c.name,
+            "role": c.role,
+            "base_prompt": c.base_prompt,
+            "narrative_summary": getattr(c, "narrative_summary", "") or "",
+            "voice_dna_profile": getattr(c, "voice_dna_profile", "") or "",
+            "states": [
+                {
+                    "state_code": s.state_code,
+                    "state_label": s.state_label or "",
+                    "wardrobe": s.wardrobe,
+                    "injuries_and_wear": s.injuries_and_wear,
+                    "expression_anchor": s.expression_anchor,
+                }
+                for s in states_by_char.get(c.id, [])
+            ],
+        }
+        for c in characters_list
+    ]
+    return chars_data, characters_list, states_by_char
+
+
+def _resolve_cold_open_config(
+    project_settings: dict[str, Any] | None,
+    structure_type: str,
+    enable_cold_open: bool | None,
+) -> dict[str, Any] | None:
+    """Resolve explicit or default 30s Cold Open configuration cleanly."""
+    settings_dict = project_settings if isinstance(project_settings, dict) else {}
+    treatment_co = (settings_dict.get("treatment") or {}).get("cold_open_30s")
+    preset_co = settings_dict.get("preset_data", {}).get("storyboard_defaults", {}).get("cold_open_30s")
+    base_cfg = dict(treatment_co or preset_co or {})
+
+    if enable_cold_open is True:
+        base_cfg["enabled"] = True
+        return base_cfg
+    if enable_cold_open is False:
+        base_cfg["enabled"] = False
+        return base_cfg
+    if base_cfg:
+        return base_cfg
+    if structure_type == "youtube_viral":
+        return {"enabled": True}
+    return None
+
+
+def _build_cold_open_shot_cue(
+    scene_num: int,
+    shot_idx: int,
+    primary_dialogue: str,
+    narrative_goal: str,
+    slugline: str,
+    style_family: str,
+) -> tuple[str, str]:
+    """Build style-appropriate atmospheric/dramatic cues for 30s Cold Open shots (zero slapstick clichés)."""
+    parsed = parse_structured_slugline(slugline)
+    loc_cue = (parsed["location"] or "SCENE").lower()
+    time_cue = (parsed["time_of_day"] or "ambient").lower()
+    beat_snippet = " ".join((narrative_goal or "").split()[:12]).rstrip(".,;:")
+
+    if shot_idx == 0 and primary_dialogue:
+        cue = primary_dialogue if "[SFX:" in primary_dialogue else f"[SFX: {style_family} cold-open impulse ({loc_cue}) — {primary_dialogue}]"
+        return cue, "NONE"
+
+    if scene_num == 3 and shot_idx > 0:
+        if style_family == "anime_2d":
+            cue = f"[SFX: Resonant harmonic linger in {loc_cue} cutting sharply to Act I ({beat_snippet})]"
+        elif style_family == "stop_motion":
+            cue = f"[SFX: Tactile miniature room tone hold bridging into Scene 04 ({beat_snippet})]"
+        elif style_family == "stylized_3d":
+            cue = f"[SFX: Kinetic prop transient and rhythmic swell bridging into Scene 04 ({beat_snippet})]"
+        else:
+            cue = f"[SFX: Acoustic decay in {loc_cue} ({time_cue}) carrying directly into Act I]"
+        return cue, "L_CUT"
+
+    if style_family == "anime_2d":
+        cue = f"[SFX: Atmospheric 'ma' tension in {loc_cue} ({time_cue}) — {beat_snippet or 'sharp focal beat'}]"
+    elif style_family == "stop_motion":
+        cue = f"[SFX: Tactile prop foley and measured breath in {loc_cue} — {beat_snippet or 'precise visual beat'}]"
+    elif style_family == "stylized_3d":
+        cue = f"[SFX: Dynamic motion transient in {loc_cue} ({time_cue}) — {beat_snippet or 'kinetic beat'}]"
+    else:
+        cue = f"[SFX: Grounded {time_cue} room tone in {loc_cue} — {beat_snippet or 'high-stakes visual beat'}]"
+
+    return cue, ("NONE" if shot_idx == 0 else "J_CUT")
 
 
 @router.post("/projects/{project_id}/blueprint/treatment", status_code=status.HTTP_200_OK)
@@ -396,17 +594,9 @@ async def generate_blueprint_treatment(
         await session.execute(delete(SceneModel).where(SceneModel.project_id == project.id))
         await session.commit()
 
-    char_stmt = select(CharacterModel).where(CharacterModel.project_id == project.id)
-    characters_list = (await session.execute(char_stmt)).scalars().all()
-    chars_data = [
-        {
-            "name": c.name,
-            "role": c.role,
-            "base_prompt": c.base_prompt,
-            "narrative_summary": getattr(c, "narrative_summary", "") or "",
-        }
-        for c in characters_list
-    ]
+    chars_data, characters_list, states_by_char = await _load_cast_with_states(project.id, session)
+    for char_obj in characters_list:
+        setattr(char_obj, "_prefetched_states", states_by_char.get(char_obj.id, []))
 
     bible_stmt = (
         select(MasterProductionBibleModel)
@@ -417,16 +607,78 @@ async def generate_blueprint_treatment(
     bible = (await session.execute(bible_stmt)).scalar_one_or_none()
 
     try:
-        project_ctx = extract_project_narrative_context(project, bible=bible)
+        project_ctx = extract_project_narrative_context(project, bible=bible, characters=chars_data)
     except Exception:
         project_ctx = None
 
-    preset_data = (project.settings or {}).get("preset_data", {})
-    cold_open_cfg = preset_data.get("storyboard_defaults", {}).get("cold_open_30s")
+    cold_open_cfg = _resolve_cold_open_config(project.settings, payload.structure_type, payload.enable_cold_open)
 
+    if isinstance(payload.selected_treatment, dict) and payload.selected_treatment.get("acts"):
+        treatment = dict(payload.selected_treatment)
+        if cold_open_cfg is not None and (payload.enable_cold_open is not None or "cold_open_30s" not in treatment):
+            treatment["cold_open_30s"] = cold_open_cfg
+        treatment["used_fallback"] = False
+    else:
+        writer = PolyaScreenwriterEngine()
+        try:
+            treatment = await writer.generate_master_treatment(
+                project_context=project_ctx,
+                title=project.title,
+                total_scenes=payload.total_scenes,
+                premise=payload.premise,
+                characters=chars_data,
+                cold_open_30s=cold_open_cfg,
+                structure_type=payload.structure_type,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Polya AI Screenplay Treatment generation failed: {exc}",
+            )
+
+    if not isinstance(project.settings, dict):
+        project.settings = {}
+    project.settings["treatment"] = treatment
+    project.settings["treatment"]["duration_mode"] = payload.duration_mode
+    project.settings["treatment"]["total_scenes"] = payload.total_scenes
+    project.settings["treatment"]["structure_type"] = payload.structure_type
+    if cold_open_cfg is not None:
+        project.settings["treatment"]["cold_open_30s"] = cold_open_cfg
+    if "act_summaries" not in project.settings["treatment"]:
+        project.settings["treatment"]["act_summaries"] = {}
+    flag_modified(project, "settings")
+    await session.commit()
+
+    return {"data": treatment}
+
+
+@router.post("/projects/{project_id}/blueprint/treatment-variants", status_code=status.HTTP_200_OK)
+async def generate_blueprint_treatment_variants(
+    project_id: str,
+    payload: BlueprintTreatmentRequest,
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase A Multi-Option Engine: Generate 3 contrasting Master Treatment pitches in Strict LLM Mode."""
+    project = await _resolve_project(project_id, session)
+    chars_data, _, _ = await _load_cast_with_states(project.id, session)
+
+    bible_stmt = (
+        select(MasterProductionBibleModel)
+        .where(MasterProductionBibleModel.project_id == project.id)
+        .order_by(MasterProductionBibleModel.version.desc())
+        .limit(1)
+    )
+    bible = (await session.execute(bible_stmt)).scalar_one_or_none()
+    try:
+        project_ctx = extract_project_narrative_context(project, bible=bible, characters=chars_data)
+    except Exception:
+        project_ctx = None
+
+    cold_open_cfg = _resolve_cold_open_config(project.settings, payload.structure_type, payload.enable_cold_open)
     writer = PolyaScreenwriterEngine()
     try:
-        treatment = await writer.generate_master_treatment(
+        variants = await writer.generate_treatment_variants(
             project_context=project_ctx,
             title=project.title,
             total_scenes=payload.total_scenes,
@@ -438,21 +690,10 @@ async def generate_blueprint_treatment(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Polya AI Screenplay Treatment generation failed: {exc}",
+            detail=f"Polya AI Treatment Variants generation failed: {exc}",
         )
 
-    if not isinstance(project.settings, dict):
-        project.settings = {}
-    project.settings["treatment"] = treatment
-    project.settings["treatment"]["duration_mode"] = payload.duration_mode
-    project.settings["treatment"]["total_scenes"] = payload.total_scenes
-    project.settings["treatment"]["structure_type"] = payload.structure_type
-    if "act_summaries" not in project.settings["treatment"]:
-        project.settings["treatment"]["act_summaries"] = {}
-    flag_modified(project, "settings")
-    await session.commit()
-
-    return {"data": treatment}
+    return {"data": {"variants": variants, "structure_type": payload.structure_type, "total_scenes": payload.total_scenes}}
 
 
 @router.post("/projects/{project_id}/blueprint/generate-act", status_code=status.HTTP_200_OK)
@@ -466,17 +707,7 @@ async def generate_blueprint_act(
     project = await _resolve_project(project_id, session)
     now = datetime.now(timezone.utc)
 
-    char_stmt = select(CharacterModel).where(CharacterModel.project_id == project.id)
-    characters_list = (await session.execute(char_stmt)).scalars().all()
-    chars_data = [
-        {
-            "name": c.name,
-            "role": c.role,
-            "base_prompt": c.base_prompt,
-            "narrative_summary": getattr(c, "narrative_summary", "") or "",
-        }
-        for c in characters_list
-    ]
+    chars_data, _, _ = await _load_cast_with_states(project.id, session)
 
     bible_stmt = (
         select(MasterProductionBibleModel)
@@ -487,21 +718,23 @@ async def generate_blueprint_act(
     bible = (await session.execute(bible_stmt)).scalar_one_or_none()
 
     try:
-        project_ctx = extract_project_narrative_context(project, bible=bible)
+        project_ctx = extract_project_narrative_context(project, bible=bible, characters=chars_data)
     except Exception:
         project_ctx = None
 
-    preset_data = (project.settings or {}).get("preset_data", {})
-    cold_open_cfg = (
-        (project.settings or {}).get("treatment", {}).get("cold_open_30s")
-        or preset_data.get("storyboard_defaults", {}).get("cold_open_30s")
-    )
+    treatment = (project.settings or {}).get("treatment")
+    structure_type = payload.structure_type or (treatment or {}).get("structure_type", "4_act")
+    cold_open_cfg = _resolve_cold_open_config(project.settings, structure_type, payload.enable_cold_open)
     cold_open_active = bool(
         payload.act_number == 1 and cold_open_cfg and cold_open_cfg.get("enabled")
     )
-
-    treatment = (project.settings or {}).get("treatment")
-    structure_type = payload.structure_type or (treatment or {}).get("structure_type", "4_act")
+    active_style_code = (
+        getattr(project_ctx, "master_style_code", None)
+        or (bible.style_parameters.get("master_style_code") if bible and bible.style_parameters else None)
+        or project.target_style_code
+        or "#Style 01"
+    )
+    active_style_family = get_style_family(active_style_code)
 
     writer = PolyaScreenwriterEngine()
     if not treatment:
@@ -581,6 +814,8 @@ async def generate_blueprint_act(
         narrative_goal = sc_info.get("narrative_goal") or f"Act {payload.act_number} dramatic progression."
 
         if cold_open_active:
+            co_struct = (cold_open_cfg or {}).get("structure") or {}
+            s2_title = str((co_struct.get("scene_02") or {}).get("title") or "Escalating Kinetic Obstacle").strip()
             if s_num == 1:
                 if "COLD OPEN" not in slugline:
                     slugline = f"{slugline} (COLD OPEN 0-10S)"
@@ -589,13 +824,13 @@ async def generate_blueprint_act(
             elif s_num == 2:
                 if "COLD OPEN" not in slugline:
                     slugline = f"{slugline} (COLD OPEN 10-20S)"
-                if "Fast Slapstick Chaos Tease" not in narrative_goal:
-                    narrative_goal = f"Fast Slapstick Chaos Tease + Main Obstacle/Rival: {narrative_goal}"
+                if s2_title.lower() not in narrative_goal.lower():
+                    narrative_goal = f"{s2_title} + Main Threat/Rival: {narrative_goal}"
             elif s_num == 3:
                 if "COLD OPEN" not in slugline:
                     slugline = f"{slugline} (COLD OPEN 20-30S)"
                 if "Peak Climax Preview" not in narrative_goal:
-                    narrative_goal = f"Peak Climax Preview + Freeze-Frame/Rewind Transition ke Scene 04: {narrative_goal}"
+                    narrative_goal = f"Peak Climax Preview + Time-Cut Transition to Scene 04: {narrative_goal}"
             elif s_num == 4:
                 if "ORDINARY WORLD BEGINS" not in slugline:
                     slugline = f"{slugline} (ACT I: ORDINARY WORLD BEGINS)"
@@ -633,56 +868,25 @@ async def generate_blueprint_act(
                         l_code = "#Lens 04" if i == 0 else "#Lens 02"
                         cp_code = "#Comp 03" if i == 0 else "#Comp 01"
                         sp_code = "#Speed 04"
-                        dlg = (
-                            primary_dialogue if (i == 0 and primary_dialogue and "[SFX:" in primary_dialogue)
-                            else (
-                                f"[SFX: Instant High-Pitched Comedic Whistle & Boing - {primary_dialogue}]"
-                                if (i == 0 and primary_dialogue)
-                                else (
-                                    "[SFX: Instant High-Pitched Comedic Whistle & Dramatic Boing - Protagonist eyes bulge in extreme close-up!]"
-                                    if i == 0
-                                    else "[SFX: Rapid Hero Prop Reveal Whoosh & Shimmering Bell Chime]"
-                                )
-                            )
-                        )
-                        trans = "NONE" if i == 0 else "J_CUT"
                     elif s_num == 2:
                         c_code = "#Cam 25" if i == 0 else "#Cam 06"
                         l_code = "#Lens 02" if i == 0 else "#Lens 04"
                         cp_code = "#Comp 01" if i == 0 else "#Comp 02"
                         sp_code = "#Speed 04"
-                        dlg = (
-                            primary_dialogue if (i == 0 and primary_dialogue and "[SFX:" in primary_dialogue)
-                            else (
-                                f"[SFX: Fast Slapstick Chaos - {primary_dialogue}]"
-                                if (i == 0 and primary_dialogue)
-                                else (
-                                    "[SFX: Rapid Slip, Cartoon Car Horn Honk & Exaggerated Shocked Gasp as Rival Appears]"
-                                    if i == 0
-                                    else "[SFX: Escalating Anvil Drop Whistle & Frantic Running Sound FX]"
-                                )
-                            )
-                        )
-                        trans = "NONE" if i == 0 else "J_CUT"
                     else:  # s_num == 3
                         c_code = "#Cam 19" if i == 0 else "#Cam 25"
                         l_code = "#Lens 04" if i == 0 else "#Lens 03"
                         cp_code = "#Comp 03"
                         sp_code = "#Speed 04" if i == 0 else "#Speed 03"
-                        dlg = (
-                            primary_dialogue if (i == 0 and primary_dialogue and "[SFX:" in primary_dialogue)
-                            else (
-                                f"[SFX: Peak Climax Preview - {primary_dialogue}]"
-                                if (i == 0 and primary_dialogue)
-                                else (
-                                    "[SFX: Dramatic Orchestral Climax Swell Leading Directly to Disaster]"
-                                    if i == 0
-                                    else "[SFX: Record Scratch & VHS High-Speed Tape Rewind - 'Yep, that's me... you're probably wondering how I ended up here!']"
-                                )
-                            )
-                        )
-                        trans = "NONE" if i == 0 else "L_CUT"
 
+                    dlg, trans = _build_cold_open_shot_cue(
+                        scene_num=s_num,
+                        shot_idx=i,
+                        primary_dialogue=primary_dialogue,
+                        narrative_goal=narrative_goal,
+                        slugline=slugline,
+                        style_family=active_style_family,
+                    )
                     new_shot = ShotModel(
                         id=uuid.uuid4(),
                         scene_id=scene_id,
@@ -701,10 +905,7 @@ async def generate_blueprint_act(
                     )
                 else:
                     template = SHOT_CAMERA_TEMPLATES[min(i, len(SHOT_CAMERA_TEMPLATES) - 1)]
-                    dlg = primary_dialogue if i == 0 else (
-                        f"Environmental cue: {scene.slugline.split('-')[-1].strip().lower()} ambient tone."
-                        if i == 1 and not primary_dialogue else None
-                    )
+                    dlg = primary_dialogue if i == 0 else None
                     transition = "J_CUT" if i == 0 and dlg else "NONE"
 
                     new_shot = ShotModel(
@@ -826,6 +1027,7 @@ async def batch_write_blueprint(
         premise=payload.premise,
         clear_existing=payload.clear_existing,
         structure_type=structure_type,
+        enable_cold_open=payload.enable_cold_open,
     )
     treatment_resp = await generate_blueprint_treatment(project_id, treatment_req, current_user, session)
     treatment_data = treatment_resp["data"]
@@ -838,6 +1040,7 @@ async def batch_write_blueprint(
             duration_mode=payload.duration_mode,
             auto_split_shots=payload.auto_split_shots,
             structure_type=structure_type,
+            enable_cold_open=payload.enable_cold_open,
         )
         act_resp = await generate_blueprint_act(project_id, act_req, current_user, session)
         results.append(act_resp["data"])
@@ -883,11 +1086,12 @@ async def get_scene(
     shots = (await session.execute(shot_stmt)).scalars().all()
     preview_url = None
     preview_provider = None
-    if shots:
-        primary = shots[0]
-        if isinstance(primary.fg_bg_layers, dict):
-            preview_url = primary.fg_bg_layers.get("preview_url")
-            preview_provider = primary.fg_bg_layers.get("preview_provider")
+    audio_lead_seconds = None
+    primary = shots[0] if shots else None
+    if primary and isinstance(primary.fg_bg_layers, dict):
+        preview_url = primary.fg_bg_layers.get("preview_url")
+        preview_provider = primary.fg_bg_layers.get("preview_provider")
+        audio_lead_seconds = primary.fg_bg_layers.get("audio_lead_seconds")
 
     return {
         "data": {
@@ -899,6 +1103,11 @@ async def get_scene(
             "narrative_goal": scene.narrative_goal,
             "duration_target": scene.duration_target,
             "status": scene.status,
+            "dialogue": _extract_scene_dialogue(list(shots)),
+            "camera_code": primary.camera_code if primary else None,
+            "lighting_code": primary.light_code if primary else None,
+            "transition_type": primary.transition_type if primary else None,
+            "audio_lead_seconds": audio_lead_seconds,
             "preview_url": preview_url,
             "preview_provider": preview_provider,
             "created_at": scene.created_at.isoformat(),
@@ -1000,11 +1209,69 @@ async def update_scene(
     if payload.status is not None:
         scene.status = payload.status
 
+    shot_stmt = select(ShotModel).where(ShotModel.scene_id == s_uuid).order_by(ShotModel.shot_number.asc())
+    existing_shots = list((await session.execute(shot_stmt)).scalars().all())
+    has_shot_updates = any(
+        val is not None
+        for val in (
+            payload.dialogue,
+            payload.camera_code,
+            payload.lighting_code,
+            payload.transition_type,
+            payload.audio_lead_seconds,
+        )
+    )
+    if has_shot_updates:
+        if existing_shots:
+            prim = existing_shots[0]
+            if payload.dialogue is not None:
+                prim.dialogue = payload.dialogue
+            if payload.camera_code is not None:
+                prim.camera_code = payload.camera_code
+            if payload.lighting_code is not None:
+                prim.light_code = payload.lighting_code
+            if payload.transition_type is not None:
+                prim.transition_type = payload.transition_type
+            if payload.audio_lead_seconds is not None:
+                layers = dict(prim.fg_bg_layers or {})
+                layers["audio_lead_seconds"] = float(payload.audio_lead_seconds)
+                prim.fg_bg_layers = layers
+                flag_modified(prim, "fg_bg_layers")
+        else:
+            tmpl = SHOT_CAMERA_TEMPLATES[0]
+            layers: dict[str, Any] = {}
+            if payload.audio_lead_seconds is not None:
+                layers["audio_lead_seconds"] = float(payload.audio_lead_seconds)
+            dlg_val = payload.dialogue or ""
+            session.add(
+                ShotModel(
+                    id=uuid.uuid4(),
+                    scene_id=scene.id,
+                    shot_number=1,
+                    duration_seconds=min(5.0, scene.duration_target or 5.0),
+                    camera_code=payload.camera_code or tmpl["camera_code"],
+                    lens_code=tmpl["lens_code"],
+                    comp_code=tmpl["comp_code"],
+                    light_code=payload.lighting_code or tmpl["light_code"],
+                    act_code=tmpl["act_code"],
+                    speed_code=tmpl["speed_code"],
+                    fg_bg_layers=layers,
+                    dialogue=payload.dialogue,
+                    transition_type=payload.transition_type or ("J_CUT" if dlg_val.strip() else "NONE"),
+                    status="PLANNED",
+                    created_at=datetime.now(timezone.utc),
+                )
+            )
+
     if payload.auto_split_shots and payload.duration_target is not None:
         await _perform_auto_split(scene, payload.duration_target, session)
 
     await session.commit()
     await session.refresh(scene)
+
+    shot_stmt_out = select(ShotModel).where(ShotModel.scene_id == s_uuid).order_by(ShotModel.shot_number.asc())
+    shots_out = list((await session.execute(shot_stmt_out)).scalars().all())
+    prim_out = shots_out[0] if shots_out else None
 
     return {
         "data": {
@@ -1015,6 +1282,10 @@ async def update_scene(
             "narrative_goal": scene.narrative_goal,
             "duration_target": scene.duration_target,
             "status": scene.status,
+            "dialogue": _extract_scene_dialogue(shots_out),
+            "camera_code": prim_out.camera_code if prim_out else None,
+            "lighting_code": prim_out.light_code if prim_out else None,
+            "transition_type": prim_out.transition_type if prim_out else None,
         }
     }
 
@@ -1026,7 +1297,7 @@ async def auto_split_scene(
     current_user: UserModel = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """Auto-split/configure shots for multi-shot assembly (2 shots @ 5s for 10s, 3 shots @ 5s for 15s)."""
+    """Dual-brain auto-split/configure shots with selectable coverage_style."""
     s_uuid = uuid.UUID(scene_id)
     stmt = select(SceneModel).where(SceneModel.id == s_uuid)
     scene = (await session.execute(stmt)).scalar_one_or_none()
@@ -1038,15 +1309,17 @@ async def auto_split_scene(
         if (payload and payload.target_duration is not None)
         else scene.duration_target
     )
+    coverage_style = payload.coverage_style if payload and payload.coverage_style else "classic_coverage"
     scene.duration_target = target_duration
 
-    shots = await _perform_auto_split(scene, target_duration, session)
+    shots = await _perform_auto_split(scene, target_duration, session, coverage_style=coverage_style)
     return {
         "data": {
             "scene_id": str(scene.id),
             "target_duration": target_duration,
+            "coverage_style": coverage_style,
             "shots_count": len(shots),
-            "message": f"Configured {len(shots)} shots for {target_duration}s scene.",
+            "message": f"Configured {len(shots)} shots ({coverage_style}) for {target_duration}s scene.",
             "shots": [
                 {
                     "id": str(s.id),
@@ -1059,6 +1332,8 @@ async def auto_split_scene(
                     "light_code": s.light_code,
                     "act_code": s.act_code,
                     "speed_code": s.speed_code,
+                    "dialogue": s.dialogue,
+                    "transition_type": s.transition_type,
                     "status": s.status,
                 }
                 for s in shots
@@ -1085,6 +1360,95 @@ async def delete_scene(
     return {"data": {"message": f"Scene {scene.scene_number} deleted successfully."}}
 
 
+async def _resolve_scene_speaker_and_style(
+    scene: SceneModel,
+    session: AsyncSession,
+    character_name: str | None = None,
+    requested_style_code: str | None = None,
+) -> dict[str, Any]:
+    """Load project context, active #Style code, matching speaker Voice DNA, and Act-mapped #State."""
+    project = (await session.execute(select(ProjectModel).where(ProjectModel.id == scene.project_id))).scalar_one_or_none()
+    bible = None
+    if project:
+        bible = (
+            await session.execute(
+                select(MasterProductionBibleModel)
+                .where(MasterProductionBibleModel.project_id == project.id)
+                .order_by(MasterProductionBibleModel.version.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+    proj_style = (
+        (bible.style_parameters.get("master_style_code") if bible and isinstance(bible.style_parameters, dict) else None)
+        or (project.target_style_code if project else None)
+        or "#Style 01"
+    )
+    style_code = (
+        requested_style_code
+        if requested_style_code and (requested_style_code != "#Style 01" or proj_style == "#Style 01")
+        else proj_style
+    )
+
+    chars_data, _, _ = await _load_cast_with_states(scene.project_id, session)
+    total_acts = 4
+    if project and isinstance(project.settings, dict):
+        tr = project.settings.get("treatment") or {}
+        if isinstance(tr.get("acts"), list) and tr["acts"]:
+            total_acts = len(tr["acts"])
+        elif tr.get("structure_type") == "3_act":
+            total_acts = 3
+        elif tr.get("structure_type") == "5_act":
+            total_acts = 5
+
+    project_ctx = None
+    if project:
+        try:
+            project_ctx = extract_project_narrative_context(project, bible=bible, characters=chars_data)
+        except Exception:
+            project_ctx = {
+                "title": project.title,
+                "genre_tone": (project.settings or {}).get("genre") if isinstance(project.settings, dict) else "Cinematic Film",
+                "synopsis": (project.settings or {}).get("synopsis") if isinstance(project.settings, dict) else "",
+                "master_style_code": style_code,
+                "cast_characters": chars_data,
+            }
+
+    target_speaker = (character_name or "").strip()
+    speaker_entry = None
+    if target_speaker:
+        speaker_entry = next(
+            (c for c in chars_data if c.get("name", "").strip().lower() == target_speaker.lower()),
+            None,
+        )
+    if not speaker_entry and chars_data:
+        goal_lower = (scene.narrative_goal or "").lower()
+        speaker_entry = next(
+            (c for c in chars_data if c.get("name", "").strip().lower() in goal_lower),
+            chars_data[0],
+        )
+        if speaker_entry and not target_speaker:
+            target_speaker = speaker_entry.get("name", "")
+
+    voice_dna = speaker_entry.get("voice_dna_profile") if speaker_entry else None
+    active_state = None
+    if speaker_entry and speaker_entry.get("states"):
+        target_state_num = PolyaScreenwriterEngine._resolve_act_to_state_number(scene.act_number, total_acts) or 1
+        target_code = f"#State 0{target_state_num}"
+        states = sorted(speaker_entry["states"], key=lambda s: str(s.get("state_code", "")))
+        active_state = next((s for s in states if str(s.get("state_code", "")).upper() == target_code.upper()), None)
+        if not active_state:
+            active_state = states[min(len(states) - 1, max(0, target_state_num - 1))]
+
+    return {
+        "style_code": style_code,
+        "project_ctx": project_ctx,
+        "speaker_name": target_speaker or None,
+        "voice_dna_profile": voice_dna,
+        "active_state": active_state,
+    }
+
+
 @router.post("/scenes/{scene_id}/calibrate-dialogue", status_code=status.HTTP_200_OK)
 async def calibrate_scene_dialogue(
     scene_id: str,
@@ -1092,46 +1456,195 @@ async def calibrate_scene_dialogue(
     current_user: UserModel = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """Calibrate dialogue pacing, dynamic word count, duration limits, and J/L cuts."""
+    """Calibrate dialogue pacing with PolyaScreenwriterEngine, style/voice continuity, and DB caching."""
     s_uuid = uuid.UUID(scene_id)
     stmt = select(SceneModel).where(SceneModel.id == s_uuid)
     scene = (await session.execute(stmt)).scalar_one_or_none()
     if not scene:
         raise HTTPException(status_code=404, detail="Scene not found")
 
+    raw_text = payload.raw_text.strip()
     max_seconds = payload.max_seconds if payload.max_seconds > 0 else 5.0
-    max_allowed_words = int(max_seconds * 2.8)
 
-    word_count, syllables, est_duration = _estimate_syllables_and_pacing(payload.raw_text)
-    passes_duration_limit = (word_count <= max_allowed_words) and (est_duration <= max_seconds)
-    passes_5s_limit = passes_duration_limit  # Backward compatibility alias
+    ctx_info = await _resolve_scene_speaker_and_style(
+        scene=scene,
+        session=session,
+        character_name=payload.character_name,
+    )
+    resolved_style = ctx_info["style_code"]
 
-    # Dynamic audio transition calculation:
-    # Ambang J-Cut / L-Cut / Hard-Cut berbasis persentase durasi (>75% J_CUT, <40% HARD_CUT, sisanya L_CUT)
-    duration_ratio = est_duration / max_seconds if max_seconds > 0 else 0.0
-    if duration_ratio > 0.75:
-        transition = "J_CUT"
-        audio_lead = 1.0
-    elif duration_ratio < 0.40:
-        transition = "HARD_CUT"
-        audio_lead = 0.0
-    else:
-        transition = "L_CUT"
-        audio_lead = 0.5
+    # Compute cache key incorporating style & speaker identity
+    raw_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+    cache_key = hashlib.sha256(
+        f"{scene_id}:{raw_hash}:{max_seconds:.1f}:{resolved_style}:{(ctx_info['speaker_name'] or '').lower()}".encode("utf-8")
+    ).hexdigest()
 
+    # 1. Check DB cache
+    cache_stmt = select(DialogueCalibrationCacheModel).where(
+        DialogueCalibrationCacheModel.cache_key == cache_key
+    )
+    cached_entry = (await session.execute(cache_stmt)).scalar_one_or_none()
+    if cached_entry:
+        try:
+            cached_data = json.loads(cached_entry.result_json)
+            if isinstance(cached_data, dict) and cached_data.get("alternatives"):
+                cached_data["source"] = "db_cache"
+                return {"data": cached_data}
+        except Exception:
+            pass
+
+    # 2. Analyze via PolyaScreenwriterEngine with style_code, Voice DNA & active State
+    engine = PolyaScreenwriterEngine()
+    calib_res = await engine.calibrate_dialogue_pacing(
+        dialogue_text=raw_text,
+        max_seconds=max_seconds,
+        character_name=payload.character_name,
+        context=scene.narrative_goal,
+        style_code=resolved_style,
+        voice_dna_profile=ctx_info["voice_dna_profile"],
+        active_state=ctx_info["active_state"],
+    )
+
+    result_data = {
+        "scene_id": str(scene.id),
+        "character_name": payload.character_name,
+        "raw_text": raw_text,
+        "word_count": calib_res["word_count"],
+        "syllable_count": calib_res["syllable_count"],
+        "estimated_duration_seconds": calib_res["estimated_duration_seconds"],
+        "passes_duration_limit": calib_res["passes_duration_limit"],
+        "passes_5s_limit": calib_res["passes_5s_limit"],
+        "max_allowed_words": calib_res["max_allowed_words"],
+        "max_seconds": calib_res["max_seconds"],
+        "transition_type": calib_res["transition_type"],
+        "audio_lead_seconds": calib_res["audio_lead_seconds"],
+        "analysis": calib_res["analysis"],
+        "trimmed_suggestion": calib_res.get("trimmed_suggestion"),
+        "alternatives": calib_res.get("alternatives", []),
+        "source": calib_res.get("source", "llm"),
+    }
+
+    # 3. Cache result in DB
+    try:
+      new_cache = DialogueCalibrationCacheModel(
+          cache_key=cache_key,
+          scene_id=scene.id,
+          raw_text_hash=raw_hash,
+          max_seconds=max_seconds,
+          result_json=json.dumps(result_data),
+          created_at=datetime.now(timezone.utc),
+      )
+      session.add(new_cache)
+      await session.commit()
+    except Exception as e:
+      await session.rollback()
+
+    return {"data": result_data}
+
+
+@router.post("/scenes/{scene_id}/director-polish", status_code=status.HTTP_200_OK)
+@router.post("/projects/{project_id}/scenes/{scene_id}/director-polish", status_code=status.HTTP_200_OK)
+async def polish_scene_director(
+    scene_id: str,
+    payload: DirectorPolishRequest = DirectorPolishRequest(),
+    project_id: str | None = None,
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Director Polish: Generates polished suggestions for slugline, narrative goal, dialogue, camera, and lighting without overwriting user manual input."""
+    s_uuid = uuid.UUID(scene_id)
+    scene = (await session.execute(select(SceneModel).where(SceneModel.id == s_uuid))).scalar_one_or_none()
+    if not scene:
+        raise HTTPException(status_code=404, detail="Scene not found")
+
+    # Fetch primary shot for existing optical/lighting baselines
+    shot_stmt = select(ShotModel).where(ShotModel.scene_id == s_uuid).order_by(ShotModel.shot_number.asc())
+    shots = (await session.execute(shot_stmt)).scalars().all()
+    prim = shots[0] if shots else None
+
+    current_slugline = payload.slugline or scene.slugline
+    current_goal = payload.narrative_goal or scene.narrative_goal
+    current_dialogue = payload.dialogue if payload.dialogue is not None else (prim.dialogue if prim else None)
+    current_cam = payload.camera_code or (prim.camera_code if prim else "#Cam 01")
+    current_light = payload.lighting_code or (prim.light_code if prim else "#Light 01")
+
+    ctx_info = await _resolve_scene_speaker_and_style(
+        scene=scene,
+        session=session,
+        requested_style_code=payload.style_code,
+    )
+
+    prev_scene = (
+        await session.execute(
+            select(SceneModel)
+            .where(SceneModel.project_id == scene.project_id, SceneModel.scene_number < scene.scene_number)
+            .order_by(SceneModel.scene_number.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    next_scene = (
+        await session.execute(
+            select(SceneModel)
+            .where(SceneModel.project_id == scene.project_id, SceneModel.scene_number > scene.scene_number)
+            .order_by(SceneModel.scene_number.asc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    adjacent_scenes: dict[str, Any] = {}
+    if prev_scene:
+        adjacent_scenes["prev"] = {
+            "scene_number": prev_scene.scene_number,
+            "slugline": prev_scene.slugline,
+            "narrative_goal": prev_scene.narrative_goal,
+        }
+    if next_scene:
+        adjacent_scenes["next"] = {
+            "scene_number": next_scene.scene_number,
+            "slugline": next_scene.slugline,
+            "narrative_goal": next_scene.narrative_goal,
+        }
+
+    writer = PolyaScreenwriterEngine()
+    polished = await writer.polish_scene_director_cut(
+        scene_number=scene.scene_number,
+        slugline=current_slugline,
+        narrative_goal=current_goal,
+        dialogue=current_dialogue,
+        style_code=ctx_info["style_code"],
+        camera_code=current_cam,
+        lighting_code=current_light,
+        project_context=ctx_info["project_ctx"],
+        voice_dna_profile=ctx_info["voice_dna_profile"],
+        active_state=ctx_info["active_state"],
+        adjacent_scenes=adjacent_scenes or None,
+        act_number=scene.act_number,
+        speaking_character=ctx_info["speaker_name"],
+    )
+
+    # Non-destructive: DB is NOT updated; suggestions returned as preview for user Apply / Discard
     return {
+        "status": "success",
         "data": {
             "scene_id": str(scene.id),
-            "character_name": payload.character_name,
-            "raw_text": payload.raw_text,
-            "word_count": word_count,
-            "syllable_count": syllables,
-            "estimated_duration_seconds": est_duration,
-            "passes_duration_limit": passes_duration_limit,
-            "passes_5s_limit": passes_5s_limit,
-            "max_allowed_words": max_allowed_words,
-            "max_seconds": max_seconds,
-            "transition_type": transition,
-            "audio_lead_seconds": audio_lead,
-        }
+            "scene_number": scene.scene_number,
+            "original": {
+                "slugline": current_slugline,
+                "narrative_goal": current_goal,
+                "dialogue": current_dialogue,
+                "camera_code": current_cam,
+                "lighting_code": current_light,
+            },
+            "suggestions": {
+                "slugline": polished["slugline"],
+                "narrative_goal": polished["narrative_goal"],
+                "dialogue": polished["dialogue"],
+                "camera_code": polished["camera_code"],
+                "lighting_code": polished["lighting_code"],
+                "transition_type": polished.get("transition_type", "L_CUT"),
+                "director_notes": polished["director_notes"],
+            },
+            "options": polished.get("options", []),
+            "message": "Director polish takes ready. Select a take and click 'Apply Selected Take' to update your scene & primary shot.",
+        },
     }

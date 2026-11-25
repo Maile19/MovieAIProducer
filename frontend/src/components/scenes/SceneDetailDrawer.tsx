@@ -17,8 +17,9 @@ import {
   AlertTriangle,
   ExternalLink,
   RefreshCw,
+  Wand2,
 } from "lucide-react";
-import { Scene, api, FlowProxyStatus } from "@/lib/api";
+import { Scene, api, FlowProxyStatus, DirectorPolishResult, DirectorPolishTake } from "@/lib/api";
 import DialogueCalibrator from "./DialogueCalibrator";
 import ShotListManager from "./ShotListManager";
 import QcScorecard from "./QcScorecard";
@@ -42,16 +43,26 @@ export default function SceneDetailDrawer({
 }: SceneDetailDrawerProps) {
   const [slugline, setSlugline] = useState(scene?.slugline || "");
   const [narrativeGoal, setNarrativeGoal] = useState(scene?.narrative_goal || "");
+  const [sceneDialogue, setSceneDialogue] = useState(scene?.dialogue || "");
   const [durationTarget, setDurationTarget] = useState(scene?.duration_target || 5.0);
   const [sceneStatus, setSceneStatus] = useState(scene?.status || "PLANNED");
+  const [cameraCode, setCameraCode] = useState(scene?.camera_code || "#Cam 01");
+  const [lightingCode, setLightingCode] = useState(scene?.lighting_code || "#Light 01");
+  const [transitionType, setTransitionType] = useState(scene?.transition_type || "J_CUT");
+  const [audioLeadSeconds, setAudioLeadSeconds] = useState<number>(scene?.audio_lead_seconds ?? 1.0);
+  const [coverageStyle, setCoverageStyle] = useState<string>("classic_coverage");
+  const [shotsRefreshKey, setShotsRefreshKey] = useState<number>(0);
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [isSplitting, setIsSplitting] = useState(false);
+  const [isPolishing, setIsPolishing] = useState(false);
+  const [polishResult, setPolishResult] = useState<DirectorPolishResult | null>(null);
+  const [selectedTakeIndex, setSelectedTakeIndex] = useState<number>(0);
 
-  // Visual preview state (Dynamic Provider Switching: Google Flow Free / 9Router / SD 3.5 Large)
+  // Visual preview state (Dynamic Provider Switching: Google Flow Free / 9Router / Mock)
   const [previewUrl, setPreviewUrl] = useState<string | null>(scene?.preview_url || null);
   const [previewProvider, setPreviewProvider] = useState<string>(scene?.preview_provider || "google_flow");
-  const [selectedProvider, setSelectedProvider] = useState<"google_flow" | "9router" | "sd35_large_hf" | "mock">("google_flow");
+  const [selectedProvider, setSelectedProvider] = useState<"google_flow" | "9router" | "mock" | string>("google_flow");
   const [selectedModel, setSelectedModel] = useState<string>("gemini-3.1-flash-image");
   const [isGeneratingPreview, setIsGeneratingPreview] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -136,26 +147,127 @@ export default function SceneDetailDrawer({
     }
   }, [selectedProvider]);
 
-  // Multi-engine live prompt compiler inside drawer
+  // Multi-engine live Dual-RAG prompt compiler inside drawer
   const [compilerEngine, setCompilerEngine] = useState<
-    "veo" | "kling" | "runway" | "sora" | "comfyui"
+    "google_flow" | "veo" | "kling" | "seedance" | "runway" | "sora" | "comfyui"
   >("veo");
   const [compilerAccordionOpen, setCompilerAccordionOpen] = useState(true);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
+  const [compiledPromptText, setCompiledPromptText] = useState<string>("");
+  const [isCompilingPrompt, setIsCompilingPrompt] = useState<boolean>(false);
+  const [compiledMeta, setCompiledMeta] = useState<{
+    tokens?: number;
+    characterName?: string | null;
+    stateCode?: string;
+    dirHits?: number;
+    swHits?: number;
+  } | null>(null);
+  const [compileTrigger, setCompileTrigger] = useState<number>(0);
 
   useEffect(() => {
     if (scene) {
       setSlugline(scene.slugline || "");
       setNarrativeGoal(scene.narrative_goal || "");
+      setSceneDialogue(scene.dialogue || "");
       setDurationTarget(scene.duration_target || 5.0);
       setSceneStatus(scene.status || "PLANNED");
+      setCameraCode(scene.camera_code || "#Cam 01");
+      setLightingCode(scene.lighting_code || "#Light 01");
+      setTransitionType(scene.transition_type || "J_CUT");
+      setAudioLeadSeconds(scene.audio_lead_seconds ?? 1.0);
       setPreviewUrl(scene.preview_url || null);
       if (scene.preview_provider) {
         setPreviewProvider(scene.preview_provider);
       }
       setPreviewError(null);
+      setPolishResult(null);
+      setSelectedTakeIndex(0);
+
+      api.scenes
+        .listShots(scene.id)
+        .then((res) => {
+          const prim = res?.data?.[0];
+          if (prim) {
+            if (prim.camera_code) setCameraCode(prim.camera_code);
+            if (prim.light_code || prim.lighting_code) {
+              setLightingCode(prim.light_code || prim.lighting_code || "#Light 01");
+            }
+            if (prim.transition_type && prim.transition_type !== "NONE") {
+              setTransitionType(prim.transition_type);
+            }
+            const savedLead = prim.fg_bg_layers?.audio_lead_seconds;
+            if (typeof savedLead === "number") {
+              setAudioLeadSeconds(savedLead);
+            }
+          }
+        })
+        .catch(() => {});
     }
   }, [scene]);
+
+  useEffect(() => {
+    if (!scene?.id || !compilerAccordionOpen) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        setIsCompilingPrompt(true);
+        const res = await api.transpile.transpilePrompt({
+          provider_target: compilerEngine,
+          project_id: scene.project_id,
+          scene_id: scene.id,
+          style_code: styleCode,
+          camera_code: cameraCode,
+          light_code: lightingCode,
+          slugline,
+          narrative_goal: narrativeGoal,
+          action_description: narrativeGoal,
+          dialogue: sceneDialogue || undefined,
+          transition_type: transitionType,
+          audio_lead_seconds: audioLeadSeconds,
+          is_non_verbal: isNonVerbal,
+        });
+        if (!cancelled && res?.data) {
+          const d = res.data as any;
+          setCompiledPromptText(d.positive || d.positive_prompt || "");
+          setCompiledMeta({
+            tokens: d.metadata?.prompt_tokens_est,
+            characterName: d.metadata?.continuity_sources?.character_name,
+            stateCode: d.metadata?.continuity_sources?.state_code,
+            dirHits: d.metadata?.continuity_sources?.director_rag_hits,
+            swHits: d.metadata?.continuity_sources?.screenwriter_rag_hits,
+          });
+        }
+      } catch {
+        if (!cancelled) {
+          setCompiledPromptText(
+            `[${compilerEngine.toUpperCase()}]: ${slugline}. ${narrativeGoal}. ${styleCode}, ${cameraCode}, ${lightingCode}.`
+          );
+          setCompiledMeta(null);
+        }
+      } finally {
+        if (!cancelled) setIsCompilingPrompt(false);
+      }
+    }, 280);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    scene?.id,
+    scene?.project_id,
+    compilerAccordionOpen,
+    compilerEngine,
+    styleCode,
+    cameraCode,
+    lightingCode,
+    slugline,
+    narrativeGoal,
+    sceneDialogue,
+    transitionType,
+    audioLeadSeconds,
+    isNonVerbal,
+    compileTrigger,
+  ]);
 
   if (!scene) return null;
 
@@ -167,9 +279,15 @@ export default function SceneDetailDrawer({
         narrative_goal: narrativeGoal,
         duration_target: durationTarget,
         status: sceneStatus,
+        dialogue: sceneDialogue,
+        camera_code: cameraCode,
+        lighting_code: lightingCode,
+        transition_type: transitionType,
+        audio_lead_seconds: audioLeadSeconds,
       });
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 2000);
+      setShotsRefreshKey((k) => k + 1);
       onSceneUpdated();
     } catch (err) {
       console.error(err);
@@ -181,14 +299,93 @@ export default function SceneDetailDrawer({
   const handleAutoSplit = async (targetSec: number) => {
     try {
       setIsSplitting(true);
-      await api.scenes.autoSplit(scene.id, targetSec);
+      await api.scenes.autoSplit(scene.id, targetSec, coverageStyle);
       setDurationTarget(targetSec);
-      onSceneUpdated();
+      setShotsRefreshKey((k) => k + 1);
+      onSceneUpdated({ silent: true });
+      showToast("completed", `Shots decomposed via ${coverageStyle.replace("_", " ")} plan.`);
     } catch (err) {
       console.error(err);
     } finally {
       setIsSplitting(false);
     }
+  };
+
+  const handleDirectorPolish = async () => {
+    if (!scene) return;
+    try {
+      setIsPolishing(true);
+      const res = await api.scenes.directorPolish(scene.id, {
+        slugline,
+        narrative_goal: narrativeGoal,
+        dialogue: sceneDialogue,
+        style_code: styleCode,
+        camera_code: cameraCode,
+        lighting_code: lightingCode,
+      });
+      if (res?.data) {
+        setPolishResult(res.data);
+        setSelectedTakeIndex(0);
+      }
+    } catch (err: any) {
+      console.error(err);
+      showToast("error", err?.message || "Gagal mendapatkan saran Director Polish.");
+    } finally {
+      setIsPolishing(false);
+    }
+  };
+
+  const polishTakes: DirectorPolishTake[] = polishResult?.options?.length
+    ? polishResult.options
+    : polishResult
+    ? [
+        {
+          take_id: "recommended",
+          label: "Recommended Cut",
+          slugline: polishResult.suggestions.slugline,
+          narrative_goal: polishResult.suggestions.narrative_goal,
+          dialogue: polishResult.suggestions.dialogue,
+          camera_code: polishResult.suggestions.camera_code || cameraCode,
+          lighting_code: polishResult.suggestions.lighting_code || lightingCode,
+          transition_type: polishResult.suggestions.transition_type || transitionType,
+          director_notes: polishResult.suggestions.director_notes,
+        },
+      ]
+    : [];
+
+  const handleApplyPolish = async (takeOverride?: DirectorPolishTake) => {
+    const selectedTake = takeOverride || polishTakes[selectedTakeIndex] || polishTakes[0];
+    if (!selectedTake || !scene) return;
+    const nextSlug = selectedTake.slugline;
+    const nextGoal = selectedTake.narrative_goal;
+    const nextDlg = selectedTake.dialogue ?? sceneDialogue;
+    const nextCam = selectedTake.camera_code || cameraCode;
+    const nextLight = selectedTake.lighting_code || lightingCode;
+    const nextCut = selectedTake.transition_type || transitionType;
+
+    setSlugline(nextSlug);
+    setNarrativeGoal(nextGoal);
+    setSceneDialogue(nextDlg || "");
+    setCameraCode(nextCam);
+    setLightingCode(nextLight);
+    setTransitionType(nextCut);
+
+    try {
+      await api.scenes.update(scene.id, {
+        slugline: nextSlug,
+        narrative_goal: nextGoal,
+        dialogue: nextDlg || "",
+        camera_code: nextCam,
+        lighting_code: nextLight,
+        transition_type: nextCut,
+      });
+      setShotsRefreshKey((k) => k + 1);
+      onSceneUpdated({ silent: true });
+      showToast("completed", `Take '${selectedTake.label}' diterapkan & disinkronkan ke primary shot (${nextCam} / ${nextLight} / ${nextCut}).`);
+    } catch {
+      showToast("completed", `Take '${selectedTake.label}' diterapkan ke draft; klik Save Changes untuk menyimpan.`);
+    }
+    setPolishResult(null);
   };
 
   const handleGeneratePreview = async () => {
@@ -198,9 +395,33 @@ export default function SceneDetailDrawer({
       setPreviewError(null);
 
       if (selectedProvider === "google_flow") {
-        const prompt =
-          previewPromptOverride.trim() ||
-          `${slugline}. ${narrativeGoal}. ${styleCode}. 8k cinematic photorealistic keyframe.`;
+        let prompt = previewPromptOverride.trim();
+        if (!prompt) {
+          try {
+            const trRes = await api.transpile.transpilePrompt({
+              provider_target: "google_flow",
+              project_id: scene.project_id,
+              scene_id: scene.id,
+              style_code: styleCode,
+              camera_code: cameraCode,
+              light_code: lightingCode,
+              slugline,
+              narrative_goal: narrativeGoal,
+              action_description: narrativeGoal,
+              dialogue: sceneDialogue || undefined,
+              transition_type: transitionType,
+              audio_lead_seconds: audioLeadSeconds,
+              is_non_verbal: isNonVerbal,
+            });
+            const trData = trRes?.data as any;
+            prompt = (trData?.positive || trData?.positive_prompt || "").trim();
+          } catch {
+            prompt = "";
+          }
+          if (!prompt) {
+            prompt = `${slugline}. ${narrativeGoal}. ${styleCode}, ${cameraCode}, ${lightingCode}.`;
+          }
+        }
 
         const startTime = Date.now();
         setElapsedSec(0);
@@ -341,20 +562,10 @@ export default function SceneDetailDrawer({
   };
 
   const getEngineCompiledPrompt = () => {
-    const durSec = durationTarget || 5.0;
-    switch (compilerEngine) {
-      case "veo":
-        return `[Google Veo Flow]: Cinematic 4K video, 2.39:1 anamorphic. Scene ${scene.scene_number}: ${slugline}. Beat: ${narrativeGoal}. ${styleCode}. Dynamic ${durSec}-second camera motion, photorealistic film grain, 24fps motion coherence.`;
-      case "kling":
-        return `[Kling 1.5 Pro]: High-fidelity cinematic master shot in ${slugline}. ${narrativeGoal}. Stylized on ${styleCode}. Precise physical interaction, seamless ${durSec}-second cadence.`;
-      case "runway":
-        return `[Runway Gen-3 Alpha]: Seamless continuous cinematic motion, ${slugline}. Dramatic lighting, ${narrativeGoal}. Award-winning cinematography, ${styleCode}.`;
-      case "sora":
-        return `[OpenAI Sora v1]: Hollywood widescreen film scene. ${slugline}. Character narrative objective: ${narrativeGoal}. Art direction strictly adhering to ${styleCode}.`;
-      case "comfyui":
-      default:
-        return `cinematic film shot, ${slugline}, ${narrativeGoal}, ${styleCode}, photorealistic 35mm grain, 8k uhd, masterpiece.`;
-    }
+    return (
+      compiledPromptText ||
+      `${slugline}. ${narrativeGoal}. ${styleCode}, ${cameraCode}, ${lightingCode}.`
+    );
   };
 
   const handleCopyPrompt = () => {
@@ -443,7 +654,28 @@ export default function SceneDetailDrawer({
           </div>
 
           <div className="space-y-1">
-            <label className="text-[10px] text-obsidian-muted uppercase">Narrative Goal &amp; Dramatic Beat</label>
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] text-obsidian-muted uppercase">Narrative Goal &amp; Dramatic Beat</label>
+              <button
+                type="button"
+                onClick={handleDirectorPolish}
+                disabled={isPolishing}
+                className="flex items-center gap-1 text-[10px] text-amber-400 hover:text-amber-300 transition-colors disabled:opacity-50 cursor-pointer"
+                title="Get AI Director suggestions without overwriting manual inputs"
+              >
+                {isPolishing ? (
+                  <>
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    <span>Polishing...</span>
+                  </>
+                ) : (
+                  <>
+                    <Wand2 className="w-3 h-3" />
+                    <span>Director Polish</span>
+                  </>
+                )}
+              </button>
+            </div>
             <textarea
               value={narrativeGoal}
               onChange={(e) => setNarrativeGoal(e.target.value)}
@@ -452,7 +684,95 @@ export default function SceneDetailDrawer({
             />
           </div>
 
-          {/* Duration Selector (5s | 10s | 15s) & Multi-Shot Assembly Trigger */}
+          {/* Multi-Option Director Polish Preview Cards (3 Selectable Takes) */}
+          {polishResult && polishTakes.length > 0 && (
+            <div className="p-3.5 rounded-xl bg-elevated/80 border border-amber-500/40 space-y-3 font-mono text-xs animate-in fade-in duration-200">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-1.5 text-amber-400 font-bold text-[11px]">
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Director Polish — Select Creative Take ({polishTakes.length} Options)</span>
+                </div>
+                <span className="text-[9px] text-obsidian-muted">Non-destructive until Apply</span>
+              </div>
+
+              {/* 3 Selectable Take Tabs / Cards */}
+              <div className="space-y-2">
+                {polishTakes.map((take, idx) => {
+                  const isActiveTake = idx === selectedTakeIndex;
+                  return (
+                    <div
+                      key={take.take_id || idx}
+                      onClick={() => setSelectedTakeIndex(idx)}
+                      className={cn(
+                        "p-3 rounded-lg border cursor-pointer transition-all space-y-2",
+                        isActiveTake
+                          ? "bg-amber-500/10 border-amber-500/70 shadow-sm"
+                          : "bg-canvas/70 border-border hover:border-amber-500/30"
+                      )}
+                    >
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <div className="flex items-center gap-1.5">
+                          <span className={cn("font-bold text-xs", isActiveTake ? "text-amber-300" : "text-obsidian-primary")}>
+                            Take {idx + 1}: {take.label}
+                          </span>
+                          {take.word_count !== undefined && (
+                            <span className="px-1.5 py-0.2 rounded text-[9px] bg-panel border border-border text-obsidian-muted">
+                              {take.word_count}w ({take.estimated_duration_seconds}s)
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1 text-[9px] font-bold">
+                          <span className="px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30">
+                            {take.camera_code}
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300 border border-violet-500/30">
+                            {take.lighting_code}
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                            {take.transition_type}
+                          </span>
+                        </div>
+                      </div>
+
+                      {take.angle_rationale && (
+                        <div className="text-[10px] text-obsidian-muted">{take.angle_rationale}</div>
+                      )}
+                      <div className="text-[11px] text-emerald-400 font-semibold">{take.slugline}</div>
+                      <div className="text-[11px] text-obsidian-primary font-sans">{take.narrative_goal}</div>
+                      {take.dialogue && (
+                        <div className="text-[11px] text-purple-300 italic">&ldquo;{take.dialogue}&rdquo;</div>
+                      )}
+                      <div className="text-[10px] text-obsidian-secondary border-t border-border/50 pt-1">
+                        <span className="text-amber-400 font-bold">Rationale: </span>
+                        {take.director_notes}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Actions */}
+              <div className="flex items-center justify-end gap-2 pt-1 border-t border-border/60">
+                <button
+                  type="button"
+                  onClick={() => setPolishResult(null)}
+                  className="px-3 py-1 rounded bg-panel hover:bg-elevated border border-border text-obsidian-secondary hover:text-rose-400 transition-colors text-[11px]"
+                >
+                  Discard
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleApplyPolish()}
+                  className="flex items-center gap-1.5 px-3.5 py-1 rounded bg-amber-500 hover:bg-amber-600 text-canvas font-bold transition-all shadow-glow text-[11px]"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Apply Selected Take</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Duration Selector (5s | 10s | 15s) & Dual-Brain Coverage Auto-Split */}
           <div className="pt-2 border-t border-border flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-1.5">
               <Clock className="w-3.5 h-3.5 text-amber-500" />
@@ -478,37 +798,51 @@ export default function SceneDetailDrawer({
               </div>
             </div>
 
-            {durationTarget > 5.0 && (
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <select
+                value={coverageStyle}
+                onChange={(e) => setCoverageStyle(e.target.value)}
+                className="px-2 py-1 rounded-lg bg-panel border border-border text-[10px] font-mono text-obsidian-primary focus:outline-none focus:border-amber-500"
+                title="Select Screenwriter + Director Shot Coverage Strategy"
+              >
+                <option value="classic_coverage">Classic Coverage</option>
+                <option value="visceral_oner">Visceral Oner</option>
+                <option value="rapid_montage">Rapid Montage</option>
+                <option value="intimate_subtext">Intimate Subtext</option>
+              </select>
+
               <button
                 type="button"
                 onClick={() => handleAutoSplit(durationTarget)}
                 disabled={isSplitting}
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-elevated hover:bg-elevated/80 border border-amber-500/40 text-amber-400 text-[10px] font-semibold transition-all disabled:opacity-50"
-                title={`Auto-split into ${durationTarget === 10.0 ? "2" : "3"} shots @ 5.0s`}
+                title={`Dual-Brain Auto-Split (${coverageStyle}) for ${durationTarget}s scene`}
               >
                 <Layers className="w-3 h-3" />
                 <span>
                   {isSplitting
                     ? "Splitting..."
-                    : `Auto-Split (${durationTarget === 10.0 ? "2x5s" : "3x5s"})`}
+                    : coverageStyle === "visceral_oner"
+                    ? `Auto-Split (Oner ${durationTarget}s)`
+                    : `Auto-Split (${durationTarget <= 5.0 ? "1" : durationTarget <= 10.0 ? (coverageStyle === "rapid_montage" ? "3" : "2") : (coverageStyle === "rapid_montage" ? "4" : "3")} Shots)`}
                 </span>
               </button>
-            )}
+            </div>
           </div>
         </div>
 
-        {/* Visual Preview (Stable Diffusion 3.5 Large) */}
+        {/* Visual Preview */}
         <div className="p-4 rounded-xl bg-panel border border-border space-y-3 font-mono text-xs">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Sparkles className="w-4 h-4 text-amber-500" />
               <h4 className="font-cinzel text-xs font-bold uppercase tracking-wider text-obsidian-primary">
-                Visual Concept Preview (SD 3.5 Large)
+                Visual Concept Preview
               </h4>
             </div>
             <div className="flex items-center gap-2">
               <span className="px-2 py-0.5 rounded text-[9px] font-bold uppercase bg-amber-500/10 text-amber-400 border border-amber-500/30">
-                HF Space
+                Visual AI
               </span>
               <button
                 type="button"
@@ -538,7 +872,7 @@ export default function SceneDetailDrawer({
             <div className="flex items-center gap-1.5">
               <span className="text-[10px] uppercase font-bold text-obsidian-muted">Provider:</span>
               <div className="flex items-center gap-1">
-                {(["google_flow", "9router", "sd35_large_hf", "mock"] as const).map((prov) => (
+                {(["google_flow", "9router", "mock"] as const).map((prov) => (
                   <button
                     key={prov}
                     type="button"
@@ -553,8 +887,6 @@ export default function SceneDetailDrawer({
                       ? "Google Flow (Free)"
                       : prov === "9router"
                       ? "9Router (Combos)"
-                      : prov === "sd35_large_hf"
-                      ? "SD 3.5 HF"
                       : "Local Mock"}
                   </button>
                 ))}
@@ -802,8 +1134,6 @@ export default function SceneDetailDrawer({
                           ? "Flow (Free)"
                           : selectedProvider === "9router"
                           ? "9Router"
-                          : selectedProvider === "sd35_large_hf"
-                          ? "SD 3.5"
                           : "Mock"}
                         )
                       </span>
@@ -825,8 +1155,6 @@ export default function SceneDetailDrawer({
                     ? "Google Flow (Free 6-Account Round-Robin Pool)"
                     : selectedProvider === "9router"
                     ? "9Router Multi-Model Combo"
-                    : selectedProvider === "sd35_large_hf"
-                    ? "Stable Diffusion 3.5 Large"
                     : "Local Mock Engine"}
                   .
                 </p>
@@ -846,7 +1174,7 @@ export default function SceneDetailDrawer({
                         ? "Google Flow"
                         : selectedProvider === "9router"
                         ? "9Router"
-                        : "SD 3.5"}
+                        : "Visual AI"}
                       ...
                     </span>
                   </>
@@ -859,8 +1187,6 @@ export default function SceneDetailDrawer({
                         ? "Google Flow Free"
                         : selectedProvider === "9router"
                         ? "9Router"
-                        : selectedProvider === "sd35_large_hf"
-                        ? "SD 3.5"
                         : "Mock"}
                       )
                     </span>
@@ -883,10 +1209,23 @@ export default function SceneDetailDrawer({
         </div>
 
         {/* Dynamic Dialogue Limiter & J/L-Cut Calibration Waveform */}
-        <DialogueCalibrator sceneId={scene.id} durationTarget={durationTarget} isNonVerbal={isNonVerbal} />
+        <DialogueCalibrator
+          sceneId={scene.id}
+          initialDialogue={sceneDialogue}
+          speakingCharacter={scene.speaking_character}
+          durationTarget={durationTarget}
+          initialTransitionType={transitionType}
+          initialAudioLead={audioLeadSeconds}
+          onDialogueChange={setSceneDialogue}
+          onCutStrategyChange={(nextCut, nextLead) => {
+            setTransitionType(nextCut);
+            setAudioLeadSeconds(nextLead);
+          }}
+          isNonVerbal={isNonVerbal}
+        />
 
         {/* Shot List Manager */}
-        <ShotListManager sceneId={scene.id} onShotsUpdated={onSceneUpdated} />
+        <ShotListManager sceneId={scene.id} refreshKey={shotsRefreshKey} onShotsUpdated={onSceneUpdated} />
 
         {/* Live Multi-Platform Prompt Compiler Drawer */}
         <div className="rounded-xl bg-panel border border-border overflow-hidden">
@@ -911,34 +1250,68 @@ export default function SceneDetailDrawer({
           {compilerAccordionOpen && (
             <div className="p-4 border-t border-border space-y-3 font-mono text-xs animate-in fade-in duration-150">
               {/* Engine Switcher */}
-              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
-                {[
-                  { id: "veo", label: "Google Veo" },
-                  { id: "kling", label: "Kling 1.5" },
-                  { id: "runway", label: "Runway Gen-3" },
-                  { id: "sora", label: "OpenAI Sora" },
-                  { id: "comfyui", label: "ComfyUI Wan 2.1" },
-                ].map((eng) => (
-                  <button
-                    key={eng.id}
-                    type="button"
-                    onClick={() => setCompilerEngine(eng.id as any)}
-                    className={cn(
-                      "px-2.5 py-1 rounded-md text-[11px] font-semibold transition-all border shrink-0",
-                      compilerEngine === eng.id
-                        ? "bg-amber-500/20 text-amber-400 border-amber-500/40 shadow-sm"
-                        : "bg-canvas text-obsidian-muted hover:text-obsidian-secondary border-border"
-                    )}
-                  >
-                    {eng.label}
-                  </button>
-                ))}
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
+                  {[
+                    { id: "google_flow", label: "Google Flow" },
+                    { id: "veo", label: "Google Veo" },
+                    { id: "kling", label: "Kling 1.5" },
+                    { id: "seedance", label: "Seedance" },
+                    { id: "runway", label: "Runway Gen-3" },
+                    { id: "sora", label: "OpenAI Sora" },
+                    { id: "comfyui", label: "ComfyUI Wan 2.1" },
+                  ].map((eng) => (
+                    <button
+                      key={eng.id}
+                      type="button"
+                      onClick={() => setCompilerEngine(eng.id as any)}
+                      className={cn(
+                        "px-2.5 py-1 rounded-md text-[11px] font-semibold transition-all border shrink-0",
+                        compilerEngine === eng.id
+                          ? "bg-amber-500/20 text-amber-400 border-amber-500/40 shadow-sm"
+                          : "bg-canvas text-obsidian-muted hover:text-obsidian-secondary border-border"
+                      )}
+                    >
+                      {eng.label}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCompileTrigger((n) => n + 1)}
+                  disabled={isCompilingPrompt}
+                  className="p-1.5 rounded bg-canvas hover:bg-elevated border border-border text-amber-400 shrink-0 disabled:opacity-50"
+                  title="Recompile via Dual-RAG /api/v1/transpile"
+                >
+                  <RefreshCw className={cn("w-3.5 h-3.5", isCompilingPrompt && "animate-spin")} />
+                </button>
               </div>
+
+              {compiledMeta && (
+                <div className="flex flex-wrap items-center gap-1.5 text-[9px] text-obsidian-muted">
+                  {compiledMeta.characterName && (
+                    <span className="px-1.5 py-0.5 rounded bg-blue-500/10 border border-blue-500/30 text-blue-300">
+                      DNA: {compiledMeta.characterName} ({compiledMeta.stateCode || "#State 01"})
+                    </span>
+                  )}
+                  <span className="px-1.5 py-0.5 rounded bg-canvas border border-border">
+                    Dual-RAG 8765:{compiledMeta.dirHits ?? 0} &bull; 8766:{compiledMeta.swHits ?? 0}
+                  </span>
+                  {compiledMeta.tokens !== undefined && (
+                    <span className="px-1.5 py-0.5 rounded bg-canvas border border-border text-emerald-400">
+                      {compiledMeta.tokens} tokens
+                    </span>
+                  )}
+                </div>
+              )}
 
               {/* Compiled Prompt Area */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between text-[11px]">
-                  <span className="text-obsidian-muted uppercase">Compiled Engine Prompt:</span>
+                  <span className="text-obsidian-muted uppercase flex items-center gap-1.5">
+                    <span>Dual-RAG Compiled Prompt:</span>
+                    {isCompilingPrompt && <Loader2 className="w-3 h-3 animate-spin text-amber-400" />}
+                  </span>
                   <button
                     type="button"
                     onClick={handleCopyPrompt}
@@ -957,7 +1330,7 @@ export default function SceneDetailDrawer({
                     )}
                   </button>
                 </div>
-                <div className="p-3 rounded-lg bg-canvas border border-border text-[11px] text-obsidian-primary leading-relaxed selection:bg-amber-500/30">
+                <div className="p-3 rounded-lg bg-canvas border border-border text-[11px] text-obsidian-primary leading-relaxed selection:bg-amber-500/30 max-h-36 overflow-y-auto">
                   {getEngineCompiledPrompt()}
                 </div>
               </div>
@@ -966,7 +1339,7 @@ export default function SceneDetailDrawer({
         </div>
 
         {/* Automated QC Scorecard */}
-        <QcScorecard sceneId={scene.id} />
+        <QcScorecard sceneId={scene.id} keyframeUrl={previewUrl} />
       </div>
     </div>
   );

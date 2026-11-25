@@ -21,8 +21,16 @@ interface PromptTranspilerProps {
   compCode: string;
   speedCode: string;
   aspectRatio?: string;
+  projectId?: string;
+  sceneId?: string;
+  shotId?: string;
+  characterId?: string;
   characterDna?: string;
   actionDescription?: string;
+  slugline?: string;
+  dialogue?: string | null;
+  transitionType?: string;
+  audioLeadSeconds?: number | null;
   presetRules?: Record<string, any>;
   isNonVerbal?: boolean;
 }
@@ -36,13 +44,21 @@ export default function PromptTranspiler({
   compCode,
   speedCode,
   aspectRatio = "16:9",
-  characterDna = "Protagonist, 35mm cybernetic operative, neon reflections",
-  actionDescription = "Slowly turns towards the camera, drawing high-frequency energy blade",
+  projectId,
+  sceneId,
+  shotId,
+  characterId,
+  characterDna = "",
+  actionDescription = "",
+  slugline = "",
+  dialogue,
+  transitionType = "NONE",
+  audioLeadSeconds,
   presetRules,
   isNonVerbal = false,
 }: PromptTranspilerProps) {
   const [selectedEngine, setSelectedEngine] = useState<
-    "veo" | "kling" | "runway" | "sora" | "comfyui" | "9router" | "sd35"
+    "veo" | "kling" | "seedance" | "runway" | "sora" | "comfyui" | "9router"
   >("9router");
   const [selected9RouterModel, setSelected9RouterModel] = useState<string>("ag/gemini-3.8-flash");
   const [transpileResult, setTranspileResult] = useState<TranspileResult | null>(null);
@@ -51,9 +67,9 @@ export default function PromptTranspiler({
 
   const engines = [
     { id: "9router", label: "9Router AI", badge: "Multi-Combo" },
-    { id: "sd35", label: "SD 3.5 Large", badge: "HuggingFace" },
     { id: "veo", label: "Google Veo / Flow", badge: "Veo 2.0" },
     { id: "kling", label: "Kling 1.5", badge: "Pro" },
+    { id: "seedance", label: "Seedance 1.0", badge: "Motion" },
     { id: "runway", label: "Runway Gen-3", badge: "Alpha" },
     { id: "sora", label: "OpenAI Sora", badge: "v1.0" },
     { id: "comfyui", label: "ComfyUI", badge: "Wan 2.1" },
@@ -92,7 +108,7 @@ export default function PromptTranspiler({
     },
   ];
 
-  // Trigger live transpile whenever parameters change
+  // Trigger live Dual-RAG transpile whenever parameters or active scene/character change
   useEffect(() => {
     let isCancelled = false;
 
@@ -102,6 +118,10 @@ export default function PromptTranspiler({
         const payload: TranspileInput = {
           provider_target: selectedEngine,
           model: selectedEngine === "9router" ? selected9RouterModel : undefined,
+          project_id: projectId || undefined,
+          scene_id: sceneId || undefined,
+          shot_id: shotId || undefined,
+          character_id: characterId || undefined,
           style_code: styleCode,
           camera_code: camCode,
           lens_code: lensCode,
@@ -109,8 +129,12 @@ export default function PromptTranspiler({
           light_code: lightCode,
           act_code: actCode,
           speed_code: speedCode,
-          character_dna: characterDna,
-          action_description: actionDescription,
+          character_dna: characterDna || undefined,
+          action_description: actionDescription || undefined,
+          slugline: slugline || undefined,
+          dialogue: dialogue ?? undefined,
+          transition_type: transitionType,
+          audio_lead_seconds: audioLeadSeconds ?? undefined,
           aspect_ratio: aspectRatio === "2.39:1" ? "16:9" : aspectRatio,
           preset_rules: presetRules,
           is_non_verbal: isNonVerbal,
@@ -122,20 +146,26 @@ export default function PromptTranspiler({
           setTranspileResult({
             positive: raw.positive || raw.positive_prompt || "",
             negative: raw.negative || raw.negative_prompt || "",
-            engine: raw.engine || (selectedEngine === "9router" ? `9Router • ${selected9RouterModel}` : raw.metadata?.target_engine || selectedEngine),
+            engine:
+              raw.engine ||
+              (selectedEngine === "9router"
+                ? `9Router • ${selected9RouterModel}`
+                : raw.metadata?.target_engine || selectedEngine),
+            compiled_engines: raw.compiled_engines,
             metadata: raw.metadata,
           });
         }
       } catch {
-        // Fallback local compilation if network glitch occurs
         if (!isCancelled) {
+          const subjectFallback = characterDna.trim() || "No character DNA selected yet";
+          const actionFallback = actionDescription.trim() || slugline.trim() || "Awaiting scene beat";
           setTranspileResult({
-            positive: `[${selectedEngine.toUpperCase()}${selectedEngine === "9router" ? ` • ${selected9RouterModel}` : ""}]: Cinematic film in ${aspectRatio}. ${styleCode}, shot on ${lensCode} with ${camCode}, ${compCode}. ${characterDna}, ${actionDescription}. Lighting: ${lightCode}. Motion: ${speedCode}. Award-winning cinematography, photorealistic 35mm film grain.`,
-            negative: "lowres, bad anatomy, bad hands, text, error, blurry, deformed limbs, watermark",
-            engine: selectedEngine === "9router" ? `9Router • ${selected9RouterModel}` : `${selectedEngine}_cinematic_v2`,
+            positive: `[${selectedEngine.toUpperCase()}]: ${styleCode}, ${camCode}, ${lensCode}, ${compCode}, ${lightCode}, ${speedCode}. Subject: ${subjectFallback}. Beat: ${actionFallback}.`,
+            negative: "lowres, bad anatomy, bad hands, text, blurry, watermark",
+            engine: selectedEngine === "9router" ? `9Router • ${selected9RouterModel}` : selectedEngine,
             metadata: {
-              prompt_tokens_est: 84,
               aspect_ratio: aspectRatio,
+              engine_params: { aspect_ratio: aspectRatio },
             },
           });
         }
@@ -151,6 +181,10 @@ export default function PromptTranspiler({
   }, [
     selectedEngine,
     selected9RouterModel,
+    projectId,
+    sceneId,
+    shotId,
+    characterId,
     styleCode,
     lightCode,
     actCode,
@@ -161,6 +195,10 @@ export default function PromptTranspiler({
     aspectRatio,
     characterDna,
     actionDescription,
+    slugline,
+    dialogue,
+    transitionType,
+    audioLeadSeconds,
     presetRules,
     isNonVerbal,
   ]);
@@ -171,6 +209,15 @@ export default function PromptTranspiler({
     setTimeout(() => setCopiedKey(null), 2000);
   };
 
+  const engineParams = (transpileResult?.metadata?.engine_params || {}) as Record<string, unknown>;
+  const continuitySources = transpileResult?.metadata?.continuity_sources;
+  const paramSummaryParts: string[] = [`Aspect: ${aspectRatio}`];
+  if (typeof engineParams.cfg_scale === "number") paramSummaryParts.push(`CFG: ${engineParams.cfg_scale}`);
+  if (typeof engineParams.guidance_scale === "number") paramSummaryParts.push(`Guidance: ${engineParams.guidance_scale}`);
+  if (typeof engineParams.steps === "number") paramSummaryParts.push(`Steps: ${engineParams.steps}`);
+  if (typeof engineParams.fps === "number") paramSummaryParts.push(`${engineParams.fps}fps`);
+  if (typeof engineParams.duration_seconds === "number") paramSummaryParts.push(`${engineParams.duration_seconds}s`);
+
   return (
     <div className="bg-panel border border-border rounded-xl p-3.5 shadow-studio space-y-3 font-sans">
       {/* Header */}
@@ -178,7 +225,7 @@ export default function PromptTranspiler({
         <div className="flex items-center gap-2">
           <Cpu className="w-4 h-4 text-amber-500" />
           <h3 className="font-cinzel text-xs font-bold uppercase tracking-wider text-obsidian-primary">
-            Live Prompt Transpiler
+            Live Dual-RAG Prompt Transpiler
           </h3>
         </div>
         {isLoading ? (
@@ -188,10 +235,27 @@ export default function PromptTranspiler({
           </div>
         ) : (
           <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-canvas border border-border text-emerald-400 font-semibold">
-            {transpileResult?.metadata?.prompt_tokens_est || 78} TOKENS
+            {transpileResult?.metadata?.prompt_tokens_est || 0} TOKENS
           </span>
         )}
       </div>
+
+      {/* Continuity DNA & Dual-RAG Telemetry */}
+      {continuitySources && (
+        <div className="flex flex-wrap items-center gap-1.5 text-[9px] font-mono">
+          <span className="px-1.5 py-0.5 rounded bg-canvas border border-border text-amber-300">
+            {continuitySources.style_code || styleCode}
+          </span>
+          {continuitySources.character_name && (
+            <span className="px-1.5 py-0.5 rounded bg-blue-500/10 border border-blue-500/30 text-blue-300">
+              DNA: {continuitySources.character_name} ({continuitySources.state_code || "#State 01"})
+            </span>
+          )}
+          <span className="px-1.5 py-0.5 rounded bg-canvas border border-border text-obsidian-muted">
+            RAG 8765:{continuitySources.director_rag_hits ?? 0} &bull; 8766:{continuitySources.screenwriter_rag_hits ?? 0}
+          </span>
+        </div>
+      )}
 
       {/* Engine / Provider Selector Dropdown */}
       <ObsidianDropdown
@@ -208,7 +272,7 @@ export default function PromptTranspiler({
         onChange={(val) => setSelectedEngine(val as any)}
       />
 
-      {/* 9Router Model Selection Dropdown (Only when 9router engine selected) */}
+      {/* 9Router Model Selection Dropdown */}
       {selectedEngine === "9router" && (
         <div className="animate-in fade-in duration-150">
           <ObsidianDropdown
@@ -247,8 +311,8 @@ export default function PromptTranspiler({
             )}
           </button>
         </div>
-        <div className="p-3 rounded-lg bg-canvas border border-border text-xs font-mono text-obsidian-primary leading-relaxed max-h-32 overflow-y-auto selection:bg-amber-500/30">
-          {transpileResult?.positive || "Compiling prompt across Hollywood matrices..."}
+        <div className="p-3 rounded-lg bg-canvas border border-border text-xs font-mono text-obsidian-primary leading-relaxed max-h-36 overflow-y-auto selection:bg-amber-500/30">
+          {transpileResult?.positive || "Select a scene or configure matrix codes to compile prompt..."}
         </div>
       </div>
 
@@ -292,12 +356,13 @@ export default function PromptTranspiler({
               : transpileResult?.engine || selectedEngine}
           </strong>
         </div>
-        <div className="flex items-center gap-2">
-          <span>Aspect: {aspectRatio}</span>
-          <span>&bull;</span>
-          <span>CFG: 7.0</span>
-          <span>&bull;</span>
-          <span>Steps: 30</span>
+        <div className="flex items-center gap-2 flex-wrap">
+          {paramSummaryParts.map((part, i) => (
+            <React.Fragment key={part}>
+              {i > 0 && <span>&bull;</span>}
+              <span>{part}</span>
+            </React.Fragment>
+          ))}
         </div>
       </div>
     </div>

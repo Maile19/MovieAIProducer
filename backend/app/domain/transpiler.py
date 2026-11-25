@@ -5,6 +5,7 @@ precise, platform-optimized prompt specifications for Google Veo, Kling AI,
 Runway Gen-3, OpenAI Sora, and local ComfyUI.
 """
 
+import asyncio
 from typing import Any
 
 from backend.app.domain.catalog import (
@@ -16,6 +17,8 @@ from backend.app.domain.catalog import (
     SPEED_MATRIX,
     STYLE_CATALOG,
 )
+from backend.app.domain.director_rag import DirectorRAGClient
+from backend.app.services.screenwriter_rag import ScreenwriterRAGClient
 
 
 def _lookup_name(catalog: list[dict[str, str]], code: str) -> str:
@@ -52,6 +55,14 @@ class LivePromptTranspiler:
         preset_rules: dict[str, Any] | None = None,
         is_non_verbal: bool = False,
         model: str | None = None,
+        audio_lead_seconds: float | None = None,
+        character_name: str = "",
+        emotional_anchor: str = "",
+        physical_damage: str = "",
+        aesthetic_directives: str = "",
+        color_grade_emulation: str = "",
+        slugline: str = "",
+        narrative_goal: str = "",
     ) -> dict[str, Any]:
         target = provider_target.lower().strip()
 
@@ -71,17 +82,33 @@ class LivePromptTranspiler:
         act_name = _lookup_name(ACTING_MATRIX, act_code)
         speed_name = _lookup_name(SPEED_MATRIX, speed_code)
 
-        char_part = character_dna or "Protagonist"
+        char_label = character_name.strip()
+        base_char = character_dna.strip()
+        if char_label and base_char:
+            char_part = f"{char_label}: {base_char}"
+        elif base_char:
+            char_part = base_char
+        elif char_label:
+            char_part = char_label
+        else:
+            char_part = "Lead subject"
         if wardrobe:
             char_part += f", dressed in {wardrobe}"
+        if physical_damage:
+            char_part += f", physical wear: {physical_damage}"
+        if emotional_anchor:
+            char_part += f", expression/emotion: {emotional_anchor}"
         if state_code:
             char_part += f" ({state_code})"
 
-        action_part = action_description or f"performing with {act_name}"
+        beat_parts = [p.strip() for p in (slugline, narrative_goal, action_description) if p and p.strip()]
+        action_part = "; ".join(beat_parts) if beat_parts else f"performing with {act_name}"
         if non_verbal and "slapstick" not in action_part.lower():
-            action_part += " (expressive slapstick non-verbal physical comedy)"
+            action_part += " (expressive non-verbal physical staging)"
 
-        env_part = env_dna or "cinematic environment"
+        env_part = env_dna or (slugline.strip() if slugline.strip() else "cinematic environment")
+        style_detail_bits = [b for b in (aesthetic_directives.strip(), color_grade_emulation.strip()) if b]
+        style_suffix = f" ({'; '.join(style_detail_bits)})" if style_detail_bits else ""
 
         fg_bg_parts = []
         if fg_description:
@@ -100,30 +127,40 @@ class LivePromptTranspiler:
         if target in ("veo", "google_veo", "google_flow", "flow"):
             # Google Veo / Google Flow: Rich descriptive cinematic phrasing
             positive = (
-                f"Photorealistic cinematic movie shot in {aspect_ratio}. "
+                f"Cinematic movie shot in {aspect_ratio}. "
                 f"Camera: {camera_name} ({camera_code}), {lens_name} ({lens_code}), composition: {comp_name} ({comp_code}). "
                 f"Subject: {char_part}, {action_part}. "
                 f"Environment: {env_part}. "
                 f"Lighting: {light_name} ({light_code}). "
                 f"Motion dynamics: {speed_name} ({speed_code}), {fg_bg_text}. "
-                f"Visual Style: {style_name} ({style_code}). "
-                f"Ultra-high definition, 35mm film grain, 24fps master film print."
+                f"Visual Style: {style_name} ({style_code}){style_suffix}. "
+                f"Ultra-high definition, cohesive film grain, 24fps master print."
             )
             negative = (
-                "cartoon, low quality, CGI artifacts, plastic skin, distorted hands, "
-                "extra limbs, watermark, jerky camera, unrealistic physics, text"
+                "low quality, blurry, distorted hands, extra limbs, watermark, "
+                "jerky camera, unrealistic physics, text, compression artifacts"
             )
-            engine = "google_veo_2"
+            engine = "google_flow_veo2" if target in ("google_flow", "flow") else "google_veo_2"
+
+        elif target in ("seedance", "seedance_1.0", "bytedance_seedance"):
+            positive = (
+                f"Seedance motion sequence ({aspect_ratio}, 24fps): {style_name} ({style_code}){style_suffix}. "
+                f"Camera blocking: {camera_name}, {lens_name}, {comp_name}. "
+                f"Character continuity: {char_part}. Action beat: {action_part}. "
+                f"Setting: {env_part}. Illumination: {light_name}. Tempo: {speed_name}. {fg_bg_text}."
+            )
+            negative = "flicker, identity drift, warped limbs, blurry motion, watermark, text"
+            engine = "seedance_1.0_pro"
 
         elif target in ("kling", "kling_ai", "kling_1.5", "kling_2.0"):
             # Kling AI: Emphasizes photorealism, physical dynamics, and clear styling
             positive = (
-                f"Masterpiece cinematic capture, {style_name} ({style_code}). "
+                f"Masterpiece cinematic capture, {style_name} ({style_code}){style_suffix}. "
                 f"{camera_name}, {lens_name}, {comp_name}. "
                 f"{char_part}, {action_part}. "
                 f"Set in {env_part}, lit by {light_name}. "
                 f"{speed_name} speed profile. {fg_bg_text}. "
-                f"8k resolution, authentic skin textures, raytraced reflections, professional color grading."
+                f"8k resolution, authentic surface textures, raytraced reflections, professional color grading."
             )
             negative = (
                 "deformed, blurry, low resolution, overexposed, bad anatomy, "
@@ -252,11 +289,39 @@ class LivePromptTranspiler:
             if proj_neg_str and proj_neg_str not in negative:
                 negative = f"{negative}, {proj_neg_str}" if negative else proj_neg_str
 
+        norm_transition = (effective_transition or "NONE").upper().strip()
+        raw_transition = (transition_type or "NONE").upper().strip()
+        if non_verbal and raw_transition == "NONE" and audio_lead_seconds is None:
+            j_offset = -1.2
+            l_offset = 1.0
+        elif norm_transition == "J_CUT":
+            j_offset = -abs(float(audio_lead_seconds)) if audio_lead_seconds is not None else (-1.2 if non_verbal else -1.0)
+            l_offset = None
+        elif norm_transition == "L_CUT":
+            j_offset = None
+            l_offset = abs(float(audio_lead_seconds)) if audio_lead_seconds is not None else (1.0 if non_verbal else 0.5)
+        else:
+            j_offset = None
+            l_offset = None
+
+        if target in ("comfyui", "sd35", "sd35_large", "huggingface", "sd35_large_hf"):
+            engine_params = {"cfg_scale": 5.5 if "sd35" in target else 6.5, "steps": 28, "sampler": "dpmpp_2m"}
+        elif target in ("flux", "flux_dev", "flux_schnell"):
+            engine_params = {"guidance_scale": 3.5, "steps": 28}
+        elif target in ("9router", "nine_router", "9router_ai", "gemini_image", "multimodel"):
+            engine_params = {"model": model or "ag/gemini-3.8-flash", "aspect_ratio": aspect_ratio}
+        else:
+            engine_params = {"fps": 24, "duration_seconds": 5.0, "aspect_ratio": aspect_ratio}
+
+        prompt_tokens_est = max(1, round(len(positive.split()) * 1.35))
+
         metadata = {
             "target_engine": engine,
             "aspect_ratio": aspect_ratio,
             "model": model,
             "selected_model": model,
+            "prompt_tokens_est": prompt_tokens_est,
+            "engine_params": engine_params,
             "codes": {
                 "style": style_code,
                 "camera": camera_code,
@@ -269,10 +334,11 @@ class LivePromptTranspiler:
             },
             "audio_bridge": {
                 "dialogue": effective_dialogue,
-                "transition_type": effective_transition,
+                "transition_type": norm_transition,
+                "audio_lead_seconds": float(audio_lead_seconds) if audio_lead_seconds is not None else (abs(j_offset) if j_offset is not None else l_offset),
                 "non_verbal_mode": non_verbal,
-                "j_cut_offset_seconds": -1.2 if non_verbal else None,
-                "l_cut_offset_seconds": 1.0 if non_verbal else None,
+                "j_cut_offset_seconds": j_offset,
+                "l_cut_offset_seconds": l_offset,
             },
         }
 
@@ -285,3 +351,170 @@ class LivePromptTranspiler:
             "engine": engine,
             "metadata": metadata,
         }
+
+    @staticmethod
+    async def transpile_with_rag(
+        provider_target: str,
+        style_code: str = "#Style 01",
+        camera_code: str = "#Cam 01",
+        lens_code: str = "#Lens 01",
+        comp_code: str = "#Comp 01",
+        light_code: str = "#Light 01",
+        act_code: str = "#Act 01",
+        speed_code: str = "#Speed 01",
+        character_dna: str = "",
+        state_code: str = "#State 01",
+        wardrobe: str = "",
+        env_dna: str = "",
+        action_description: str = "",
+        fg_description: str = "",
+        bg_description: str = "",
+        dialogue: str | None = None,
+        transition_type: str = "NONE",
+        aspect_ratio: str = "16:9",
+        preset_rules: dict[str, Any] | None = None,
+        is_non_verbal: bool = False,
+        model: str | None = None,
+        genre: str | None = None,
+        top_k: int = 3,
+        audio_lead_seconds: float | None = None,
+        character_name: str = "",
+        emotional_anchor: str = "",
+        physical_damage: str = "",
+        aesthetic_directives: str = "",
+        color_grade_emulation: str = "",
+        slugline: str = "",
+        narrative_goal: str = "",
+        act_number: int | None = None,
+    ) -> dict[str, Any]:
+        """Compile prompt deterministically then enrich with Dual-RAG (8765 Director + 8766 Screenwriter)."""
+        base = LivePromptTranspiler.transpile(
+            provider_target=provider_target,
+            style_code=style_code,
+            camera_code=camera_code,
+            lens_code=lens_code,
+            comp_code=comp_code,
+            light_code=light_code,
+            act_code=act_code,
+            speed_code=speed_code,
+            character_dna=character_dna,
+            state_code=state_code,
+            wardrobe=wardrobe,
+            env_dna=env_dna,
+            action_description=action_description,
+            fg_description=fg_description,
+            bg_description=bg_description,
+            dialogue=dialogue,
+            transition_type=transition_type,
+            aspect_ratio=aspect_ratio,
+            preset_rules=preset_rules,
+            is_non_verbal=is_non_verbal,
+            model=model,
+            audio_lead_seconds=audio_lead_seconds,
+            character_name=character_name,
+            emotional_anchor=emotional_anchor,
+            physical_damage=physical_damage,
+            aesthetic_directives=aesthetic_directives,
+            color_grade_emulation=color_grade_emulation,
+            slugline=slugline,
+            narrative_goal=narrative_goal,
+        )
+
+        beat_parts = [p.strip() for p in (slugline, narrative_goal, action_description, env_dna) if p and p.strip()]
+        scene_beat = ". ".join(beat_parts) or f"{style_code} {camera_code} {light_code} cinematic shot"
+
+        rag_result, sw_result = await asyncio.gather(
+            DirectorRAGClient.retrieve(
+                scene_beat=scene_beat,
+                genre=genre,
+                style_code=style_code,
+                engine=provider_target,
+                top_k=top_k,
+            ),
+            ScreenwriterRAGClient.retrieve_scene_craft(
+                style_code=style_code,
+                act_number=act_number,
+                narrative_goal=scene_beat,
+                top_k=2,
+            ),
+        )
+        cues_text, rag_refs = DirectorRAGClient.format_transpile_cues(rag_result, max_shots=top_k)
+
+        sw_directives = sw_result.get("writing_directives") or {}
+        sw_items = sw_result.get("items") or []
+        sw_cue_bits: list[str] = []
+        if sw_directives.get("action_beat_grammar"):
+            sw_cue_bits.append(str(sw_directives["action_beat_grammar"]))
+        if sw_items and isinstance(sw_items[0], dict):
+            subtext_cue = sw_items[0].get("subtext_visual_cue") or sw_items[0].get("visual_subtext") or sw_items[0].get("rule_text")
+            if subtext_cue:
+                sw_cue_bits.append(str(subtext_cue)[:140])
+        sw_cues_text = "; ".join(sw_cue_bits).strip()
+
+        enriched_positive = base["positive_prompt"]
+        if sw_cues_text:
+            enriched_positive = f"{enriched_positive} Screenwriter visual subtext & beat cues: {sw_cues_text}."
+        if cues_text:
+            enriched_positive = f"{enriched_positive} Director reference cinematography cues: {cues_text}."
+
+        base["positive_prompt"] = enriched_positive
+        base["positive"] = enriched_positive
+        base["metadata"]["prompt_tokens_est"] = max(1, round(len(enriched_positive.split()) * 1.35))
+        base["rag_references"] = rag_refs
+        base["metadata"]["rag_references"] = rag_refs
+        base["metadata"]["screenwriter_cues"] = sw_cues_text or None
+        base["metadata"]["continuity_sources"] = {
+            "style_code": style_code,
+            "character_name": character_name or None,
+            "state_code": state_code,
+            "has_character_dna": bool(character_dna.strip()),
+            "has_wardrobe_dna": bool(wardrobe.strip()),
+            "director_rag_hits": len(rag_refs),
+            "screenwriter_rag_hits": len(sw_items),
+        }
+
+        compiled_engines: dict[str, dict[str, str]] = {}
+        for eng_key in ("google_flow", "veo", "kling", "seedance", "runway", "sora", "comfyui", "9router"):
+            eng_res = LivePromptTranspiler.transpile(
+                provider_target=eng_key,
+                style_code=style_code,
+                camera_code=camera_code,
+                lens_code=lens_code,
+                comp_code=comp_code,
+                light_code=light_code,
+                act_code=act_code,
+                speed_code=speed_code,
+                character_dna=character_dna,
+                state_code=state_code,
+                wardrobe=wardrobe,
+                env_dna=env_dna,
+                action_description=action_description,
+                fg_description=fg_description,
+                bg_description=bg_description,
+                dialogue=dialogue,
+                transition_type=transition_type,
+                aspect_ratio=aspect_ratio,
+                preset_rules=preset_rules,
+                is_non_verbal=is_non_verbal,
+                model=model if eng_key == "9router" else None,
+                audio_lead_seconds=audio_lead_seconds,
+                character_name=character_name,
+                emotional_anchor=emotional_anchor,
+                physical_damage=physical_damage,
+                aesthetic_directives=aesthetic_directives,
+                color_grade_emulation=color_grade_emulation,
+                slugline=slugline,
+                narrative_goal=narrative_goal,
+            )
+            eng_pos = eng_res["positive_prompt"]
+            if sw_cues_text:
+                eng_pos = f"{eng_pos} Screenwriter visual subtext & beat cues: {sw_cues_text}."
+            if cues_text:
+                eng_pos = f"{eng_pos} Director reference cinematography cues: {cues_text}."
+            compiled_engines[eng_key] = {
+                "engine": eng_res["engine"],
+                "positive_prompt": eng_pos,
+                "negative_prompt": eng_res["negative_prompt"],
+            }
+        base["compiled_engines"] = compiled_engines
+        return base

@@ -11,7 +11,7 @@ import ApprovalGateModal from "@/components/studio/ApprovalGateModal";
 import MatrixSelector, { SelectedMatrixState } from "@/components/studio/MatrixSelector";
 import PromptTranspiler from "@/components/studio/PromptTranspiler";
 import SavePresetModal from "@/components/presets/SavePresetModal";
-import { api, Project, Character, PipelineStatusResponse } from "@/lib/api";
+import { api, Project, Character, PipelineStatusResponse, Scene, Shot, QCReport, ProjectQCSummary } from "@/lib/api";
 import { Loader2, AlertCircle, ArrowLeft, RefreshCw, BookmarkPlus, Sparkles, Film } from "lucide-react";
 import Link from "next/link";
 
@@ -38,6 +38,13 @@ export default function StudioPage() {
   const [characters, setCharacters] = useState<Character[]>([]);
   const [activeCharacterId, setActiveCharacterId] = useState<string | null>(null);
 
+  // Active Scene, Primary Shot, and real QC state
+  const [scenes, setScenes] = useState<Scene[]>([]);
+  const [activeSceneId, setActiveSceneId] = useState<string | null>(null);
+  const [activeShot, setActiveShot] = useState<Shot | null>(null);
+  const [qcSummary, setQcSummary] = useState<ProjectQCSummary | null>(null);
+  const [activeSceneQc, setActiveSceneQc] = useState<QCReport | null>(null);
+
   // Studio viewport & matrix state
   const [aspectRatio, setAspectRatio] = useState<AspectRatioType>("2.39:1");
   const [selectedMatrix, setSelectedMatrix] = useState<SelectedMatrixState>({
@@ -56,11 +63,13 @@ export default function StudioPage() {
       setIsLoading(true);
       setErrorMsg(null);
 
-      // Fetch project, catalog, and character DNA anchors in parallel
-      const [projRes, catalogRes, charsRes] = await Promise.allSettled([
+      // Fetch project, catalog, characters, scenes, and QC summary in parallel
+      const [projRes, catalogRes, charsRes, scenesRes, qcRes] = await Promise.allSettled([
         api.projects.get(projectId),
         api.catalog.getMatrix(),
         api.bible.listCharacters(projectId),
+        api.scenes.list(projectId),
+        api.qc.getProjectSummary(projectId),
       ]);
 
       if (projRes.status === "fulfilled" && projRes.value?.data) {
@@ -103,6 +112,16 @@ export default function StudioPage() {
           setActiveCharacterId((prev) => prev || charList[0]?.id || null);
         }
       }
+
+      if (scenesRes.status === "fulfilled" && scenesRes.value?.data) {
+        const scList = scenesRes.value.data;
+        setScenes(scList);
+        setActiveSceneId((prev) => (prev && scList.some((s) => s.id === prev) ? prev : scList[0]?.id || null));
+      }
+
+      if (qcRes.status === "fulfilled" && qcRes.value?.data) {
+        setQcSummary(qcRes.value.data);
+      }
     } catch (err: any) {
       setErrorMsg(err.message || "Failed to load studio project.");
     } finally {
@@ -115,6 +134,42 @@ export default function StudioPage() {
       loadStudioData();
     }
   }, [projectId, loadStudioData]);
+
+  // Hydrate primary shot & real QC audit for active scene
+  useEffect(() => {
+    if (!activeSceneId) {
+      setActiveShot(null);
+      setActiveSceneQc(null);
+      return;
+    }
+    let cancelled = false;
+    Promise.allSettled([api.scenes.listShots(activeSceneId), api.qc.auditScene(activeSceneId)]).then(
+      ([shotsRes, auditRes]) => {
+        if (cancelled) return;
+        if (shotsRes.status === "fulfilled" && shotsRes.value?.data?.length) {
+          const prim = shotsRes.value.data[0];
+          setActiveShot(prim);
+          setSelectedMatrix((prev) => ({
+            ...prev,
+            camCode: prim.camera_code || prev.camCode,
+            lensCode: prim.lens_code || prev.lensCode,
+            compCode: prim.comp_code || prev.compCode,
+            lightCode: prim.light_code || prim.lighting_code || prev.lightCode,
+            actCode: prim.act_code || prev.actCode,
+            speedCode: prim.speed_code || prev.speedCode,
+          }));
+        } else {
+          setActiveShot(null);
+        }
+        if (auditRes.status === "fulfilled" && auditRes.value?.data) {
+          setActiveSceneQc(auditRes.value.data);
+        }
+      }
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSceneId]);
 
   const handleUpdateMatrix = (updates: Partial<SelectedMatrixState>) => {
     setSelectedMatrix((prev) => ({ ...prev, ...updates }));
@@ -229,6 +284,19 @@ export default function StudioPage() {
   const activeViewingStage = viewingStage || currentWorkingStage;
   const viewingStageDef = pipelineStatus?.stages?.[`S${activeViewingStage.toString().padStart(2, "0")}`];
   const gateHistory = Array.isArray(project?.settings?.gate_history) ? project.settings.gate_history : [];
+  const activeScene = scenes.find((s) => s.id === activeSceneId) || null;
+  const activeCharacter = characters.find((c) => c.id === activeCharacterId) || characters[0] || null;
+  const activeSceneTitle = activeScene
+    ? `SCENE ${activeScene.scene_number.toString().padStart(2, "0")} — ${activeScene.slugline}`
+    : viewingStageDef?.name
+    ? `STAGE ${activeViewingStage}: ${viewingStageDef.name}`
+    : "No Active Scene Selected";
+  const resolvedPreviewUrl = activeScene?.preview_url || previewUrl;
+  const resolvedPreviewProvider = activeScene?.preview_provider || previewProvider;
+  const resolvedQcStatus = activeSceneQc?.status || (qcSummary && qcSummary.total_scenes > 0 ? qcSummary.status : null);
+  const resolvedQcScore =
+    activeSceneQc?.overall_score_100 ??
+    (qcSummary && qcSummary.total_scenes > 0 ? qcSummary.continuum_score : null);
 
   return (
     <AppShell
@@ -266,7 +334,21 @@ export default function StudioPage() {
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {scenes.length > 0 && (
+              <select
+                value={activeSceneId || ""}
+                onChange={(e) => setActiveSceneId(e.target.value || null)}
+                className="px-2.5 py-1.5 rounded-lg bg-canvas border border-border text-xs font-mono text-amber-300 max-w-[220px] truncate focus:outline-none focus:border-amber-500"
+                title="Select Active Scene for Studio Viewport & Dual-RAG Transpiler"
+              >
+                {scenes.map((sc) => (
+                  <option key={sc.id} value={sc.id}>
+                    #{sc.scene_number.toString().padStart(2, "0")} {sc.slugline}
+                  </option>
+                ))}
+              </select>
+            )}
             {(project?.settings as any)?.preset_name && (
               <span className="hidden sm:flex px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-mono items-center gap-1.5">
                 <Sparkles className="w-3.5 h-3.5" />
@@ -329,12 +411,12 @@ export default function StudioPage() {
             <DualViewportPlayer
               aspectRatio={aspectRatio}
               onChangeAspectRatio={setAspectRatio}
-              currentSceneTitle={`STAGE ${activeViewingStage}: ${viewingStageDef?.name || project?.stage_name || "Hollywood Sequence"}`}
+              currentSceneTitle={activeSceneTitle}
               styleCode={selectedMatrix.styleCode}
               cameraCode={selectedMatrix.camCode}
               lightingCode={selectedMatrix.lightCode}
-              previewUrl={previewUrl}
-              previewProvider={previewProvider}
+              previewUrl={resolvedPreviewUrl}
+              previewProvider={resolvedPreviewProvider}
               isLoadingPreview={isLoadingPreview}
               onGeneratePreview={handleGeneratePreview}
               characterList={characters}
@@ -342,6 +424,8 @@ export default function StudioPage() {
               onSelectCharacter={setActiveCharacterId}
               projectId={projectId}
               previewError={previewError}
+              qcStatus={resolvedQcStatus}
+              qcScore={resolvedQcScore}
             />
 
             {/* 12-Step Timeline Scrubber */}
@@ -378,6 +462,10 @@ export default function StudioPage() {
 
             {/* Live Prompt Transpiler */}
             <PromptTranspiler
+              projectId={projectId}
+              sceneId={activeScene?.id}
+              shotId={activeShot?.id}
+              characterId={activeCharacter?.id}
               styleCode={selectedMatrix.styleCode}
               lightCode={selectedMatrix.lightCode}
               actCode={selectedMatrix.actCode}
@@ -386,6 +474,16 @@ export default function StudioPage() {
               compCode={selectedMatrix.compCode}
               speedCode={selectedMatrix.speedCode}
               aspectRatio={aspectRatio}
+              characterDna={activeCharacter?.base_prompt || ""}
+              actionDescription={activeScene?.narrative_goal || ""}
+              slugline={activeScene?.slugline || ""}
+              dialogue={activeShot?.dialogue || activeScene?.dialogue || null}
+              transitionType={activeShot?.transition_type || activeScene?.transition_type || "NONE"}
+              audioLeadSeconds={
+                typeof activeShot?.fg_bg_layers?.audio_lead_seconds === "number"
+                  ? activeShot.fg_bg_layers.audio_lead_seconds
+                  : activeScene?.audio_lead_seconds
+              }
               presetRules={(project?.settings as any)?.preset_data?.transpiler_rules}
               isNonVerbal={
                 !!(project?.settings as any)?.preset_data?.bible_blueprint?.world_rules?.visual_non_verbal_mode?.enabled ||

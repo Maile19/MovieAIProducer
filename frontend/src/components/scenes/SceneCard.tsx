@@ -2,55 +2,81 @@
 
 import React from "react";
 import { Scene } from "@/lib/api";
-import { Film, Clock, ArrowUpRight, AlertTriangle } from "lucide-react";
+import { Film, Clock, ArrowUpRight, AlertTriangle, MessageSquareText } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface SceneCardProps {
   scene: Scene;
   isSelected: boolean;
   onSelect: (scene: Scene) => void;
+  structureType?: string;
+  totalActs?: number;
 }
 
-export default function SceneCard({ scene, isSelected, onSelect }: SceneCardProps) {
-  // Determine act number (1, 2, 3, 4)
-  const actNum = scene.act_number || (scene.scene_number <= 12 ? 1 : scene.scene_number <= 25 ? 2 : scene.scene_number <= 38 ? 3 : 4);
+const ACT_COLOR_PALETTE = [
+  {
+    badgeClass: "bg-emerald-500/10 text-emerald-400 border-emerald-500/30",
+    cardAccent: "group-hover:border-emerald-500/50",
+    numberColor: "text-emerald-400",
+  },
+  {
+    badgeClass: "bg-blue-500/10 text-blue-400 border-blue-500/30",
+    cardAccent: "group-hover:border-blue-500/50",
+    numberColor: "text-blue-400",
+  },
+  {
+    badgeClass: "bg-violet-500/10 text-violet-400 border-violet-500/30",
+    cardAccent: "group-hover:border-violet-500/50",
+    numberColor: "text-violet-400",
+  },
+  {
+    badgeClass: "bg-rose-500/10 text-rose-400 border-rose-500/30",
+    cardAccent: "group-hover:border-rose-500/50",
+    numberColor: "text-rose-400",
+  },
+  {
+    badgeClass: "bg-amber-500/10 text-amber-400 border-amber-500/30",
+    cardAccent: "group-hover:border-amber-500/50",
+    numberColor: "text-amber-400",
+  },
+];
 
-  // Act color theme mapping
-  const getActBadge = () => {
-    switch (actNum) {
-      case 1:
-        return {
-          label: "ACT I &bull; SETUP",
-          badgeClass: "bg-emerald-500/10 text-emerald-400 border-emerald-500/30",
-          cardAccent: "group-hover:border-emerald-500/50",
-          numberColor: "text-emerald-400",
-        };
-      case 2:
-        return {
-          label: "ACT II-A &bull; RISING",
-          badgeClass: "bg-blue-500/10 text-blue-400 border-blue-500/30",
-          cardAccent: "group-hover:border-blue-500/50",
-          numberColor: "text-blue-400",
-        };
-      case 3:
-        return {
-          label: "ACT II-B &bull; DESCENT",
-          badgeClass: "bg-violet-500/10 text-violet-400 border-violet-500/30",
-          cardAccent: "group-hover:border-violet-500/50",
-          numberColor: "text-violet-400",
-        };
-      case 4:
-      default:
-        return {
-          label: "ACT III &bull; CLIMAX",
-          badgeClass: "bg-rose-500/10 text-rose-400 border-rose-500/30",
-          cardAccent: "group-hover:border-rose-500/50",
-          numberColor: "text-rose-400",
-        };
-    }
-  };
+const STRUCTURE_ACT_LABELS: Record<string, string[]> = {
+  "3_act": ["ACT I • SETUP", "ACT II • CONFRONTATION", "ACT III • RESOLUTION"],
+  "4_act": ["ACT I • SETUP", "ACT II-A • RISING", "ACT II-B • DESCENT", "ACT III • CLIMAX"],
+  "5_act": [
+    "ACT I • EXPOSITION",
+    "ACT II • RISING ACTION",
+    "ACT III • CLIMAX",
+    "ACT IV • FALLING ACTION",
+    "ACT V • DENOUEMENT",
+  ],
+  "youtube_viral": ["ACT I • HOOK", "ACT II • ESCALATION", "ACT III • REVERSAL", "ACT IV • PAYOFF"],
+};
 
-  const actInfo = getActBadge();
+export default function SceneCard({
+  scene,
+  isSelected,
+  onSelect,
+  structureType,
+  totalActs,
+}: SceneCardProps) {
+  const actNum = Math.max(
+    1,
+    Math.min(
+      5,
+      scene.act_number ||
+        (scene.scene_number <= 12 ? 1 : scene.scene_number <= 25 ? 2 : scene.scene_number <= 38 ? 3 : 4)
+    )
+  );
+  const resolvedStructure =
+    structureType || (totalActs === 5 || actNum === 5 ? "5_act" : totalActs === 3 ? "3_act" : "4_act");
+  const labels = STRUCTURE_ACT_LABELS[resolvedStructure] || STRUCTURE_ACT_LABELS["4_act"];
+  const label = labels[actNum - 1] || `ACT ${actNum} • BEAT`;
+  const palette = ACT_COLOR_PALETTE[Math.min(actNum - 1, ACT_COLOR_PALETTE.length - 1)];
+  const actInfo = { label, ...palette };
+
+  const dialoguePreview = (scene.dialogue || "").trim();
 
   return (
     <div
@@ -78,8 +104,9 @@ export default function SceneCard({ scene, isSelected, onSelect }: SceneCardProp
               "text-[9px] font-mono px-1.5 py-0.5 rounded border font-semibold",
               actInfo.badgeClass
             )}
-            dangerouslySetInnerHTML={{ __html: actInfo.label }}
-          />
+          >
+            {actInfo.label}
+          </span>
         </div>
 
         <div className="flex items-center gap-1">
@@ -129,6 +156,12 @@ export default function SceneCard({ scene, isSelected, onSelect }: SceneCardProp
         <p className="text-[11px] text-obsidian-secondary line-clamp-2 leading-tight font-sans">
           {scene.narrative_goal || "Dramatic progression beat for Hollywood narrative curve."}
         </p>
+        {dialoguePreview && (
+          <div className="flex items-center gap-1 pt-0.5 text-[10px] font-mono text-amber-300/90 truncate">
+            <MessageSquareText className="w-3 h-3 text-amber-400 shrink-0" />
+            <span className="truncate">{dialoguePreview}</span>
+          </div>
+        )}
       </div>
 
       {/* Bottom Footer: Target Duration & Shot Count */}

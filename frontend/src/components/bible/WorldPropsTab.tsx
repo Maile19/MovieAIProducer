@@ -13,13 +13,18 @@ import {
   Clapperboard,
   Users,
   Film,
+  Edit3,
+  Check,
+  X,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { api, EnvironmentItem, PropItem, GenerationMeta } from "@/lib/api";
 
 interface WorldPropsTabProps {
   worldRules: Record<string, any>;
   isLocked?: boolean;
-  onSave?: (rules: Record<string, any>) => void;
+  onSave?: (rules: Record<string, any>) => Promise<void> | void;
   project?: any;
   characters?: any[];
   projectId?: string;
@@ -29,14 +34,25 @@ interface WorldPropsTabProps {
 export default function WorldPropsTab({
   worldRules,
   isLocked = false,
-  onSave: _onSave,
+  onSave,
   project,
   characters = [],
   projectId,
   onRefresh,
 }: WorldPropsTabProps) {
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [additionalNotes, setAdditionalNotes] = useState<string>("");
+  const [showNotesInput, setShowNotesInput] = useState<boolean>(false);
+
+  // Inline edit state for Environments
+  const [editingEnvIdx, setEditingEnvIdx] = useState<number | null>(null);
+  const [envDraft, setEnvDraft] = useState<EnvironmentItem | null>(null);
+
+  // Inline edit state for Hero Props
+  const [editingPropIdx, setEditingPropIdx] = useState<number | null>(null);
+  const [propDraft, setPropDraft] = useState<PropItem | null>(null);
 
   const environments: EnvironmentItem[] = Array.isArray(worldRules?.environments)
     ? worldRules.environments
@@ -46,7 +62,6 @@ export default function WorldPropsTab({
 
   const hasData = environments.length > 0 || propsList.length > 0;
 
-  // Derive counts for the Context Linked strip
   const charsCount =
     characters.length ||
     generationMeta?.context_ingested?.characters_count ||
@@ -66,7 +81,9 @@ export default function WorldPropsTab({
     try {
       setIsGenerating(true);
       setErrorMsg(null);
-      await api.bible.generateWorldProps(projectId);
+      await api.bible.generateWorldProps(projectId, {
+        additional_notes: additionalNotes.trim() || undefined,
+      });
       if (onRefresh) {
         await onRefresh();
       }
@@ -77,6 +94,40 @@ export default function WorldPropsTab({
     } finally {
       setIsGenerating(false);
     }
+  };
+
+  const persistWorldRulesPatch = async (patch: Record<string, any>) => {
+    const nextRules = { ...worldRules, ...patch };
+    setIsSavingEdit(true);
+    setErrorMsg(null);
+    try {
+      if (projectId) {
+        await api.bible.update(projectId, { world_rules: nextRules });
+        if (onRefresh) await onRefresh();
+      } else if (onSave) {
+        await onSave(nextRules);
+      }
+    } catch (err: any) {
+      setErrorMsg(err?.message || "Failed to save World & Props edit.");
+    } finally {
+      setIsSavingEdit(false);
+    }
+  };
+
+  const handleSaveEnv = async (idx: number) => {
+    if (!envDraft) return;
+    const nextEnvs = environments.map((e, i) => (i === idx ? envDraft : e));
+    await persistWorldRulesPatch({ environments: nextEnvs });
+    setEditingEnvIdx(null);
+    setEnvDraft(null);
+  };
+
+  const handleSaveProp = async (idx: number) => {
+    if (!propDraft) return;
+    const nextProps = propsList.map((p, i) => (i === idx ? propDraft : p));
+    await persistWorldRulesPatch({ props: nextProps });
+    setEditingPropIdx(null);
+    setPropDraft(null);
   };
 
   return (
@@ -99,7 +150,6 @@ export default function WorldPropsTab({
               </span>
             )}
 
-            {/* Provenance Badge */}
             {generationMeta && (
               generationMeta.engine === "polya_ai_director_llm" ? (
                 <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-mono bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-semibold shadow-sm">
@@ -124,7 +174,17 @@ export default function WorldPropsTab({
         </div>
 
         {/* Action Controls */}
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {!isLocked && (
+            <button
+              type="button"
+              onClick={() => setShowNotesInput((v) => !v)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-canvas hover:bg-elevated border border-border text-obsidian-secondary hover:text-amber-400 font-mono text-xs transition-colors"
+            >
+              {showNotesInput ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              <span>Director Notes</span>
+            </button>
+          )}
           {isLocked ? (
             <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-panel border border-border text-obsidian-muted font-mono text-xs">
               <Lock className="w-3.5 h-3.5 text-amber-500/70" />
@@ -155,6 +215,22 @@ export default function WorldPropsTab({
           )}
         </div>
       </div>
+
+      {/* Collapsible Director & Narrative Notes (additional_notes) */}
+      {(showNotesInput || !hasData) && !isLocked && (
+        <div className="p-3.5 rounded-xl bg-panel border border-amber-500/30 space-y-2 font-mono text-xs">
+          <label className="text-[10px] text-amber-400 font-bold uppercase tracking-wider block">
+            Director &amp; Narrative Notes (Optional Steering for World &amp; Props)
+          </label>
+          <textarea
+            value={additionalNotes}
+            onChange={(e) => setAdditionalNotes(e.target.value)}
+            rows={2}
+            placeholder="e.g. Emphasize flooded colonial canal locks, brass oil lanterns, salt-corroded iron catwalks, and wet acoustic echoes..."
+            className="w-full px-3 py-2 rounded-lg bg-canvas border border-border text-obsidian-primary text-xs focus:border-amber-500 focus:outline-none resize-none"
+          />
+        </div>
+      )}
 
       {/* Context Linked Strip */}
       <div className="p-3 rounded-xl bg-canvas border border-border flex flex-wrap items-center justify-between gap-2.5 font-mono text-xs">
@@ -274,54 +350,133 @@ export default function WorldPropsTab({
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-            {environments.map((env, idx) => (
-              <div
-                key={env.code || `env_${idx}`}
-                className="p-3.5 rounded-xl bg-canvas border border-border hover:border-amber-500/40 transition-all space-y-2.5 font-mono text-xs"
-              >
-                <div className="flex items-start justify-between border-b border-border/80 pb-2 gap-2">
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <span className="font-bold text-amber-400">{env.code}</span>
-                    {env.lighting_code && (
-                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/10 border border-blue-500/20 text-blue-400 font-bold">
-                        {env.lighting_code}
-                      </span>
-                    )}
-                  </div>
-                  <span className="text-[11px] font-bold text-obsidian-primary font-sans break-words text-right">
-                    {env.name}
-                  </span>
-                </div>
+            {environments.map((env, idx) => {
+              const isEditing = editingEnvIdx === idx && envDraft;
+              return (
+                <div
+                  key={env.code || `env_${idx}`}
+                  className="p-3.5 rounded-xl bg-canvas border border-border hover:border-amber-500/40 transition-all space-y-2.5 font-mono text-xs"
+                >
+                  {isEditing ? (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-bold text-amber-400">{env.code}</span>
+                        <input
+                          type="text"
+                          value={envDraft.lighting_code || ""}
+                          onChange={(e) => setEnvDraft({ ...envDraft, lighting_code: e.target.value })}
+                          placeholder="#Light 01"
+                          className="w-24 px-2 py-0.5 rounded bg-panel border border-border text-blue-400 text-[10px]"
+                        />
+                      </div>
+                      <input
+                        type="text"
+                        value={envDraft.name}
+                        onChange={(e) => setEnvDraft({ ...envDraft, name: e.target.value })}
+                        placeholder="Environment Name"
+                        className="w-full px-2.5 py-1 rounded bg-panel border border-border text-obsidian-primary font-sans font-bold text-xs"
+                      />
+                      <textarea
+                        value={envDraft.architecture}
+                        onChange={(e) => setEnvDraft({ ...envDraft, architecture: e.target.value })}
+                        rows={2}
+                        placeholder="Visual Architecture & Layout..."
+                        className="w-full px-2.5 py-1 rounded bg-panel border border-border text-obsidian-secondary font-sans text-[11px]"
+                      />
+                      <textarea
+                        value={envDraft.atmosphere}
+                        onChange={(e) => setEnvDraft({ ...envDraft, atmosphere: e.target.value })}
+                        rows={2}
+                        placeholder="Atmosphere & Mood..."
+                        className="w-full px-2.5 py-1 rounded bg-panel border border-border text-obsidian-secondary font-sans text-[11px]"
+                      />
+                      <input
+                        type="text"
+                        value={envDraft.lighting_and_audio || ""}
+                        onChange={(e) => setEnvDraft({ ...envDraft, lighting_and_audio: e.target.value })}
+                        placeholder="Lighting & Ambient Foley..."
+                        className="w-full px-2.5 py-1 rounded bg-panel border border-border text-obsidian-muted font-sans text-[11px]"
+                      />
+                      <div className="flex justify-end gap-1.5 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => { setEditingEnvIdx(null); setEnvDraft(null); }}
+                          className="px-2 py-1 rounded bg-panel border border-border text-obsidian-muted flex items-center gap-1"
+                        >
+                          <X className="w-3 h-3" />
+                          <span>Cancel</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleSaveEnv(idx)}
+                          disabled={isSavingEdit}
+                          className="px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-600 text-canvas font-bold flex items-center gap-1 disabled:opacity-50"
+                        >
+                          {isSavingEdit ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                          <span>Save</span>
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex items-start justify-between border-b border-border/80 pb-2 gap-2">
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <span className="font-bold text-amber-400">{env.code}</span>
+                          {env.lighting_code && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/10 border border-blue-500/20 text-blue-400 font-bold">
+                              {env.lighting_code}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="text-[11px] font-bold text-obsidian-primary font-sans break-words text-right">
+                            {env.name}
+                          </span>
+                          {!isLocked && (
+                            <button
+                              type="button"
+                              onClick={() => { setEditingEnvIdx(idx); setEnvDraft({ ...env }); }}
+                              className="p-1 rounded text-obsidian-muted hover:text-amber-400 shrink-0"
+                              title="Edit Environment"
+                            >
+                              <Edit3 className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
 
-                {env.linked_scenes && (
-                  <div className="text-[10px] text-amber-500/90 bg-amber-500/5 px-2 py-1 rounded border border-amber-500/10">
-                    <span className="font-semibold uppercase text-[9px] text-obsidian-muted block">Linked Scenes:</span>
-                    <span className="font-sans leading-tight">{env.linked_scenes}</span>
-                  </div>
-                )}
+                      {env.linked_scenes && (
+                        <div className="text-[10px] text-amber-500/90 bg-amber-500/5 px-2 py-1 rounded border border-amber-500/10">
+                          <span className="font-semibold uppercase text-[9px] text-obsidian-muted block">Linked Scenes:</span>
+                          <span className="font-sans leading-tight">{env.linked_scenes}</span>
+                        </div>
+                      )}
 
-                <div className="space-y-1">
-                  <span className="text-[10px] text-obsidian-muted uppercase">Architecture:</span>
-                  <p className="text-[11px] text-obsidian-secondary leading-relaxed font-sans break-words">
-                    {env.architecture}
-                  </p>
-                </div>
+                      <div className="space-y-1">
+                        <span className="text-[10px] text-obsidian-muted uppercase">Architecture:</span>
+                        <p className="text-[11px] text-obsidian-secondary leading-relaxed font-sans break-words">
+                          {env.architecture}
+                        </p>
+                      </div>
 
-                <div className="space-y-1">
-                  <span className="text-[10px] text-amber-500 uppercase">Atmosphere:</span>
-                  <p className="text-[11px] text-obsidian-secondary leading-relaxed font-sans break-words">
-                    {env.atmosphere}
-                  </p>
-                </div>
+                      <div className="space-y-1">
+                        <span className="text-[10px] text-amber-500 uppercase">Atmosphere:</span>
+                        <p className="text-[11px] text-obsidian-secondary leading-relaxed font-sans break-words">
+                          {env.atmosphere}
+                        </p>
+                      </div>
 
-                <div className="space-y-1">
-                  <span className="text-[10px] text-blue-400 uppercase">Lighting &amp; Audio:</span>
-                  <p className="text-[10px] text-obsidian-muted leading-relaxed font-sans break-words">
-                    {env.lighting_and_audio || (env.lighting && env.audio ? `${env.lighting} • ${env.audio}` : env.lighting || env.audio || "Standard setup")}
-                  </p>
+                      <div className="space-y-1">
+                        <span className="text-[10px] text-blue-400 uppercase">Lighting &amp; Audio:</span>
+                        <p className="text-[10px] text-obsidian-muted leading-relaxed font-sans break-words">
+                          {env.lighting_and_audio || (env.lighting && env.audio ? `${env.lighting} • ${env.audio}` : env.lighting || env.audio || "Standard setup")}
+                        </p>
+                      </div>
+                    </>
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -340,47 +495,124 @@ export default function WorldPropsTab({
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-            {propsList.map((prp, idx) => (
-              <div
-                key={prp.code || `prop_${idx}`}
-                className="p-3.5 rounded-xl bg-canvas border border-border hover:border-amber-500/40 transition-all space-y-2.5 font-mono text-xs"
-              >
-                <div className="flex items-start justify-between border-b border-border/80 pb-2 gap-2">
-                  <span className="font-bold text-amber-400 shrink-0">{prp.code}</span>
-                  <span className="text-[11px] font-bold text-obsidian-primary font-sans break-words text-right">
-                    {prp.name}
-                  </span>
-                </div>
+            {propsList.map((prp, idx) => {
+              const isEditing = editingPropIdx === idx && propDraft;
+              return (
+                <div
+                  key={prp.code || `prop_${idx}`}
+                  className="p-3.5 rounded-xl bg-canvas border border-border hover:border-amber-500/40 transition-all space-y-2.5 font-mono text-xs"
+                >
+                  {isEditing ? (
+                    <div className="space-y-2">
+                      <div className="text-amber-400 font-bold">{prp.code}</div>
+                      <input
+                        type="text"
+                        value={propDraft.name}
+                        onChange={(e) => setPropDraft({ ...propDraft, name: e.target.value })}
+                        placeholder="Prop Name"
+                        className="w-full px-2.5 py-1 rounded bg-panel border border-border text-obsidian-primary font-sans font-bold text-xs"
+                      />
+                      <input
+                        type="text"
+                        value={propDraft.owner_character || ""}
+                        onChange={(e) => setPropDraft({ ...propDraft, owner_character: e.target.value })}
+                        placeholder="Owner Character"
+                        className="w-full px-2.5 py-1 rounded bg-panel border border-border text-cyan-300 font-sans text-[11px]"
+                      />
+                      <textarea
+                        value={propDraft.material_and_wear || propDraft.material || ""}
+                        onChange={(e) => setPropDraft({ ...propDraft, material_and_wear: e.target.value })}
+                        rows={2}
+                        placeholder="Visual Details, Materiality & Wear..."
+                        className="w-full px-2.5 py-1 rounded bg-panel border border-border text-obsidian-secondary font-sans text-[11px]"
+                      />
+                      <textarea
+                        value={propDraft.narrative_utility || propDraft.weight || ""}
+                        onChange={(e) => setPropDraft({ ...propDraft, narrative_utility: e.target.value })}
+                        rows={2}
+                        placeholder="Dramatic Significance & Narrative Utility..."
+                        className="w-full px-2.5 py-1 rounded bg-panel border border-border text-obsidian-secondary font-sans text-[11px]"
+                      />
+                      <input
+                        type="text"
+                        value={propDraft.action || ""}
+                        onChange={(e) => setPropDraft({ ...propDraft, action: e.target.value })}
+                        placeholder="Tactile Interaction..."
+                        className="w-full px-2.5 py-1 rounded bg-panel border border-border text-obsidian-muted font-sans text-[11px]"
+                      />
+                      <div className="flex justify-end gap-1.5 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => { setEditingPropIdx(null); setPropDraft(null); }}
+                          className="px-2 py-1 rounded bg-panel border border-border text-obsidian-muted flex items-center gap-1"
+                        >
+                          <X className="w-3 h-3" />
+                          <span>Cancel</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleSaveProp(idx)}
+                          disabled={isSavingEdit}
+                          className="px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-600 text-canvas font-bold flex items-center gap-1 disabled:opacity-50"
+                        >
+                          {isSavingEdit ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                          <span>Save</span>
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex items-start justify-between border-b border-border/80 pb-2 gap-2">
+                        <span className="font-bold text-amber-400 shrink-0">{prp.code}</span>
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="text-[11px] font-bold text-obsidian-primary font-sans break-words text-right">
+                            {prp.name}
+                          </span>
+                          {!isLocked && (
+                            <button
+                              type="button"
+                              onClick={() => { setEditingPropIdx(idx); setPropDraft({ ...prp }); }}
+                              className="p-1 rounded text-obsidian-muted hover:text-amber-400 shrink-0"
+                              title="Edit Prop"
+                            >
+                              <Edit3 className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
 
-                {prp.owner_character && (
-                  <div className="text-[10px] text-cyan-400/90 bg-cyan-500/5 px-2 py-1 rounded border border-cyan-500/10 flex items-center gap-1.5">
-                    <span className="text-[9px] uppercase text-obsidian-muted font-bold">Owner:</span>
-                    <span className="font-sans font-semibold text-cyan-300 truncate">{prp.owner_character}</span>
-                  </div>
-                )}
+                      {prp.owner_character && (
+                        <div className="text-[10px] text-cyan-400/90 bg-cyan-500/5 px-2 py-1 rounded border border-cyan-500/10 flex items-center gap-1.5">
+                          <span className="text-[9px] uppercase text-obsidian-muted font-bold">Owner:</span>
+                          <span className="font-sans font-semibold text-cyan-300 truncate">{prp.owner_character}</span>
+                        </div>
+                      )}
 
-                <div className="space-y-1">
-                  <span className="text-[10px] text-obsidian-muted uppercase">Materiality &amp; Wear:</span>
-                  <p className="text-[11px] text-obsidian-secondary leading-relaxed font-sans break-words">
-                    {prp.material_and_wear || prp.material}
-                  </p>
-                </div>
+                      <div className="space-y-1">
+                        <span className="text-[10px] text-obsidian-muted uppercase">Materiality &amp; Wear:</span>
+                        <p className="text-[11px] text-obsidian-secondary leading-relaxed font-sans break-words">
+                          {prp.material_and_wear || prp.material}
+                        </p>
+                      </div>
 
-                <div className="space-y-1">
-                  <span className="text-[10px] text-emerald-400 uppercase">Narrative Utility:</span>
-                  <p className="text-[11px] text-obsidian-secondary leading-relaxed font-sans break-words">
-                    {prp.narrative_utility || prp.weight}
-                  </p>
-                </div>
+                      <div className="space-y-1">
+                        <span className="text-[10px] text-emerald-400 uppercase">Narrative Utility:</span>
+                        <p className="text-[11px] text-obsidian-secondary leading-relaxed font-sans break-words">
+                          {prp.narrative_utility || prp.weight}
+                        </p>
+                      </div>
 
-                <div className="space-y-1">
-                  <span className="text-[10px] text-amber-500 uppercase">Tactile Interaction:</span>
-                  <p className="text-[10px] text-obsidian-muted leading-relaxed font-sans break-words">
-                    {prp.action}
-                  </p>
+                      <div className="space-y-1">
+                        <span className="text-[10px] text-amber-500 uppercase">Tactile Interaction:</span>
+                        <p className="text-[10px] text-obsidian-muted leading-relaxed font-sans break-words">
+                          {prp.action}
+                        </p>
+                      </div>
+                    </>
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

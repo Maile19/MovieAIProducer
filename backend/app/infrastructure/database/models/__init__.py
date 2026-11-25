@@ -28,6 +28,7 @@ from backend.app.infrastructure.database.models.project import (
     ProjectModel,
 )
 from backend.app.infrastructure.database.models.story import (
+    DialogueCalibrationCacheModel,
     SceneModel,
     ShotModel,
 )
@@ -50,4 +51,5 @@ __all__ = [
     "FlowAccountModel",
     "FlowImageJobModel",
     "FlowSettingModel",
+    "DialogueCalibrationCacheModel",
 ]

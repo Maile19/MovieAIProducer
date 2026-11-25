@@ -12,8 +12,13 @@ import {
   Loader2,
   CheckCircle,
   BookmarkPlus,
+  Mic,
+  Subtitles,
+  Eye,
+  Copy,
+  Check,
 } from "lucide-react";
-import { api, MasterProductionBible } from "@/lib/api";
+import { api, MasterProductionBible, AudioScriptData } from "@/lib/api";
 import { formatMpbVersion } from "@/lib/versioning";
 import { cn } from "@/lib/utils";
 import SavePresetModal from "@/components/presets/SavePresetModal";
@@ -36,6 +41,11 @@ export default function RevisionLockTab({
   const [lockModalOpen, setLockModalOpen] = useState(false);
   const [isDownloading, setIsDownloading] = useState<string | null>(null);
   const [savePresetModalOpen, setSavePresetModalOpen] = useState(false);
+  const [includeSfx, setIncludeSfx] = useState(false);
+  const [audioPreviewOpen, setAudioPreviewOpen] = useState(false);
+  const [audioPreviewData, setAudioPreviewData] = useState<AudioScriptData | null>(null);
+  const [audioPreviewSsml, setAudioPreviewSsml] = useState<string>("");
+  const [copiedSsml, setCopiedSsml] = useState(false);
 
   const isLocked = bible?.is_locked || false;
 
@@ -80,6 +90,75 @@ export default function RevisionLockTab({
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsDownloading(null);
+    }
+  };
+
+  const triggerTextDownload = (content: string, filename: string, mimeType: string) => {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleAudioScriptDownload = async (fmt: "ssml" | "markdown" | "json") => {
+    try {
+      setIsDownloading(`audio_${fmt}`);
+      const res = await api.export.getAudioScript(projectId, fmt);
+      const content = typeof res === "string" ? res : JSON.stringify(res, null, 2);
+      const ext = fmt === "ssml" ? "ssml" : fmt === "markdown" ? "md" : "json";
+      const mime =
+        fmt === "ssml"
+          ? "application/ssml+xml"
+          : fmt === "markdown"
+          ? "text/markdown"
+          : "application/json";
+      triggerTextDownload(content, `TTS_Delivery_Script_${projectId}.${ext}`, mime);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsDownloading(null);
+    }
+  };
+
+  const handleSubtitleDownload = async (fmt: "srt" | "vtt") => {
+    try {
+      setIsDownloading(`sub_${fmt}`);
+      const text = await api.export.getSubtitles(projectId, fmt, includeSfx);
+      triggerTextDownload(
+        text,
+        `Subtitles_${projectId}.${fmt}`,
+        fmt === "vtt" ? "text/vtt" : "application/x-subrip"
+      );
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsDownloading(null);
+    }
+  };
+
+  const handlePreviewAudioScript = async () => {
+    try {
+      setIsDownloading("audio_preview");
+      const [jsonRes, ssmlRes] = await Promise.all([
+        api.export.getAudioScript(projectId, "json"),
+        api.export.getAudioScript(projectId, "ssml"),
+      ]);
+      if (jsonRes && typeof jsonRes === "object" && "data" in jsonRes) {
+        setAudioPreviewData(jsonRes.data);
+      }
+      if (typeof ssmlRes === "string") {
+        setAudioPreviewSsml(ssmlRes);
+      }
+      setAudioPreviewOpen(true);
     } catch (err) {
       console.error(err);
     } finally {
@@ -244,6 +323,75 @@ export default function RevisionLockTab({
           </div>
         </div>
 
+        {/* Stage S13-S15: Screenwriter Audio / TTS Delivery Script (SSML) & Subtitles (.SRT / .VTT) */}
+        <div className="p-4 rounded-xl bg-canvas border border-border space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Mic className="w-4 h-4 text-emerald-400 shrink-0" />
+              <div>
+                <h5 className="font-mono text-xs font-bold text-obsidian-primary">
+                  Stage S13–S15: TTS / SSML Delivery Script &amp; Subtitles
+                </h5>
+                <p className="text-[11px] text-obsidian-muted">
+                  Compiles speaker Voice DNA, act-mapped #State emotion, and J/L-Cut offsets into SSML, .SRT, and .VTT.
+                </p>
+              </div>
+            </div>
+
+            <label className="inline-flex items-center gap-1.5 text-[11px] font-mono text-obsidian-secondary cursor-pointer select-none shrink-0">
+              <input
+                type="checkbox"
+                checked={includeSfx}
+                onChange={(e) => setIncludeSfx(e.target.checked)}
+                className="rounded border-border bg-panel text-amber-500 focus:ring-0 focus:ring-offset-0"
+              />
+              <span>Include [SFX] SDH Cues</span>
+            </label>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 font-mono text-xs">
+            <button
+              type="button"
+              disabled={isDownloading === "audio_preview"}
+              onClick={handlePreviewAudioScript}
+              className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-panel hover:bg-elevated border border-emerald-500/40 text-emerald-400 font-semibold transition-all disabled:opacity-50 cursor-pointer"
+            >
+              {isDownloading === "audio_preview" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Eye className="w-3.5 h-3.5" />}
+              <span>Preview SSML &amp; Cues</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={isDownloading === "audio_ssml"}
+              onClick={() => handleAudioScriptDownload("ssml")}
+              className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-panel hover:bg-elevated border border-border hover:border-amber-500/40 text-amber-400 font-semibold transition-all disabled:opacity-50 cursor-pointer"
+            >
+              {isDownloading === "audio_ssml" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+              <span>Export TTS / SSML</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={isDownloading === "sub_srt"}
+              onClick={() => handleSubtitleDownload("srt")}
+              className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-panel hover:bg-elevated border border-border hover:border-blue-500/40 text-blue-400 font-semibold transition-all disabled:opacity-50 cursor-pointer"
+            >
+              {isDownloading === "sub_srt" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Subtitles className="w-3.5 h-3.5" />}
+              <span>Download .SRT Subtitles</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={isDownloading === "sub_vtt"}
+              onClick={() => handleSubtitleDownload("vtt")}
+              className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-panel hover:bg-elevated border border-border hover:border-violet-500/40 text-violet-400 font-semibold transition-all disabled:opacity-50 cursor-pointer"
+            >
+              {isDownloading === "sub_vtt" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Subtitles className="w-3.5 h-3.5" />}
+              <span>Download .VTT Subtitles</span>
+            </button>
+          </div>
+        </div>
+
         {/* Reusable Production Preset Library Action */}
         <div className="p-4 rounded-xl bg-canvas border border-border flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center gap-3">
@@ -277,6 +425,106 @@ export default function RevisionLockTab({
         projectId={projectId}
         defaultTitle={`Production v${bible?.version || 1}`}
       />
+
+      {/* Stage S13-S15 Audio / SSML Preview Modal */}
+      {audioPreviewOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className="w-full max-w-3xl max-h-[88vh] flex flex-col rounded-2xl bg-panel border border-border shadow-2xl overflow-hidden font-mono text-xs">
+            <div className="p-4 border-b border-border bg-canvas/60 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Mic className="w-4 h-4 text-emerald-400" />
+                <div>
+                  <h4 className="font-cinzel text-sm font-bold text-obsidian-primary uppercase">
+                    TTS / SSML Voice Delivery Script Preview
+                  </h4>
+                  {audioPreviewData && (
+                    <p className="text-[10px] text-obsidian-muted">
+                      {audioPreviewData.total_cues} Cues ({audioPreviewData.spoken_cues} spoken, {audioPreviewData.sfx_cues} SFX) &bull; Runtime {audioPreviewData.total_runtime_seconds}s
+                    </p>
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAudioPreviewOpen(false)}
+                className="px-2.5 py-1 rounded bg-canvas border border-border text-obsidian-muted hover:text-obsidian-primary"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="p-4 overflow-y-auto space-y-4 flex-1">
+              {audioPreviewData?.cues && audioPreviewData.cues.length > 0 ? (
+                <div className="space-y-2">
+                  {audioPreviewData.cues.map((cue) => (
+                    <div key={cue.cue_number} className="p-3 rounded-lg bg-canvas border border-border space-y-1">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-bold text-amber-400">
+                          Cue #{cue.cue_number} &bull; Scene {cue.scene_number} Shot #{cue.shot_number} &bull; {cue.speaker}
+                        </span>
+                        <span className="text-[10px] text-blue-300">
+                          {cue.start_seconds.toFixed(2)}s &rarr; {cue.end_seconds.toFixed(2)}s ({cue.transition_type})
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-obsidian-muted">
+                        Voice DNA: {cue.voice_profile} &bull; {cue.active_state_code} ({cue.emotion_cue}) &bull; rate {cue.prosody_rate}, pitch {cue.prosody_pitch}
+                      </div>
+                      <p className="font-sans text-xs text-obsidian-primary">&ldquo;{cue.text}&rdquo;</p>
+                      <code className="block text-[10px] text-emerald-300/90 bg-black/40 p-1.5 rounded overflow-x-auto">
+                        {cue.ssml}
+                      </code>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="p-6 text-center text-obsidian-muted">
+                  No dialogue or SFX cues found across scenes/shots yet.
+                </div>
+              )}
+
+              {audioPreviewSsml && (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] uppercase font-bold text-amber-400">Full XML SSML Document</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(audioPreviewSsml);
+                        setCopiedSsml(true);
+                        setTimeout(() => setCopiedSsml(false), 2000);
+                      }}
+                      className="flex items-center gap-1 px-2 py-0.5 rounded bg-canvas border border-border text-amber-400"
+                    >
+                      {copiedSsml ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                      <span>{copiedSsml ? "Copied SSML" : "Copy SSML"}</span>
+                    </button>
+                  </div>
+                  <pre className="p-3 rounded-lg bg-black/60 border border-border text-[10px] text-emerald-300 overflow-x-auto max-h-48">
+                    {audioPreviewSsml}
+                  </pre>
+                </div>
+              )}
+            </div>
+
+            <div className="p-3 border-t border-border bg-canvas/40 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => handleAudioScriptDownload("markdown")}
+                className="px-3 py-1.5 rounded bg-panel border border-border text-blue-400 font-bold"
+              >
+                Download Script (.md)
+              </button>
+              <button
+                type="button"
+                onClick={() => handleAudioScriptDownload("ssml")}
+                className="px-3 py-1.5 rounded bg-amber-500 text-canvas font-bold"
+              >
+                Download SSML (.ssml)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Confirmation Lock Modal */}
       {lockModalOpen && (

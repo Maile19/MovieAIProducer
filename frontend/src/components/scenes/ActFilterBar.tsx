@@ -36,7 +36,7 @@ interface ActFilterBarProps {
   structureType?: string;
   onGenerateBlueprint: () => void;
   isGeneratingBlueprint: boolean;
-  onExportPackage: (format: "json" | "markdown") => void;
+  onExportPackage: (format: "json" | "markdown" | "audio_ssml" | "subtitles_srt" | "subtitles_vtt") => void;
 }
 
 export default function ActFilterBar({
@@ -291,9 +291,14 @@ export default function ActFilterBar({
             options={[
               { value: "json", title: "Export JSON", description: "Hollywood JSON Bible & Scenes Package", badge: "JSON" },
               { value: "markdown", title: "Export Script MD", description: "Industry-standard Screenplay Markdown", badge: "MD" },
+              { value: "audio_ssml", title: "Export TTS / SSML", description: "Stage S13-S15 Voice Delivery SSML", badge: "SSML" },
+              { value: "subtitles_srt", title: "Download .SRT", description: "SubRip Subtitles with J/L-Cut Timing", badge: "SRT" },
+              { value: "subtitles_vtt", title: "Download .VTT", description: "WebVTT Subtitles with Speaker Cues", badge: "VTT" },
             ]}
             value=""
-            onChange={(format) => onExportPackage(format as "json" | "markdown")}
+            onChange={(format) =>
+              onExportPackage(format as "json" | "markdown" | "audio_ssml" | "subtitles_srt" | "subtitles_vtt")
+            }
           />
         </div>
       </div>

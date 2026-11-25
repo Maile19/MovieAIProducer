@@ -4,9 +4,11 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(_PROJECT_ROOT / ".env", ".env"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -113,6 +115,17 @@ class Settings(BaseSettings):
     @property
     def effective_llm_api_key(self) -> str:
         return self.openai_api_key or self.llm_api_key or "sk-3f8dbe69b93ed880-df5qur-b3936273"
+
+    # Polia AI Director RAG Bridge (Local Port 8765)
+    polia_rag_enabled: bool = True
+    polia_rag_url: str = "http://127.0.0.1:8765"
+    polia_rag_token: str = ""
+    polia_rag_timeout_sec: float = 1.5
+
+    # Polia AI Screenwriter RAG Bridge (Local Port 8766)
+    screenwriter_rag_enabled: bool = True
+    screenwriter_rag_url: str = "http://127.0.0.1:8766"
+    screenwriter_rag_timeout: float = 1.5
 
     @property
     def allowed_users_list(self) -> list[str]:

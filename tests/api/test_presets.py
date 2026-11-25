@@ -345,7 +345,7 @@ def test_cold_open_treatment_and_act_scenes_generation(client: TestClient, auth_
         assert "ORDINARY WORLD BEGINS" in sc4["slugline"]
         assert "Ordinary World" in sc4["narrative_goal"]
 
-        # 5. Verify Cold Open shots have authentic camera codes and SFX
+        # 5. Verify Cold Open shots have authentic camera codes and clean atmospheric SFX
         shots_s1_resp = client.get(f"/api/v1/scenes/{sc1['id']}/shots", headers=auth_headers)
         assert shots_s1_resp.status_code == 200
     shots_s1 = shots_s1_resp.json()["data"]
@@ -353,6 +353,7 @@ def test_cold_open_treatment_and_act_scenes_generation(client: TestClient, auth_
     assert shots_s1[0]["camera_code"] == "#Cam 19"  # Dolly-In hook
     assert shots_s1[1]["camera_code"] == "#Cam 23"  # 360 Orbital hook
     assert "[SFX:" in shots_s1[0]["dialogue"]
+    assert "Boing" not in shots_s1[0]["dialogue"]
 
     shots_s2_resp = client.get(f"/api/v1/scenes/{sc2['id']}/shots", headers=auth_headers)
     assert shots_s2_resp.status_code == 200
@@ -366,7 +367,8 @@ def test_cold_open_treatment_and_act_scenes_generation(client: TestClient, auth_
     shots_s3 = shots_s3_resp.json()["data"]
     assert len(shots_s3) == 2
     assert shots_s3[1]["transition_type"] == "L_CUT"
-    assert "Tape Rewind" in shots_s3[1]["dialogue"]
+    assert "[SFX:" in shots_s3[1]["dialogue"]
+    assert "Tape Rewind" not in shots_s3[1]["dialogue"]
 
 
 def test_cold_open_instant_blueprint_creation(client: TestClient, auth_headers: dict[str, str]):

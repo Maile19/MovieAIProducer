@@ -39,6 +39,8 @@ interface DualViewportPlayerProps {
   onSelectCharacter?: (characterId: string) => void;
   projectId?: string;
   previewError?: string | null;
+  qcStatus?: string | null;
+  qcScore?: number | null;
 }
 
 function getProviderBadge(provider?: string | null): { label: string; className: string } | null {
@@ -71,7 +73,7 @@ function getProviderBadge(provider?: string | null): { label: string; className:
 export default function DualViewportPlayer({
   aspectRatio,
   onChangeAspectRatio,
-  currentSceneTitle = "SCENE 01 - CYBERPUNK LAB - INT - NIGHT",
+  currentSceneTitle = "No Active Scene Selected",
   styleCode = "#Style 01",
   cameraCode = "#Cam 01",
   lightingCode = "#Light 01",
@@ -84,6 +86,8 @@ export default function DualViewportPlayer({
   onSelectCharacter,
   projectId,
   previewError,
+  qcStatus,
+  qcScore,
 }: DualViewportPlayerProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [viewportMode, setViewportMode] = useState<ViewportMode>("dual");
@@ -496,15 +500,33 @@ export default function DualViewportPlayer({
                         </span>
                       )}
                     </div>
-                    {activeChar ? (
-                      <span className="px-1.5 py-0.5 rounded bg-black/60 text-emerald-400 border border-emerald-500/30 shrink-0 text-[9px] sm:text-[10px]">
-                        QC PASS
-                      </span>
-                    ) : (
-                      <span className="px-1.5 py-0.5 rounded bg-black/60 text-obsidian-muted border border-border shrink-0 text-[9px] sm:text-[10px]">
-                        NO ANCHOR
-                      </span>
-                    )}
+                    {(() => {
+                      if (!activeChar) {
+                        return (
+                          <span className="px-1.5 py-0.5 rounded bg-black/60 text-obsidian-muted border border-border shrink-0 text-[9px] sm:text-[10px]">
+                            NO ANCHOR
+                          </span>
+                        );
+                      }
+                      const resolvedStatus = qcStatus || (hasCharMedia && previewUrl ? "READY" : "PENDING");
+                      const scoreSuffix = typeof qcScore === "number" ? ` ${Math.round(qcScore)}%` : "";
+                      const badgeCls =
+                        resolvedStatus === "PASS" || resolvedStatus === "READY"
+                          ? "text-emerald-400 border-emerald-500/30"
+                          : resolvedStatus === "FAIL"
+                          ? "text-rose-400 border-rose-500/30"
+                          : "text-amber-400 border-amber-500/30";
+                      return (
+                        <span
+                          className={cn(
+                            "px-1.5 py-0.5 rounded bg-black/60 border shrink-0 text-[9px] sm:text-[10px] font-bold",
+                            badgeCls
+                          )}
+                        >
+                          QC {resolvedStatus}{scoreSuffix}
+                        </span>
+                      );
+                    })()}
                   </div>
 
                   {/* Center Interactive Stage or Caption */}

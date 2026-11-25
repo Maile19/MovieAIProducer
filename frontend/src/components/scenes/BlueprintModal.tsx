@@ -134,14 +134,26 @@ export default function BlueprintModal({
   const [advisoryData, setAdvisoryData] = useState<AdvisoryData | null>(null);
   const [isLoadingAdvisory, setIsLoadingAdvisory] = useState<boolean>(false);
   const [premise, setPremise] = useState<string>("");
+  const [enableColdOpen, setEnableColdOpen] = useState<boolean>(
+    Boolean(presetDefaults?.cold_open_30s?.enabled)
+  );
+  const [treatmentVariants, setTreatmentVariants] = useState<any[]>([]);
+  const [selectedVariantIdx, setSelectedVariantIdx] = useState<number>(0);
+  const [isLoadingVariants, setIsLoadingVariants] = useState<boolean>(false);
+  const [variantsError, setVariantsError] = useState<string | null>(null);
   const [autoSplitShots, setAutoSplitShots] = useState<boolean>(true);
   const [clearExisting, setClearExisting] = useState<boolean>(existingScenesCount > 0);
 
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [stageProgress, setStageProgress] = useState<StageProgress | null>(null);
+  const userPickedStructureRef = React.useRef<boolean>(false);
 
   // Sync preset defaults on open
   useEffect(() => {
+    if (!isOpen) {
+      userPickedStructureRef.current = false;
+      return;
+    }
     if (isOpen && presetDefaults) {
       if (presetDefaults.total_scenes) {
         setSelectedScenes(presetDefaults.total_scenes);
@@ -150,6 +162,9 @@ export default function BlueprintModal({
         setSelectedMode("flat_5s");
       } else if (presetDefaults.duration_mode) {
         setSelectedMode(presetDefaults.duration_mode);
+      }
+      if (typeof presetDefaults.cold_open_30s?.enabled === "boolean") {
+        setEnableColdOpen(presetDefaults.cold_open_30s.enabled);
       }
     }
   }, [isOpen, presetDefaults]);
@@ -163,7 +178,7 @@ export default function BlueprintModal({
         .then((res) => {
           if (res?.data) {
             setAdvisoryData(res.data);
-            if (res.data.recommended_structure) {
+            if (res.data.recommended_structure && !userPickedStructureRef.current) {
               setStructureType(res.data.recommended_structure);
             }
           }
@@ -225,6 +240,9 @@ export default function BlueprintModal({
             if (st.treatment.duration_mode) {
               setSelectedMode(st.treatment.duration_mode as DurationMode);
             }
+            if (typeof st.treatment.cold_open_30s?.enabled === "boolean") {
+              setEnableColdOpen(st.treatment.cold_open_30s.enabled);
+            }
           }
         })
         .catch((err) => {
@@ -264,8 +282,30 @@ export default function BlueprintModal({
       ? "YouTube Viral"
       : "Hollywood 4-Act");
 
-  const handleStartGeneration = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleGenerateTreatmentVariants = async () => {
+    setIsLoadingVariants(true);
+    setVariantsError(null);
+    try {
+      const res = await api.blueprint.generateTreatmentVariants(projectId, {
+        total_scenes: selectedScenes,
+        duration_mode: selectedMode,
+        premise: premise.trim(),
+        clear_existing: clearExisting,
+        structure_type: structureType,
+        enable_cold_open: enableColdOpen,
+      });
+      const vars = res?.data?.variants || [];
+      setTreatmentVariants(vars);
+      setSelectedVariantIdx(0);
+    } catch (err: any) {
+      setVariantsError(err?.message || "Failed to generate 3 Treatment pitches.");
+    } finally {
+      setIsLoadingVariants(false);
+    }
+  };
+
+  const handleStartGeneration = async (e?: React.FormEvent, selectedTreatment?: any) => {
+    if (e) e.preventDefault();
     setIsGenerating(true);
 
     let wakeLockSentinel: any = null;
@@ -296,13 +336,15 @@ export default function BlueprintModal({
     setStageProgress(initialProgress);
 
     try {
-      // Step 1: Phase A - Master Story Treatment & Beat Sheet (Polya AI Strict LLM Mode)
+      // Step 1: Phase A - Master Story Treatment & Beat Sheet (or Lock Chosen Variant)
       const treatRes = await api.blueprint.generateTreatment(projectId, {
         total_scenes: selectedScenes,
         duration_mode: selectedMode,
         premise: premise.trim(),
         clear_existing: clearExisting,
         structure_type: structureType,
+        enable_cold_open: enableColdOpen,
+        selected_treatment: selectedTreatment || undefined,
       });
 
       const treatData = treatRes.data;
@@ -334,6 +376,7 @@ export default function BlueprintModal({
           duration_mode: selectedMode,
           auto_split_shots: autoSplitShots,
           structure_type: structureType,
+          enable_cold_open: enableColdOpen,
         });
 
         const actData = actRes.data;
@@ -401,6 +444,7 @@ export default function BlueprintModal({
         duration_mode: selectedMode,
         auto_split_shots: autoSplitShots,
         structure_type: structureType,
+        enable_cold_open: enableColdOpen,
       });
 
       const actData = actRes.data;
@@ -749,7 +793,10 @@ export default function BlueprintModal({
                       <button
                         key={opt.structure_type}
                         type="button"
-                        onClick={() => setStructureType(opt.structure_type as StructureType)}
+                        onClick={() => {
+                          userPickedStructureRef.current = true;
+                          setStructureType(opt.structure_type as StructureType);
+                        }}
                         className={cn(
                           "p-2.5 rounded-xl border text-left transition-all relative flex flex-col justify-between",
                           isSelected
@@ -789,12 +836,22 @@ export default function BlueprintModal({
                 </div>
               </div>
 
-              {/* Story Premise / Concept (for AI Writer) */}
-              <div className="space-y-1.5">
-                <label className="text-obsidian-primary font-bold uppercase tracking-wider flex items-center justify-between">
-                  <span>Story Premise / Director&apos;s Concept (Optional)</span>
-                  <span className="text-[10px] text-obsidian-muted font-normal">Custom Story Prompt</span>
-                </label>
+              {/* Story Premise / Concept & 3-Pitch Phase A Explorer */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <label className="text-obsidian-primary font-bold uppercase tracking-wider">
+                    Story Premise / Director&apos;s Concept (Optional)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleGenerateTreatmentVariants}
+                    disabled={isLoadingVariants || isGenerating}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 text-[10px] font-bold transition-colors disabled:opacity-50"
+                  >
+                    <Sparkles className="w-3 h-3" />
+                    <span>{isLoadingVariants ? "Pitching 3 Variants..." : "Generate 3 Treatment Pitches"}</span>
+                  </button>
+                </div>
                 <textarea
                   rows={2}
                   value={premise}
@@ -802,6 +859,81 @@ export default function BlueprintModal({
                   placeholder="Contoh: Operasi spionase siber di Neo Jakarta di mana Arya berusaha membobol server pusat untuk membebaskan rekannya..."
                   className="w-full p-2.5 rounded-xl bg-canvas border border-border text-obsidian-primary text-xs focus:border-amber-500 focus:outline-none placeholder:text-obsidian-muted/60"
                 />
+
+                {variantsError && (
+                  <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-[10px]">
+                    {variantsError}
+                  </div>
+                )}
+
+                {treatmentVariants.length > 0 && (
+                  <div className="p-3 rounded-xl bg-canvas border border-amber-500/40 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] uppercase font-bold text-amber-400">
+                        Select 1 of 3 Narrative Pitches Before Generating Scenes
+                      </span>
+                      <span className="text-[9px] text-obsidian-muted">Strict LLM Mode</span>
+                    </div>
+                    <div className="grid grid-cols-1 gap-2">
+                      {treatmentVariants.map((variant, idx) => {
+                        const isPicked = idx === selectedVariantIdx;
+                        return (
+                          <div
+                            key={variant.variant_id || idx}
+                            onClick={() => {
+                              setSelectedVariantIdx(idx);
+                              if (variant.logline) setPremise(variant.logline);
+                            }}
+                            className={cn(
+                              "p-2.5 rounded-lg border cursor-pointer transition-all space-y-1",
+                              isPicked
+                                ? "bg-amber-500/10 border-amber-500/70 shadow-sm"
+                                : "bg-panel/60 border-border hover:border-amber-500/30"
+                            )}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className={cn("font-bold text-xs", isPicked ? "text-amber-300" : "text-obsidian-primary")}>
+                                Pitch {idx + 1}: {variant.pitch_label}
+                              </span>
+                              <span className="text-[9px] px-1.5 py-0.2 rounded bg-black/40 text-amber-400 font-bold">
+                                {variant.theme}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-obsidian-primary font-sans leading-snug">{variant.logline}</p>
+                            {variant.pitch_hook && (
+                              <p className="text-[10px] text-obsidian-muted italic">{variant.pitch_hook}</p>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="flex justify-end pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const picked = treatmentVariants[selectedVariantIdx];
+                          const editedPremise = premise.trim();
+                          const finalizedVariant = picked
+                            ? {
+                                ...picked,
+                                logline: editedPremise || picked.logline,
+                                dramatic_premise:
+                                  editedPremise && editedPremise !== picked.logline
+                                    ? editedPremise
+                                    : picked.dramatic_premise,
+                              }
+                            : undefined;
+                          handleStartGeneration(undefined, finalizedVariant);
+                        }}
+                        disabled={isGenerating}
+                        className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-canvas font-bold text-xs shadow-glow disabled:opacity-50"
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>Lock Pitch &amp; Generate Scenes</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Section 1: Total Scene Selection */}
@@ -858,6 +990,23 @@ export default function BlueprintModal({
                     </span>
                     <p className="text-[10px] text-obsidian-muted mt-0.5 leading-relaxed">
                       Automatically decomposes 10s scenes into 2 shots and 15s scenes into 3 shots with alternate camera coverage.
+                    </p>
+                  </div>
+                </label>
+
+                <label className="flex items-start gap-2.5 cursor-pointer select-none pt-2 border-t border-border/60">
+                  <input
+                    type="checkbox"
+                    checked={enableColdOpen}
+                    onChange={(e) => setEnableColdOpen(e.target.checked)}
+                    className="mt-0.5 rounded border-border bg-panel text-amber-500 focus:ring-0 focus:ring-offset-0"
+                  />
+                  <div className="flex-1">
+                    <span className="text-xs text-amber-300 font-bold">
+                      30s Cold Open Hook Montage (Scenes 01–03)
+                    </span>
+                    <p className="text-[10px] text-obsidian-muted mt-0.5 leading-relaxed">
+                      Teases peak Act conflict in Scenes 01–03 using style-authentic atmospheric/dramatic hooks before starting the linear timeline at Scene 04.
                     </p>
                   </div>
                 </label>

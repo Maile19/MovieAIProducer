@@ -33,6 +33,7 @@ import {
 import { Character, SheetPromptItem, Project, api, FlowProxyStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import ObsidianDropdown from "@/components/ui/ObsidianDropdown";
+import AIRenderProviderCard from "@/components/AIRenderProviderCard";
 
 interface CharacterMatrixTabProps {
   projectId: string;
@@ -114,6 +115,7 @@ export default function CharacterMatrixTab({
   const [newCharName, setNewCharName] = useState("");
   const [newCharRole, setNewCharRole] = useState("PROTAGONIST");
   const [newCharBio, setNewCharBio] = useState("");
+  const [newCharVoiceDna, setNewCharVoiceDna] = useState("");
   const [newCharPrompt, setNewCharPrompt] = useState("");
   const [newCharSeed, setNewCharSeed] = useState<number>(() => Math.floor(100000 + Math.random() * 900000));
   const [isSubmittingChar, setIsSubmittingChar] = useState(false);
@@ -121,7 +123,7 @@ export default function CharacterMatrixTab({
   // Dual AI Provider Selector for Add Character Modal (Default: Google Flow [5 Akun PRO])
   const [addCharLLMProvider, setAddCharLLMProvider] = useState<"9router" | "gemini" | "agy">("9router");
   const [addCharImageProvider, setAddCharImageProvider] = useState<
-    "ag_gemini_flash" | "google_flow" | "9router" | "sd35_large_hf"
+    "ag_gemini_flash" | "google_flow" | "9router" | string
   >("google_flow");
 
   // Auto-generation loading states
@@ -265,17 +267,17 @@ export default function CharacterMatrixTab({
 
   // AI Generation Provider & Model Configuration (Default: Google Flow [5 Akun PRO])
   const [selectedProvider, setSelectedProvider] = useState<
-    "ag_gemini_flash" | "9router" | "sd35_large_hf" | "google_flow"
+    "ag_gemini_flash" | "9router" | "google_flow" | string
   >(() => {
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("movieai_active_character_provider");
-      if (saved && ["ag_gemini_flash", "9router", "sd35_large_hf", "google_flow"].includes(saved)) {
-        return saved as any;
+      if (saved && ["ag_gemini_flash", "9router", "google_flow"].includes(saved)) {
+        return saved;
       }
     }
     return "google_flow";
   });
-  const [selectedModel, setSelectedModel] = useState<string>("ag/gemini-3.8-flash");
+  const [selectedModel] = useState<string>("ag/gemini-3.8-flash");
 
   // SOCKS5 Android Proxy Live Indicator & Fail-Fast State
   const [proxyStatus, setProxyStatus] = useState<FlowProxyStatus | null>(null);
@@ -388,10 +390,12 @@ export default function CharacterMatrixTab({
   const [regenPreserveRole, setRegenPreserveRole] = useState(true);
   const [regenCustomDirective, setRegenCustomDirective] = useState("");
 
-  // Inline Edit States for Character Name, Role & Prompt
+  // Inline Edit States for Character Name, Role, Narrative Summary, Voice DNA & Prompt
   const [isEditingCharIdentity, setIsEditingCharIdentity] = useState(false);
   const [editCharName, setEditCharName] = useState("");
   const [editCharRole, setEditCharRole] = useState("PROTAGONIST");
+  const [editCharNarrativeSummary, setEditCharNarrativeSummary] = useState("");
+  const [editCharVoiceDna, setEditCharVoiceDna] = useState("");
   const [isSavingCharIdentity, setIsSavingCharIdentity] = useState(false);
 
   const [isEditingPrompt, setIsEditingPrompt] = useState(false);
@@ -468,6 +472,8 @@ export default function CharacterMatrixTab({
     if (!selectedChar) return;
     setEditCharName(selectedChar.name);
     setEditCharRole(selectedChar.role);
+    setEditCharNarrativeSummary(selectedChar.narrative_summary || "");
+    setEditCharVoiceDna(selectedChar.voice_dna_profile || "");
     setIsEditingCharIdentity(true);
   };
 
@@ -478,6 +484,8 @@ export default function CharacterMatrixTab({
       await api.bible.updateCharacter(projectId, selectedChar.id, {
         name: editCharName.trim(),
         role: editCharRole,
+        narrative_summary: editCharNarrativeSummary.trim(),
+        voice_dna_profile: editCharVoiceDna.trim(),
       });
       setIsEditingCharIdentity(false);
       await onRefresh();
@@ -542,6 +550,7 @@ export default function CharacterMatrixTab({
           name: newCharName,
           role: newCharRole,
           archetype_and_bio: newCharBio,
+          voice_dna_profile: newCharVoiceDna,
           base_visual_prompt: newCharPrompt,
           dna_seed: newCharSeed,
         },
@@ -561,6 +570,7 @@ export default function CharacterMatrixTab({
             }
           }
           if (res.data.archetype_and_bio) setNewCharBio(res.data.archetype_and_bio);
+          if (res.data.voice_dna_profile) setNewCharVoiceDna(res.data.voice_dna_profile);
         }
         if (mode === "all" || mode === "visual_prompt") {
           if (res.data.base_visual_prompt) setNewCharPrompt(res.data.base_visual_prompt);
@@ -825,6 +835,7 @@ export default function CharacterMatrixTab({
     setNewCharName("");
     setNewCharPrompt("");
     setNewCharBio("");
+    setNewCharVoiceDna("");
   };
 
   const isVisualVerified = Boolean(
@@ -850,6 +861,8 @@ export default function CharacterMatrixTab({
         name: newCharName.trim(),
         role: newCharRole,
         base_prompt: newCharPrompt || `${newCharName}, Hollywood cinematic character.`,
+        narrative_summary: newCharBio.trim() || undefined,
+        voice_dna_profile: newCharVoiceDna.trim() || undefined,
         dna_seed: newCharSeed,
         preview_token: previewToken || undefined,
       });
@@ -872,6 +885,7 @@ export default function CharacterMatrixTab({
       setNewCharName("");
       setNewCharPrompt("");
       setNewCharBio("");
+      setNewCharVoiceDna("");
 
       // Sync active provider in main matrix with provider used during character creation & persist
       setSelectedProvider(addCharImageProvider);
@@ -2559,166 +2573,14 @@ export default function CharacterMatrixTab({
           </div>
 
       {/* =========================================================================
-       * AI Render Model & Provider Selection Toolbar
+       * AI Render Provider Card (Global Acuan SQLite)
        * ========================================================================= */}
-      <div className="p-3.5 rounded-xl bg-panel/90 border border-border flex flex-col md:flex-row md:items-center justify-between gap-3 font-mono text-xs shadow-sm">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[11px] font-bold uppercase text-amber-400 flex items-center gap-1.5">
-            <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-            <span>AI Render Provider:</span>
-          </span>
-
-          <div className="flex flex-wrap items-center gap-1.5">
-            {[
-              {
-                id: "google_flow" as const,
-                label: "Google Flow",
-                badge: "Visual Anchor &bull; 5 PRO",
-                modelVal: "google_flow_pro",
-              },
-              {
-                id: "ag_gemini_flash" as const,
-                label: "AG/Gemini 3.8 Flash",
-                badge: "Text-Only &bull; Fast",
-                modelVal: "ag/gemini-3.8-flash",
-              },
-              {
-                id: "9router" as const,
-                label: "9Router",
-                badge: "Text-Only &bull; Combo",
-                modelVal: "ag/gemini-3.8-flash",
-              },
-              {
-                id: "sd35_large_hf" as const,
-                label: "SD 3.5 Large",
-                badge: "Text-Only &bull; HF",
-                modelVal: "sd35_large_hf",
-              },
-            ].map((prov) => {
-              const isSelected = selectedProvider === prov.id;
-              return (
-                <button
-                  key={prov.id}
-                  type="button"
-                  onClick={() => {
-                    setSelectedProvider(prov.id);
-                    if (typeof window !== "undefined") {
-                      localStorage.setItem("movieai_active_character_provider", prov.id);
-                    }
-                    if (prov.id === "ag_gemini_flash") {
-                      setSelectedModel("ag/gemini-3.8-flash");
-                    }
-                  }}
-                  className={cn(
-                    "px-3 py-1.5 rounded-lg border text-[11px] font-semibold transition-all flex items-center gap-1.5",
-                    isSelected
-                      ? "bg-amber-500/15 border-amber-500 text-amber-400 shadow-sm"
-                      : "bg-canvas border-border text-obsidian-secondary hover:text-obsidian-primary hover:border-border/80"
-                  )}
-                >
-                  <span>{prov.label}</span>
-                  <span
-                    className={cn(
-                      "text-[9px] px-1 py-0.2 rounded font-mono",
-                      isSelected
-                        ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
-                        : "bg-black/30 text-obsidian-muted"
-                    )}
-                    dangerouslySetInnerHTML={{ __html: prov.badge }}
-                  />
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Model Selector for 9Router */}
-        {selectedProvider === "9router" && (
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] uppercase text-obsidian-muted">Model:</span>
-            <select
-              value={selectedModel}
-              onChange={(e) => setSelectedModel(e.target.value)}
-              className="px-2.5 py-1 rounded-lg bg-canvas border border-border text-[11px] text-obsidian-primary focus:border-amber-500 focus:outline-none"
-            >
-              <option value="ag/gemini-3.8-flash">ag/gemini-3.8-flash (Recommended)</option>
-              <option value="gemini-3.1-flash-image">gemini-3.1-flash-image</option>
-              <option value="geminis">geminis (Combo Pool)</option>
-              <option value="Agy">Agy (Antigravity High-Speed)</option>
-            </select>
-          </div>
-        )}
-
-        {/* SOCKS5 Android Proxy Live Indicator */}
-        <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-canvas border border-border">
-          <span className="text-[10px] uppercase font-bold text-obsidian-muted flex items-center gap-1.5">
-            <span
-              className={cn(
-                "inline-block w-2 h-2 rounded-full",
-                proxyStatus?.healthy
-                  ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.7)]"
-                  : "bg-rose-500 animate-pulse"
-              )}
-            />
-            <span>SOCKS5 Android:</span>
-          </span>
-          <span
-            className={cn(
-              "font-mono font-bold text-[11px]",
-              proxyStatus?.healthy ? "text-emerald-400" : "text-rose-400"
-            )}
-          >
-            {proxyStatus?.healthy ? "ONLINE" : "OFFLINE"}
-          </span>
-          {proxyStatus?.healthy && proxyStatus.latency_ms ? (
-            <span className="text-[9px] text-obsidian-muted font-mono">
-              ({proxyStatus.latency_ms}ms)
-            </span>
-          ) : null}
-          <button
-            type="button"
-            onClick={handleCheckProxy}
-            disabled={isCheckingProxy}
-            className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-panel hover:bg-canvas border border-border text-obsidian-secondary hover:text-obsidian-primary transition-all disabled:opacity-50"
-            title={proxyStatus?.detail || "Periksa koneksi SOCKS5 Android"}
-          >
-            {isCheckingProxy ? "Checking..." : "[Check Connection]"}
-          </button>
-        </div>
-
-        <div className="text-[10px] text-obsidian-muted">
-          Render target: <span className="text-emerald-400">Persistent SQLite Storage</span>
-        </div>
-      </div>
-
-      {/* Warning banner when a text-only provider is active */}
-      {selectedProvider !== "google_flow" && (
-        <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-start gap-3 text-xs shadow-sm">
-          <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
-          <div className="flex-1 space-y-1">
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-bold text-amber-300 uppercase tracking-wide text-[11px]">
-                Peringatan Engine Render: Visual Anchoring Tidak Aktif
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  setSelectedProvider("google_flow");
-                  if (typeof window !== "undefined") {
-                    localStorage.setItem("movieai_active_character_provider", "google_flow");
-                  }
-                }}
-                className="px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-600 text-canvas font-bold text-[10px] transition-colors shadow-sm shrink-0"
-              >
-                Aktifkan Google Flow (5 Akun PRO)
-              </button>
-            </div>
-            <p className="text-[11px] text-amber-200/90 leading-relaxed font-sans">
-              Engine <strong>{selectedProvider === "ag_gemini_flash" ? "AG/Gemini 3.8 Flash" : selectedProvider === "9router" ? "9Router" : "SD 3.5 Large"}</strong> adalah engine <em>Text-to-Image</em> murni yang tidak mendukung referensi visual (Visual Anchor Card 1 & Card 3). Hal ini berisiko menyebabkan <em>character &amp; gender drift</em> saat merender Card 2 s/d Card 8. Untuk menjaga konsistensi 100% wajah, gender, usia, dan kostum, disarankan menggunakan <strong>Google Flow</strong>.
-            </p>
-          </div>
-        </div>
-      )}
+      <AIRenderProviderCard
+        projectId={projectId}
+        initialProviderId={selectedProvider}
+        socks5Online={proxyStatus?.healthy}
+        onCheckSocks5={handleCheckProxy}
+      />
 
       {/* Selected Character Profile Header */}
       <div className="p-4 rounded-xl bg-panel border border-border shadow-sm">
@@ -2815,6 +2677,30 @@ export default function CharacterMatrixTab({
                       <option value="EXTRAS">EXTRAS</option>
                     </select>
                   </div>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] text-obsidian-muted uppercase font-semibold block">
+                    Narrative Summary &amp; Dramatic Arc
+                  </label>
+                  <textarea
+                    value={editCharNarrativeSummary}
+                    onChange={(e) => setEditCharNarrativeSummary(e.target.value)}
+                    rows={2}
+                    placeholder="Core motivation, flaw, and dramatic transformation arc..."
+                    className="w-full px-3 py-1.5 rounded-lg bg-panel border border-border text-obsidian-primary text-xs focus:border-amber-500 focus:outline-none resize-none"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] text-obsidian-muted uppercase font-semibold block">
+                    Voice DNA Profile (Cadence, Pacing &amp; Subtext Style)
+                  </label>
+                  <textarea
+                    value={editCharVoiceDna}
+                    onChange={(e) => setEditCharVoiceDna(e.target.value)}
+                    rows={2}
+                    placeholder="e.g. Sparse clipped clauses (~2.1 wps), dry wit, avoids overt emotion..."
+                    className="w-full px-3 py-1.5 rounded-lg bg-panel border border-border text-obsidian-primary text-xs font-mono focus:border-amber-500 focus:outline-none resize-none"
+                  />
                 </div>
                 <div className="flex items-center justify-end gap-2 pt-1">
                   <button
@@ -2922,12 +2808,21 @@ export default function CharacterMatrixTab({
                 <Mic className="w-3.5 h-3.5 text-amber-500" />
                 <span>Voice DNA Profile</span>
               </label>
-              <div className="p-2.5 rounded-lg bg-canvas border border-border flex items-center justify-between">
+              <div className="p-2.5 rounded-lg bg-canvas border border-border flex items-center justify-between gap-2">
                 <span className="text-obsidian-secondary text-[11px] truncate">
-                  {selectedChar.voice_dna_profile || selectedChar.voice_ref_asset_id || "Acoustic Timbre Default"}
+                  {selectedChar.voice_dna_profile?.trim()
+                    ? selectedChar.voice_dna_profile
+                    : "Not configured — click Edit Identity above to set Voice DNA"}
                 </span>
-                <span className="px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 text-[9px] font-bold shrink-0">
-                  128kbps HQ
+                <span
+                  className={cn(
+                    "px-1.5 py-0.5 rounded text-[9px] font-bold shrink-0 border",
+                    selectedChar.voice_dna_profile?.trim()
+                      ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
+                      : "bg-amber-500/10 text-amber-400 border-amber-500/30"
+                  )}
+                >
+                  {selectedChar.voice_dna_profile?.trim() ? "Voice DNA Locked" : "Voice DNA Unset"}
                 </span>
               </div>
             </div>
@@ -3467,7 +3362,6 @@ export default function CharacterMatrixTab({
                         <option value="google_flow">Google Flow (5 Akun PRO) [Recommended]</option>
                         <option value="ag_gemini_flash">AG / Gemini 3.8 Flash (Fast)</option>
                         <option value="9router">9Router Multi-Combo</option>
-                        <option value="sd35_large_hf">SD 3.5 Large (HF)</option>
                       </select>
                       {addCharImageProvider === "google_flow" && (
                         <div className="mt-1 flex items-center justify-between text-[10px] font-mono px-2 py-1 rounded bg-canvas border border-border">

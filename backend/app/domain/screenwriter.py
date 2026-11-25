@@ -8,9 +8,11 @@ Operates strictly text-only with zero automatic image rendering.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -22,6 +24,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from backend.app.core.config import get_settings
 from backend.app.domain.catalog import LIGHTING_MATRIX, STYLE_CATALOG
+from backend.app.domain.director_rag import DirectorRAGClient
+from backend.app.services.screenwriter_rag import ScreenwriterRAGClient
 
 logger = logging.getLogger("polya.screenwriter")
 
@@ -110,6 +114,125 @@ def sanitize_negative_prompts_for_style(
             sanitized_clusters.append(", ".join(kept_tokens))
 
     return sanitized_clusters
+
+
+# ==============================================================================
+# Structured Slugline Parser & Style Writing Directives
+# ==============================================================================
+
+_SLUG_SETTING_RE = re.compile(
+    r"^\s*(?P<setting>(?:INT\.?\s*/\s*EXT\.?|EXT\.?\s*/\s*INT\.?|I\s*/\s*E\.?|INT\.?|EXT\.?))(?=\s|$)(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+_SLUG_TIME_WORD_RE = re.compile(
+    r"\b(?:DAY|NIGHT|DAWN|DUSK|TWILIGHT|SUNRISE|SUNSET|MORNING|AFTERNOON|"
+    r"EVENING|MIDNIGHT|NOON|LATER|CONTINUOUS|MOMENTS|FLASHBACK|HOUR|"
+    r"SAME\s+TIME|PRESENT|DREAM|STORMY|RAINY|OVERCAST)\b",
+    re.IGNORECASE,
+)
+
+STYLE_FAMILY_WRITING_DIRECTIVES: dict[str, str] = {
+    "photorealistic": "Sparse-to-moderate naturalistic restraint (1.8-2.5 wps), 75% unspoken behavioral subtext, sensory foley & J/L-cut bridges.",
+    "stylized_3d": "Crisp rhythmic banter (2.2-2.8 wps), pose-to-pose silhouette & prop kineticism, 60% subtext with 3-5s visual shifts.",
+    "stop_motion": "Economical deadpan brevity (1.6-2.2 wps), tight miniature diorama materiality, tactile analog foley & stepped holds.",
+    "anime_2d": "High-contrast cadence ('ma' atmospheric stillness vs staccato declarations), graphic keyframe beats & L-cut ambient holds.",
+}
+
+COVERAGE_STYLE_PRESETS: dict[str, dict[str, Any]] = {
+    "classic_coverage": {
+        "id": "classic_coverage",
+        "label": "Classic Coverage",
+        "description": "Establishing Master -> Medium / OTS Dialogue -> Close-Up emotional punch.",
+        "shot_blueprints": [
+            {"camera_code": "#Cam 04", "lens_code": "#Lens 01", "comp_code": "#Comp 01", "transition_type": "J_CUT"},
+            {"camera_code": "#Cam 07", "lens_code": "#Lens 02", "comp_code": "#Comp 05", "transition_type": "L_CUT"},
+            {"camera_code": "#Cam 02", "lens_code": "#Lens 03", "comp_code": "#Comp 03", "transition_type": "HARD_CUT"},
+        ],
+    },
+    "visceral_oner": {
+        "id": "visceral_oner",
+        "label": "Visceral Oner",
+        "description": "Unbroken kinetic tracking long take sustaining continuous tension.",
+        "single_shot": True,
+        "shot_blueprints": [
+            {"camera_code": "#Cam 18", "lens_code": "#Lens 04", "comp_code": "#Comp 04", "transition_type": "J_CUT"},
+        ],
+    },
+    "rapid_montage": {
+        "id": "rapid_montage",
+        "label": "Rapid Montage",
+        "description": "High-tempo kinetic micro-cuts for visceral action, prop reveals, or crisis escalation.",
+        "shot_blueprints": [
+            {"camera_code": "#Cam 19", "lens_code": "#Lens 04", "comp_code": "#Comp 03", "transition_type": "J_CUT"},
+            {"camera_code": "#Cam 23", "lens_code": "#Lens 02", "comp_code": "#Comp 02", "transition_type": "HARD_CUT"},
+            {"camera_code": "#Cam 01", "lens_code": "#Lens 05", "comp_code": "#Comp 04", "transition_type": "HARD_CUT"},
+            {"camera_code": "#Cam 25", "lens_code": "#Lens 03", "comp_code": "#Comp 01", "transition_type": "L_CUT"},
+        ],
+    },
+    "intimate_subtext": {
+        "id": "intimate_subtext",
+        "label": "Intimate Subtext",
+        "description": "Restrained close-ups, reaction holds, and L-Cut silence isolating inner conflict.",
+        "shot_blueprints": [
+            {"camera_code": "#Cam 03", "lens_code": "#Lens 03", "comp_code": "#Comp 01", "transition_type": "L_CUT"},
+            {"camera_code": "#Cam 02", "lens_code": "#Lens 05", "comp_code": "#Comp 02", "transition_type": "L_CUT"},
+            {"camera_code": "#Cam 01", "lens_code": "#Lens 03", "comp_code": "#Comp 03", "transition_type": "J_CUT"},
+        ],
+    },
+}
+
+_STYLE_FAMILY_OPTICS_DEFAULTS: dict[str, dict[str, str]] = {
+    "photorealistic": {"light_code": "#Light 03", "act_code": "#Act 01", "speed_code": "#Speed 03"},
+    "stylized_3d": {"light_code": "#Light 01", "act_code": "#Act 06", "speed_code": "#Speed 04"},
+    "stop_motion": {"light_code": "#Light 05", "act_code": "#Act 04", "speed_code": "#Speed 01"},
+    "anime_2d": {"light_code": "#Light 06", "act_code": "#Act 02", "speed_code": "#Speed 02"},
+}
+
+
+def parse_structured_slugline(raw: str) -> dict[str, str]:
+    """Parse a screenplay slugline into setting, location, time_of_day, and canonical normalized string."""
+    cleaned = re.sub(r"\s+", " ", (raw or "").strip())
+    if not cleaned:
+        return {"setting": "", "location": "", "time_of_day": "", "normalized": ""}
+
+    match = _SLUG_SETTING_RE.match(cleaned)
+    if match:
+        raw_setting = re.sub(r"\s+", "", match.group("setting").upper())
+        if raw_setting.startswith("INT") and "EXT" in raw_setting:
+            setting = "EXT./INT." if raw_setting.startswith("EXT") else "INT./EXT."
+        elif raw_setting in ("I/E", "I/E."):
+            setting = "I/E"
+        elif raw_setting.startswith("INT"):
+            setting = "INT."
+        else:
+            setting = "EXT."
+        remainder = match.group("rest").strip()
+    else:
+        setting = ""
+        remainder = cleaned
+
+    remainder = re.sub(r"\s*(?:--+|—|–)\s*", " - ", remainder)
+    parts = [p.strip().upper() for p in re.split(r"\s+-\s+", remainder) if p.strip()]
+
+    location = ""
+    time_of_day = ""
+    if len(parts) == 1:
+        location = parts[0]
+    elif len(parts) >= 2:
+        if _SLUG_TIME_WORD_RE.search(parts[-1]):
+            location = " - ".join(parts[:-1])
+            time_of_day = parts[-1]
+        else:
+            location = " - ".join(parts)
+
+    prefix_loc = f"{setting} {location}".strip() if (setting or location) else ""
+    normalized = f"{prefix_loc} - {time_of_day}" if (prefix_loc and time_of_day) else (prefix_loc or time_of_day)
+    return {
+        "setting": setting,
+        "location": location,
+        "time_of_day": time_of_day,
+        "normalized": normalized,
+    }
 
 
 
@@ -436,6 +559,7 @@ def extract_project_narrative_context(
                 c_name = c.get("name")
                 c_role = c.get("role", "PROTAGONIST")
                 c_prof = c.get("narrative_profile") or c.get("narrative_summary") or ""
+                c_voice = c.get("voice_dna_profile") or ""
                 c_prompt = c.get("base_visual_prompt") or c.get("base_prompt") or ""
                 c_states = c.get("states") or []
             else:
@@ -443,6 +567,7 @@ def extract_project_narrative_context(
                 c_role = getattr(c, "role", "PROTAGONIST")
                 meta = getattr(c, "sheet_metadata", {}) or {}
                 c_prof = getattr(c, "narrative_summary", None) or meta.get("narrative_summary") or ""
+                c_voice = getattr(c, "voice_dna_profile", None) or meta.get("voice_dna_profile") or ""
                 c_prompt = getattr(c, "base_prompt", "")
                 c_states = getattr(c, "states", [])
 
@@ -455,6 +580,7 @@ def extract_project_narrative_context(
                             "label": s.get("state_label") or s.get("label") or "",
                             "wardrobe": s.get("wardrobe") or "",
                             "wear": s.get("injuries_and_wear") or s.get("wear") or "",
+                            "expression": s.get("expression_anchor") or s.get("expression") or s.get("emotional_anchor") or "",
                         })
                     else:
                         formatted_states.append({
@@ -462,6 +588,7 @@ def extract_project_narrative_context(
                             "label": getattr(s, "state_label", "") or getattr(s, "state_code", ""),
                             "wardrobe": getattr(s, "wardrobe", ""),
                             "wear": getattr(s, "injuries_and_wear", ""),
+                            "expression": getattr(s, "expression_anchor", "") or "",
                         })
 
             if c_name:
@@ -469,6 +596,7 @@ def extract_project_narrative_context(
                     "name": c_name,
                     "role": c_role,
                     "narrative_profile": c_prof,
+                    "voice_dna_profile": c_voice,
                     "base_visual_prompt": c_prompt,
                     "states": formatted_states,
                 })
@@ -496,7 +624,7 @@ def extract_project_narrative_context(
                 "narrative_goal": goal,
             })
             if slug:
-                clean_slug = slug.strip().upper()
+                clean_slug = parse_structured_slugline(slug)["normalized"] or slug.strip().upper()
                 slug_counts[clean_slug] = slug_counts.get(clean_slug, 0) + 1
 
     ranked_locations = sorted(slug_counts.items(), key=lambda x: x[1], reverse=True)
@@ -703,6 +831,21 @@ class PolyaScreenwriterEngine:
 
         return None
 
+    async def _fetch_voice_rag_block(
+        self,
+        context: ProjectNarrativeContext,
+        roles: list[str] | str | None = None,
+    ) -> str:
+        """Fetch Voice DNA & 5-State Arc guidance from Screenwriter RAG (graceful empty fallback)."""
+        rag_res = await ScreenwriterRAGClient.retrieve_character_voice(
+            style_code=context.master_style_code,
+            genre_tone=context.genre_tone,
+            roles=roles,
+            top_k=3,
+        )
+        block = str(rag_res.get("prompt_block") or "").strip()
+        return f"\n{block}\n" if block else ""
+
     async def generate_cast_ensemble(
         self,
         context: ProjectNarrativeContext,
@@ -723,6 +866,10 @@ class PolyaScreenwriterEngine:
         dna_str = f"- Visual DNA Parameters: {', '.join(dna_items)}" if dna_items else ""
         env_str = f"- World Key Environments: {context.environments_summary}" if context.environments_summary else ""
         prop_str = f"- World Hero Props: {context.props_summary}" if context.props_summary else ""
+        voice_rag_block = await self._fetch_voice_rag_block(
+            context,
+            roles=["PROTAGONIST", "ANTAGONIST", "MENTOR/ALLY", "SHADOW/WILDCARD"],
+        )
 
         user_prompt = f"""PROJECT PRODUCTION BIBLE & NARRATIVE CONTEXT:
 - Film Title: {context.title}
@@ -738,7 +885,7 @@ class PolyaScreenwriterEngine:
 {prop_str}
 - Production Continuity Rules: {', '.join(context.continuity_rules) if context.continuity_rules else 'Standard Cinematic Rules'}
 - Additional Showrunner Notes: {additional_notes or 'None'}
-
+{voice_rag_block}
 CASTING & CHARACTER DESIGN MANDATE:
 1. {count_instruction}
 2. Exactly 1 character must have role: "PROTAGONIST" (the primary point-of-view hero).
@@ -832,6 +979,7 @@ OUTPUT SCHEMA (Return strictly this JSON structure):
         dna_str = f"\n- Visual DNA Parameters: {', '.join(dna_items)}" if dna_items else ""
         env_str = f"\n- World Key Environments: {context.environments_summary}" if context.environments_summary else ""
         prop_str = f"\n- World Hero Props: {context.props_summary}" if context.props_summary else ""
+        voice_rag_block = await self._fetch_voice_rag_block(context, roles=preferred_role or "SUPPORTING")
 
         user_prompt = f"""PROJECT PRODUCTION BIBLE & NARRATIVE CONTEXT:
 - Film Title: {context.title}
@@ -840,7 +988,7 @@ OUTPUT SCHEMA (Return strictly this JSON structure):
 - Master Genre & Tone: {context.genre_tone}
 - Master Visual Style Code: {context.master_style_code} ({context.style_name}){dna_str}
 - World Setting: {context.world_setting}{env_str}{prop_str}
-
+{voice_rag_block}
 EXISTING SIBLING CAST IN ENSEMBLE (ANTI-DUPLICATION REGISTRY):
 {siblings_summary}
 
@@ -906,6 +1054,7 @@ OUTPUT SCHEMA (Return strictly this JSON object):
         dna_str = f"\n- Visual DNA Parameters: {', '.join(dna_items)}" if dna_items else ""
         env_str = f"\n- World Key Environments: {context.environments_summary}" if context.environments_summary else ""
         prop_str = f"\n- World Hero Props: {context.props_summary}" if context.props_summary else ""
+        voice_rag_block = await self._fetch_voice_rag_block(context, roles=current_role)
 
         user_prompt = f"""PROJECT PRODUCTION BIBLE & NARRATIVE CONTEXT:
 - Film Title: {context.title}
@@ -914,7 +1063,7 @@ OUTPUT SCHEMA (Return strictly this JSON object):
 - Master Genre & Tone: {context.genre_tone}
 - Master Visual Style Code: {context.master_style_code} ({context.style_name}){dna_str}
 - World Setting: {context.world_setting}{env_str}{prop_str}
-
+{voice_rag_block}
 TARGET CHARACTER TO REGENERATE & REPLACE:
 - Current Name to Replace: {current_name}
 - Current Role: {current_role}
@@ -1110,6 +1259,372 @@ OUTPUT SCHEMA (Return strictly this JSON object):
             voice_dna_profile=voice_dna,
             states=states_list,
         )
+
+    # ==========================================================================
+    # Voice DNA & 5-State Continuity Helpers + Single-Character / State Helpers
+    # ==========================================================================
+
+    @staticmethod
+    def _resolve_act_to_state_number(act_number: int | None, total_acts: int = 4) -> int | None:
+        """Map an Act index (1..total_acts) onto canonical #State 01..05 progression."""
+        if act_number is None:
+            return None
+        safe_total = max(1, int(total_acts or 4))
+        safe_act = max(1, min(int(act_number), safe_total))
+        if safe_total == 1:
+            return 1
+        mapped = 1 + round(((safe_act - 1) / (safe_total - 1)) * 4)
+        return max(1, min(5, int(mapped)))
+
+    @classmethod
+    def _format_cast_continuity_context(
+        cls,
+        project_context: ProjectNarrativeContext | dict[str, Any] | None = None,
+        characters: list[dict[str, Any]] | None = None,
+        act_number: int | None = None,
+        total_acts: int = 4,
+        speaking_character: str | None = None,
+    ) -> tuple[str, list[str]]:
+        """Build a compact cast block weaving Voice DNA and Act-mapped #State 01-05 continuity."""
+        merged_by_name: dict[str, dict[str, Any]] = {}
+
+        def _ingest(raw_list: list[Any] | None) -> None:
+            if not raw_list:
+                return
+            for c in raw_list:
+                if not isinstance(c, dict):
+                    continue
+                name = str(c.get("name") or "").strip()
+                if not name:
+                    continue
+                key = name.lower()
+                existing = merged_by_name.get(key, {"name": name, "states": []})
+                existing["name"] = name
+                existing["role"] = c.get("role") or existing.get("role") or "Cast"
+                existing["narrative_summary"] = (
+                    c.get("narrative_summary")
+                    or c.get("narrative_profile")
+                    or existing.get("narrative_summary")
+                    or ""
+                )
+                existing["voice_dna_profile"] = c.get("voice_dna_profile") or existing.get("voice_dna_profile") or ""
+                existing["base_prompt"] = c.get("base_prompt") or c.get("base_visual_prompt") or existing.get("base_prompt") or ""
+                states = c.get("states") or []
+                if states:
+                    existing["states"] = list(states)
+                merged_by_name[key] = existing
+
+        if isinstance(project_context, ProjectNarrativeContext):
+            _ingest(project_context.cast_characters)
+        elif isinstance(project_context, dict):
+            _ingest(project_context.get("cast_characters"))
+        _ingest(characters)
+
+        entries = list(merged_by_name.values())
+        if not entries:
+            return "- Protagonist (Main Lead)\n- Antagonist (Opposing Force)", ["Protagonist", "Antagonist"]
+
+        sp_lower = (speaking_character or "").strip().lower()
+        if sp_lower:
+            entries.sort(key=lambda item: (0 if item["name"].lower() == sp_lower else 1))
+
+        target_state_num = cls._resolve_act_to_state_number(act_number, total_acts)
+        target_code = f"#State 0{target_state_num}" if target_state_num else None
+
+        lines: list[str] = []
+        char_names: list[str] = []
+        for entry in entries:
+            c_name = entry["name"]
+            char_names.append(c_name)
+            c_role = entry.get("role", "Cast")
+            marker = " [ACTIVE SPEAKER]" if sp_lower and c_name.lower() == sp_lower else ""
+            voice_dna = str(entry.get("voice_dna_profile") or "").strip()
+            bio = str(entry.get("narrative_summary") or entry.get("base_prompt") or "").strip()
+
+            parts = [f"- {c_name} ({c_role}){marker}:"]
+            if bio:
+                parts.append(bio[:100])
+            if voice_dna:
+                parts.append(f"Voice DNA: {voice_dna[:140]}")
+
+            raw_states = entry.get("states") or []
+            if raw_states:
+                normalized_states: list[tuple[str, str, str, str, str]] = []
+                for idx, st in enumerate(raw_states, start=1):
+                    if isinstance(st, dict):
+                        s_code = str(st.get("state_code") or st.get("code") or f"#State 0{min(idx, 5)}")
+                        s_label = str(st.get("state_label") or st.get("label") or "")
+                        s_wardrobe = str(st.get("wardrobe") or "")
+                        s_wear = str(st.get("injuries_and_wear") or st.get("wear") or st.get("physical_damage") or "")
+                        s_expr = str(st.get("expression_anchor") or st.get("expression") or st.get("emotional_anchor") or "")
+                    else:
+                        s_code = str(getattr(st, "state_code", f"#State 0{min(idx, 5)}"))
+                        s_label = str(getattr(st, "state_label", "") or "")
+                        s_wardrobe = str(getattr(st, "wardrobe", "") or "")
+                        s_wear = str(getattr(st, "injuries_and_wear", "") or "")
+                        s_expr = str(getattr(st, "expression_anchor", "") or "")
+                    normalized_states.append((s_code, s_label, s_wardrobe, s_wear, s_expr))
+
+                normalized_states.sort(key=lambda tup: tup[0])
+                if target_code:
+                    chosen = next((t for t in normalized_states if t[0].upper() == target_code.upper()), None)
+                    if not chosen:
+                        fallback_idx = min(len(normalized_states) - 1, max(0, (target_state_num or 1) - 1))
+                        chosen = normalized_states[fallback_idx]
+                    st_bits = [b for b in (
+                        f"Wardrobe: {chosen[2][:70]}" if chosen[2] else "",
+                        f"Wear: {chosen[3][:60]}" if chosen[3] else "",
+                        f"Emotion: {chosen[4][:60]}" if chosen[4] else "",
+                    ) if b]
+                    st_lbl = f" ({chosen[1]})" if chosen[1] else ""
+                    if st_bits:
+                        parts.append(f"Active {chosen[0]}{st_lbl} [{'; '.join(st_bits)}]")
+                else:
+                    arc_labels = " -> ".join(f"{t[0]} {t[1] or t[4]}".strip()[:28] for t in normalized_states[:5])
+                    if arc_labels:
+                        parts.append(f"5-State Arc: {arc_labels}")
+
+            lines.append(" | ".join(parts))
+
+        return "\n".join(lines), char_names
+
+    @staticmethod
+    def _format_speaker_continuity_line(
+        character_name: str | None = None,
+        voice_dna_profile: str | None = None,
+        active_state: dict[str, Any] | str | None = None,
+    ) -> str:
+        """Render concise speaker Voice DNA and active physical/emotional state block for single-scene prompts."""
+        bits: list[str] = []
+        if voice_dna_profile and str(voice_dna_profile).strip():
+            bits.append(f"SPEAKER VOICE DNA ({character_name or 'Active Speaker'}): {str(voice_dna_profile).strip()}")
+        if isinstance(active_state, dict) and active_state:
+            s_code = active_state.get("state_code") or active_state.get("code") or "#State"
+            s_lbl = active_state.get("state_label") or active_state.get("label") or ""
+            details = [
+                f"Wardrobe: {active_state.get('wardrobe')}" if active_state.get("wardrobe") else "",
+                f"Wear/Injuries: {active_state.get('injuries_and_wear') or active_state.get('wear')}" if (active_state.get("injuries_and_wear") or active_state.get("wear")) else "",
+                f"Emotional Anchor: {active_state.get('expression_anchor') or active_state.get('expression')}" if (active_state.get("expression_anchor") or active_state.get("expression")) else "",
+            ]
+            joined = " | ".join(d for d in details if d)
+            if joined:
+                bits.append(f"ACTIVE STATE ({s_code}{' - ' + s_lbl if s_lbl else ''}): {joined}")
+        elif isinstance(active_state, str) and active_state.strip():
+            bits.append(f"ACTIVE STATE: {active_state.strip()}")
+        return "\n".join(bits)
+
+    async def auto_generate_character(
+        self,
+        project_context: ProjectNarrativeContext | dict[str, Any] | None = None,
+        existing_names: list[str] | None = None,
+        mode: str = "all",
+        current_draft: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Generate a single character concept + structured Voice DNA via RAG 8766 & 18-Style taxonomy."""
+        if isinstance(project_context, ProjectNarrativeContext):
+            film_title = project_context.title
+            synopsis = project_context.synopsis
+            genre_tone = project_context.genre_tone
+            style_code = project_context.master_style_code
+            style_name = project_context.style_name
+            world_setting = project_context.world_setting
+        elif isinstance(project_context, dict):
+            film_title = str(project_context.get("title") or "Untitled Production")
+            synopsis = str(project_context.get("synopsis") or "Epic cinematic narrative feature production.")
+            genre_tone = str(project_context.get("genre_tone") or "Cinematic Film")
+            style_code = str(project_context.get("master_style_code") or "#Style 01")
+            style_name = str(project_context.get("style_name") or "Hollywood Cinematic")
+            world_setting = str(project_context.get("world_setting") or "Cinematic Universe")
+        else:
+            film_title = "Untitled Production"
+            synopsis = "Epic cinematic narrative feature production."
+            genre_tone = "Cinematic Film"
+            style_code = "#Style 01"
+            style_name = "Hollywood Cinematic"
+            world_setting = "Cinematic Universe"
+
+        draft = current_draft or {}
+        style_family = get_style_family(style_code)
+        family_meta = STYLE_TAXONOMY_FAMILIES.get(style_family, {})
+        family_label = family_meta.get("name", style_family)
+        writing_directive = STYLE_FAMILY_WRITING_DIRECTIVES.get(style_family, "")
+
+        rag_res = await ScreenwriterRAGClient.retrieve_character_voice(
+            style_code=style_code,
+            genre_tone=genre_tone,
+            roles=[str(draft.get("role") or "PROTAGONIST")],
+            top_k=2,
+        )
+        sw_voice_block = str(rag_res.get("prompt_block") or "").strip()
+
+        system_prompt = (
+            "You are Polya AI — Hollywood Master Screenwriter, Character Architect, and Biometric Concept Designer.\n"
+            "Generate structured JSON strictly adhering to the film universe, Voice DNA discipline, and visual style family.\n"
+            "Do NOT reuse generic stock names such as Kaelen, Thorne, Vane, Vance, Lyra, or Cipher.\n"
+            "Output strictly valid JSON without markdown or commentary."
+        )
+
+        user_prompt = (
+            f"Production Title: {film_title}\n"
+            f"Synopsis / Core Premise: {synopsis}\n"
+            f"Genre & Tone: {genre_tone}\n"
+            f"World Setting: {world_setting}\n"
+            f"Master Visual Style: {style_name} ({style_code}) — Family: {family_label}\n"
+            f"Style Writing Directives: {writing_directive}\n"
+            f"Existing Cast Names (do NOT reuse): {', '.join(existing_names) if existing_names else 'None yet'}\n"
+            f"Generation Mode: '{mode}'\n"
+            f"User Draft Context:\n"
+            f"- Current Name: {draft.get('name') or 'None'}\n"
+            f"- Current Role: {draft.get('role') or 'None'}\n"
+            f"- Current Bio/Archetype: {draft.get('archetype_and_bio') or 'None'}\n"
+            f"- Current Base Visual Prompt: {draft.get('base_visual_prompt') or 'None'}\n"
+        )
+        if sw_voice_block:
+            user_prompt += f"\n{sw_voice_block}\n"
+        user_prompt += (
+            "\nRequirements:\n"
+            "1. 'name': Contextually authentic character name fitting the film title and universe.\n"
+            "2. 'role_suggestion': One of 'Protagonist', 'Antagonist', 'Deuteragonist', 'Mentor', or 'Supporting'.\n"
+            "3. 'archetype_and_bio': 2-3 sentences detailing dramatic role, core flaw/desire, psychological subtext, and narrative function.\n"
+            "4. 'voice_dna_profile': Concise vocal & speech fingerprint (speaking tempo/wps, lexical register, emotional tell, verbal tic or silence habit).\n"
+            "5. 'base_visual_prompt': Detailed biometric visual prompt (exact age, ethnicity, facial bone structure, eyes, skin texture, hair, posture, signature costume) ending with 'isolated on a flat seamless Neutral Matte Light-Medium Studio Gray (#D4D4D4) studio background, even softbox lighting, zero environment props or color cast' in one continuous paragraph without raw newlines.\n"
+            "6. Output strictly valid flat JSON with keys: 'name', 'role_suggestion', 'archetype_and_bio', 'voice_dna_profile', 'base_visual_prompt'."
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        return await self._call_llm(messages, retry_on_parse_error=True)
+
+    async def suggest_character_state(
+        self,
+        project_context: ProjectNarrativeContext | dict[str, Any] | None,
+        character: Any,
+        state_code: str,
+        target_field: str = "all",
+        current_values: dict[str, str] | None = None,
+        previous_value: str | None = None,
+        is_regeneration: bool = False,
+        scenes_summary: str = "",
+        prior_states_text: str = "",
+    ) -> dict[str, Any]:
+        """Generate progressive #State 01-#State 05 wardrobe/wear/expression grounded in Voice DNA, RAG 8766 & full arc."""
+        if isinstance(project_context, ProjectNarrativeContext):
+            film_title = project_context.title
+            synopsis = project_context.synopsis
+            genre_tone = project_context.genre_tone
+            style_code = project_context.master_style_code
+            style_name = project_context.style_name
+            setting_world = project_context.world_setting
+        elif isinstance(project_context, dict):
+            film_title = str(project_context.get("title") or "Untitled Production")
+            synopsis = str(project_context.get("synopsis") or "")
+            genre_tone = str(project_context.get("genre_tone") or "Cinematic Film")
+            style_code = str(project_context.get("master_style_code") or "#Style 01")
+            style_name = str(project_context.get("style_name") or "Hollywood Cinematic")
+            setting_world = str(project_context.get("world_setting") or "Cinematic Universe")
+        else:
+            film_title = "Untitled Production"
+            synopsis = ""
+            genre_tone = "Cinematic Film"
+            style_code = "#Style 01"
+            style_name = "Hollywood Cinematic"
+            setting_world = "Cinematic Universe"
+
+        char_name = getattr(character, "name", None) or (character.get("name") if isinstance(character, dict) else "Character")
+        char_role = getattr(character, "role", None) or (character.get("role") if isinstance(character, dict) else "PROTAGONIST")
+        char_base = getattr(character, "base_prompt", None) or (character.get("base_prompt") if isinstance(character, dict) else "")
+        char_voice = getattr(character, "voice_dna_profile", None) or (character.get("voice_dna_profile") if isinstance(character, dict) else "") or ""
+        char_summary = getattr(character, "narrative_summary", None) or (character.get("narrative_summary") if isinstance(character, dict) else "") or ""
+
+        style_family = get_style_family(style_code)
+        writing_directive = STYLE_FAMILY_WRITING_DIRECTIVES.get(style_family, "")
+
+        rag_res = await ScreenwriterRAGClient.retrieve_character_voice(
+            style_code=style_code,
+            genre_tone=genre_tone,
+            roles=[str(char_role)],
+            top_k=2,
+        )
+        sw_voice_block = str(rag_res.get("prompt_block") or "").strip()
+
+        t_field = (target_field or "all").lower().strip()
+        curr_vals = current_values or {}
+        prev_val = previous_value or "None"
+
+        if t_field == "all":
+            expected_keys = '{"wardrobe": "...", "injuries_and_wear": "...", "expression_anchor": "..."}'
+            field_instruction = (
+                "USER TRIGGERED REGENERATE ALL. Provide fresh, distinct, high-impact alternative descriptions for all 3 fields "
+                "('wardrobe', 'injuries_and_wear', 'expression_anchor') differing meaningfully from "
+                f"Current Values: {json.dumps(curr_vals)} while preserving costume continuity."
+                if is_regeneration
+                else f"Generate camera-ready descriptions for all 3 fields ('wardrobe', 'injuries_and_wear', 'expression_anchor') reflecting {state_code}."
+            )
+        elif t_field == "wardrobe":
+            expected_keys = '{"wardrobe": "..."}'
+            field_instruction = f"Generate ONLY 'wardrobe' for {state_code}, differing from Previous Rejected Value: '{prev_val}'."
+        elif t_field in ("injuries", "injuries_and_wear"):
+            expected_keys = '{"injuries_and_wear": "..."}'
+            field_instruction = f"Generate ONLY 'injuries_and_wear' for {state_code}, differing from Previous Rejected Value: '{prev_val}'."
+        elif t_field in ("expression", "expression_anchor"):
+            expected_keys = '{"expression_anchor": "..."}'
+            field_instruction = f"Generate ONLY 'expression_anchor' for {state_code}, differing from Previous Rejected Value: '{prev_val}'."
+        else:
+            expected_keys = '{"wardrobe": "...", "injuries_and_wear": "...", "expression_anchor": "..."}'
+            field_instruction = f"Generate camera-ready descriptions for all 3 fields reflecting {state_code}."
+
+        sys_prompt = (
+            "You are Polya AI — Hollywood Costume Designer, Continuity Director, and Psychological Performance Architect.\n"
+            "Formulate precise, camera-ready visual descriptions for dynamic character state progression (#State 01 to #State 05).\n\n"
+            "CRITICAL DIRECTIVES:\n"
+            "1. UNIVERSALITY & FIDELITY: Inherit and evolve the specific garments, fabrics, and accessories from Base Visual Prompt.\n"
+            "2. PSYCHOLOGICAL & VOCAL COHERENCE: Align facial tension and expression anchor with Character Voice DNA and Dramatic Arc.\n"
+            "3. CINEMATIC DESCRIPTORS: Dense visual-first phrasing (15-35 words, 1-2 tight sentences per field). No label prefixes ('Wardrobe:', etc.) or markdown.\n"
+            "4. CONTINUITY & ANTI-REPETITION: Build cumulatively on prior recorded states; if regenerating, provide a genuinely distinct alternative.\n"
+            "5. JSON OUTPUT ONLY: Strictly valid flat JSON matching requested keys."
+        )
+
+        user_prompt = (
+            f"=== PRODUCTION CONTEXT ===\n"
+            f"Project Title: {film_title}\n"
+            f"Synopsis / Premise: {synopsis}\n"
+            f"Genre & Tone: {genre_tone}\n"
+            f"Master Visual Style: {style_name} ({style_code}) — Family: {style_family}\n"
+            f"Style Directives: {writing_directive}\n"
+            f"World / Setting: {setting_world}\n"
+            f"Full Dramatic Arc Context:\n{scenes_summary}\n\n"
+            f"=== ACTIVE CHARACTER PROFILE ===\n"
+            f"Name: {char_name}\n"
+            f"Role: {char_role}\n"
+            f"Narrative Arc Summary: {char_summary or 'N/A'}\n"
+            f"Voice DNA Profile: {char_voice or 'Standard cinematic cadence'}\n"
+            f"Base Visual Prompt: {char_base}\n\n"
+            f"=== PROGRESSION MATRIX REFERENCE ===\n"
+            f"- #State 01 - Normal: Pristine baseline appearance; intact attire, zero fresh wounds.\n"
+            f"- #State 02 - Wear & Tear: Minor dust, light creasing, loosened collar/accessories, subtle fatigue.\n"
+            f"- #State 03 - Battle Damaged: Measured tears, scuffs, fresh cuts, bruises, grime, or burns.\n"
+            f"- #State 04 - Psychological Breakdown: Heavily disheveled attire; hollow gaze, trauma, smeared grime/sweat.\n"
+            f"- #State 05 - Climax / Catharsis: Peak climactic transformation and physical/emotional resolution.\n\n"
+            f"=== CROSS-STATE CONTINUITY ===\n"
+            f"Previously Registered States:\n{prior_states_text or 'None registered yet.'}\n"
+        )
+        if sw_voice_block:
+            user_prompt += f"\n{sw_voice_block}\n"
+        user_prompt += (
+            f"\n=== TARGET GENERATION OBJECTIVE ===\n"
+            f"Target State Code: {state_code}\nTarget Field: {t_field}\nIs Regeneration: {is_regeneration}\n"
+            f"Current Values: {json.dumps(curr_vals)}\nPrevious Rejected Value: {prev_val}\n\n"
+            f"INSTRUCTION:\n{field_instruction}\n"
+            f"Output strictly a JSON object with keys: {expected_keys}"
+        )
+
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        return await self._call_llm(messages, retry_on_parse_error=True)
 
     # ==========================================================================
     # ==========================================================================
@@ -2190,11 +2705,115 @@ OUTPUT SCHEMA (Return STRICT valid JSON only):
                 f"dan Dark Night Crisis (II-B) yang menjamin momentum ketegangan stabil menuju klimaks."
             )
 
+        rag_struct = ScreenwriterRAGClient.retrieve_structure_rules_sync(
+            style_code=p_style,
+            structure_type=rec,
+            total_scenes=total_scenes,
+            query=f"{p_title} {p_genre} {p_synopsis[:240]}".strip(),
+            top_k=2,
+        )
+        rag_items = rag_struct.get("items") or []
+        if rag_items:
+            top_rule = rag_items[0]
+            rule_title = top_rule.get("title") or top_rule.get("rule_code") or "Dramaturgy Invariant"
+            rule_text = str(top_rule.get("rule_text") or "").strip()
+            if rule_text:
+                rationale += f" [Screenwriter Invariant — {rule_title}: {rule_text[:220]}]"
+
         return {
             "recommended_structure": rec,
             "strategic_rationale": rationale,
             "options": list(STRUCTURE_DEFINITIONS.values()),
         }
+
+    async def analyze_narrative_structure_hybrid(
+        self,
+        project_context: ProjectNarrativeContext | dict[str, Any] | None = None,
+        title: str = "",
+        synopsis: str = "",
+        genre_tone: str = "",
+        master_style_code: str = "",
+        total_scenes: int = 100,
+    ) -> dict[str, Any]:
+        """Hybrid Structure Advisory: combines Screenwriter RAG (8766) + LLM premise reasoning with heuristic fallback."""
+        base_advisory = self.analyze_narrative_structure(
+            project_context=project_context,
+            title=title,
+            synopsis=synopsis,
+            genre_tone=genre_tone,
+            master_style_code=master_style_code,
+            total_scenes=total_scenes,
+        )
+        if isinstance(project_context, ProjectNarrativeContext):
+            p_title = project_context.title or title
+            p_synopsis = project_context.synopsis or synopsis
+            p_genre = project_context.genre_tone or genre_tone
+            p_style = project_context.master_style_code or master_style_code
+        elif isinstance(project_context, dict):
+            p_title = project_context.get("title", "") or title
+            p_synopsis = project_context.get("synopsis", "") or synopsis
+            p_genre = project_context.get("genre_tone", "") or project_context.get("genre", "") or genre_tone
+            p_style = project_context.get("master_style_code", "") or master_style_code
+        else:
+            p_title, p_synopsis, p_genre, p_style = title, synopsis, genre_tone, master_style_code
+
+        style_family = get_style_family(p_style or "")
+        sw_rules = await ScreenwriterRAGClient.retrieve_structure_rules(
+            style_code=p_style,
+            structure_type=base_advisory["recommended_structure"],
+            total_scenes=total_scenes,
+            query=f"{p_title} {p_genre} {p_synopsis[:240]}".strip(),
+            top_k=3,
+        )
+        sw_block = str(sw_rules.get("prompt_block") or "").strip()
+        style_dir = STYLE_FAMILY_WRITING_DIRECTIVES.get(style_family, "")
+
+        valid_types = {"3_act", "4_act", "youtube_viral", "5_act"}
+        base_rec = base_advisory["recommended_structure"]
+        prompt = (
+            "You are Polya AI — Hollywood Screenwriter & Dramatic Structure Strategist.\n"
+            "Analyze the premise, genre, visual style family, and scene budget, then advise on the single strongest dramatic structure among: "
+            "'3_act' (intimate/indie/character study/drama), '4_act' (commercial action/thriller), "
+            "'youtube_viral' (viral/shorts/high-retention), '5_act' (epic/fantasy/tragedy/saga).\n\n"
+            f"Title: {p_title}\nGenre/Tone: {p_genre}\nStyle Code: {p_style or '#Style 01'} (Family: {style_family} — {style_dir})\n"
+            f"Scene Scale Target: {total_scenes} scenes\nBaseline Structure Signal: {base_rec}\n"
+            f"Synopsis / Premise: {p_synopsis or 'Feature cinematic arc'}\n"
+        )
+        if sw_block:
+            prompt += f"\n[SCREENWRITER STRUCTURE INVARIANTS]\n{sw_block}\n"
+        prompt += (
+            '\nReturn ONLY valid JSON: {"recommended_structure": "3_act|4_act|youtube_viral|5_act", '
+            '"strategic_rationale": "<2-3 concise sentences tying story conflict and #Style cadence to this structure>"}'
+        )
+
+        try:
+            parsed = await asyncio.wait_for(
+                self._call_llm(
+                    messages=[
+                        {"role": "system", "content": POLYA_SCREENWRITER_SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    retry_on_parse_error=False,
+                ),
+                timeout=8.0,
+            )
+            if isinstance(parsed, dict) and parsed.get("strategic_rationale"):
+                llm_rec = str(parsed.get("recommended_structure") or "").strip()
+                # Preserve explicit indie/epic/viral baseline signals while allowing LLM to refine generic 4_act defaults
+                final_rec = base_rec if base_rec != "4_act" else (llm_rec if llm_rec in valid_types else base_rec)
+                llm_rationale = str(parsed["strategic_rationale"]).strip()
+                combined_rationale = f"{base_advisory['strategic_rationale']} [Polya AI Advisory: {llm_rationale}]"
+                return {
+                    "recommended_structure": final_rec,
+                    "strategic_rationale": combined_rationale,
+                    "options": base_advisory["options"],
+                    "source": "hybrid_llm_rag",
+                }
+        except Exception as exc:
+            logger.info("structure_advisory_heuristic_fallback: %s", exc)
+
+        base_advisory["source"] = "heuristic_rag"
+        return base_advisory
 
     # ==========================================================================
     # Phase A: Master Story Treatment & Beat Sheet (Strict LLM Mode)
@@ -2217,33 +2836,39 @@ OUTPUT SCHEMA (Return STRICT valid JSON only):
             genre = project_context.get("genre_tone") or project_context.get("genre", "Cinematic Drama")
             world = project_context.get("world_setting", "Cinematic Universe")
             style = project_context.get("style_name") or project_context.get("visual_tone", "Hollywood Cinematic")
+            style_code = (
+                project_context.get("master_style_code")
+                or project_context.get("target_style_code")
+                or project_context.get("style_code")
+            )
             film_title = project_title or project_context.get("title") or title or "Cinema Feature"
             film_premise = project_context.get("synopsis") or premise or "A compelling dramatic cinematic journey."
         elif project_context:
             genre = project_context.genre_tone or "Cinematic Drama"
             world = project_context.world_setting or "Cinematic Universe"
             style = project_context.style_name or "Hollywood Cinematic"
+            style_code = getattr(project_context, "master_style_code", None)
             film_title = project_title or project_context.title or title or "Cinema Feature"
             film_premise = project_context.synopsis or premise or "A compelling dramatic cinematic journey."
         else:
             genre = "Cinematic Drama"
             world = "Cinematic Universe"
             style = "Hollywood Cinematic"
+            style_code = None
             film_title = project_title or title or "Cinema Feature"
             film_premise = premise or "A compelling dramatic cinematic journey."
 
-        # Format cast context
-        cast_summary_lines = []
-        if characters:
-            for c in characters:
-                c_name = c.get("name", "Character")
-                c_role = c.get("role", "Cast")
-                c_desc = c.get("narrative_summary") or c.get("base_prompt", "")
-                cast_summary_lines.append(f"- {c_name} ({c_role}): {c_desc[:120]}")
-        cast_str = "\n".join(cast_summary_lines) if cast_summary_lines else "- Protagonist (Main Lead)\n- Antagonist (Opposing Force)"
-
         bounds = get_act_bounds(total_scenes, structure_type=structure_type)
         num_acts = len(bounds)
+
+        # Format cast context with Voice DNA + 5-State emotional arcs
+        cast_str, _ = self._format_cast_continuity_context(
+            project_context=project_context,
+            characters=characters,
+            act_number=None,
+            total_acts=num_acts,
+        )
+
         struct_cfg = STRUCTURE_DEFINITIONS.get(structure_type, STRUCTURE_DEFINITIONS["4_act"])
         struct_label = struct_cfg["label"]
         act_labels_list = struct_cfg["act_labels"]
@@ -2254,7 +2879,7 @@ OUTPUT SCHEMA (Return STRICT valid JSON only):
             cold_open_inst = """
 COLD OPEN (30-SECOND VISUAL HOOK MONTAGE) MANDATE:
 Act I dramatic goal MUST explicitly mandate:
-- Scenes 01-03: High-energy visual teaser hook montage (0-10s shock hook & hero prop reveal, 10-20s slapstick/rival obstacle, 20-30s climax preview & freeze-frame rewind).
+- Scenes 01-03: High-energy visual teaser hook montage (0-10s in-media-res hook & hero prop reveal, 10-20s escalating obstacle/rival confrontation, 20-30s climax preview & rewind/cut to linear start).
 - Scene 04: Linear narrative setup starts.
 """
 
@@ -2290,7 +2915,39 @@ Ensemble Cast Available:
 
 Scene Boundaries ({num_acts} Acts):
 {acts_boundary_desc}
-{cold_open_inst}
+{cold_open_inst}"""
+
+        sw_rag_res, rag_result = await asyncio.gather(
+            ScreenwriterRAGClient.retrieve_treatment_beats(
+                style_code=style_code,
+                structure_type=structure_type,
+                genre_tone=genre,
+                premise=film_premise,
+                top_k=3,
+            ),
+            DirectorRAGClient.retrieve(
+                scene_beat=film_premise,
+                genre=genre,
+                style_code=style_code,
+                top_k=2,
+            ),
+        )
+        sw_family = sw_rag_res.get("style_family") or get_style_family(style_code or "")
+        sw_directives = sw_rag_res.get("writing_directives") or {}
+        sw_prompt_block = str(sw_rag_res.get("prompt_block") or "").strip()
+        if sw_prompt_block or sw_directives:
+            dir_summary = sw_directives.get("pacing_rules") or STYLE_FAMILY_WRITING_DIRECTIVES.get(sw_family, "")
+            prompt += f"\n[SCREENWRITER CRAFT & DRAMATURGY] (style_family={sw_family})\n"
+            if dir_summary:
+                prompt += f"Style Pacing Directives: {dir_summary}\n"
+            if sw_prompt_block:
+                prompt += f"{sw_prompt_block}\n"
+
+        rag_block = DirectorRAGClient.format_treatment_grammar(rag_result)
+        if rag_block:
+            prompt += f"\n[DIRECTOR VISUAL GRAMMAR]\n{rag_block}\n"
+
+        prompt += f"""
 Return a strictly valid JSON object matching this schema:
 {{
   "title": "{film_title}",
@@ -2355,6 +3012,186 @@ Return a strictly valid JSON object matching this schema:
     # Backward-compatible alias
     generate_treatment = generate_master_treatment
 
+    async def generate_treatment_variants(
+        self,
+        project_context: ProjectNarrativeContext | dict[str, Any] | None = None,
+        title: str = "",
+        total_scenes: int = 100,
+        premise: str = "",
+        characters: list[dict[str, Any]] | None = None,
+        cold_open_30s: dict[str, Any] | None = None,
+        project_title: str | None = None,
+        structure_type: str = "4_act",
+    ) -> list[dict[str, Any]]:
+        """Phase A Multi-Option Pitch Engine (Strict LLM Mode): generate 3 distinct narrative spines."""
+        if isinstance(project_context, dict):
+            genre = project_context.get("genre_tone") or project_context.get("genre", "Cinematic Drama")
+            world = project_context.get("world_setting", "Cinematic Universe")
+            style = project_context.get("style_name") or project_context.get("visual_tone", "Hollywood Cinematic")
+            style_code = (
+                project_context.get("master_style_code")
+                or project_context.get("target_style_code")
+                or project_context.get("style_code")
+            )
+            film_title = project_title or project_context.get("title") or title or "Cinema Feature"
+            film_premise = project_context.get("synopsis") or premise or "A compelling dramatic cinematic journey."
+        elif project_context:
+            genre = project_context.genre_tone or "Cinematic Drama"
+            world = project_context.world_setting or "Cinematic Universe"
+            style = project_context.style_name or "Hollywood Cinematic"
+            style_code = getattr(project_context, "master_style_code", None)
+            film_title = project_title or project_context.title or title or "Cinema Feature"
+            film_premise = project_context.synopsis or premise or "A compelling dramatic cinematic journey."
+        else:
+            genre, world, style, style_code = "Cinematic Drama", "Cinematic Universe", "Hollywood Cinematic", None
+            film_title = project_title or title or "Cinema Feature"
+            film_premise = premise or "A compelling dramatic cinematic journey."
+
+        bounds = get_act_bounds(total_scenes, structure_type=structure_type)
+        num_acts = len(bounds)
+        struct_cfg = STRUCTURE_DEFINITIONS.get(structure_type, STRUCTURE_DEFINITIONS["4_act"])
+        struct_label = struct_cfg["label"]
+        act_labels_list = struct_cfg["act_labels"]
+
+        cast_str, _ = self._format_cast_continuity_context(
+            project_context=project_context,
+            characters=characters,
+            act_number=None,
+            total_acts=num_acts,
+        )
+
+        sw_rag_res, dir_rag_res = await asyncio.gather(
+            ScreenwriterRAGClient.retrieve_treatment_beats(
+                style_code=style_code,
+                structure_type=structure_type,
+                genre_tone=genre,
+                premise=film_premise,
+                top_k=3,
+            ),
+            DirectorRAGClient.retrieve(
+                scene_beat=film_premise,
+                genre=genre,
+                style_code=style_code,
+                top_k=2,
+            ),
+        )
+        sw_family = sw_rag_res.get("style_family") or get_style_family(style_code or "")
+        sw_directives = sw_rag_res.get("writing_directives") or {}
+        sw_block = str(sw_rag_res.get("prompt_block") or "").strip()
+        dir_block = DirectorRAGClient.format_treatment_grammar(dir_rag_res)
+        pacing_summary = sw_directives.get("pacing_rules") or STYLE_FAMILY_WRITING_DIRECTIVES.get(sw_family, "")
+
+        cold_open_enabled = bool(cold_open_30s and cold_open_30s.get("enabled"))
+        cold_open_inst = (
+            "\nCOLD OPEN (30s): Each variant MUST specify a 'cold_open_hook' teasing peak Act III/climax tension in Scenes 01-03 before Scene 04's linear opening."
+            if cold_open_enabled
+            else ""
+        )
+        acts_boundary_desc = "\n".join(
+            f"- Act {idx + 1} ({act_labels_list[idx]['title']}): Scenes {b[0]} to {b[1]}"
+            for idx, b in enumerate(bounds)
+        )
+
+        prompt = (
+            f"You are Polya AI, Master Screenwriter. Generate 3 genuinely DISTINCT Master Treatment pitches for '{film_title}' using {struct_label} ({num_acts} Acts).\n\n"
+            f"Genre/Tone: {genre} | Style: {style} ({style_code or 'Default'} / {sw_family})\n"
+            f"Style Pacing Directives: {pacing_summary}\n"
+            f"World Setting: {world}\n"
+            f"Core Premise: {film_premise}\n"
+            f"Total Scenes Target: {total_scenes}\n\n"
+            f"Ensemble Cast (honor Voice DNA & 5-State arcs):\n{cast_str}\n\n"
+            f"Act Boundaries:\n{acts_boundary_desc}\n"
+            f"{cold_open_inst}\n"
+        )
+        if sw_block:
+            prompt += f"\n[SCREENWRITER CRAFT & DRAMATURGY]\n{sw_block}\n"
+        if dir_block:
+            prompt += f"\n[DIRECTOR VISUAL GRAMMAR]\n{dir_block}\n"
+
+        prompt += (
+            "\nThe 3 variants MUST represent contrasting dramatic trajectories:\n"
+            "1. variant_id='character_tragedy_redemption' (Pitch: 'Character Tragedy / Redemption')\n"
+            "2. variant_id='high_stakes_escalation_twist' (Pitch: 'High-Stakes Escalation / Twist')\n"
+            "3. variant_id='atmospheric_mythic_arc' (Pitch: 'Atmospheric Mythic Arc')\n\n"
+            "Return ONLY valid JSON matching:\n"
+            "{\n"
+            '  "variants": [\n'
+            "    {\n"
+            '      "variant_id": "character_tragedy_redemption",\n'
+            '      "pitch_label": "Character Tragedy / Redemption",\n'
+            '      "pitch_hook": "<1 sentence pitch differentiator>",\n'
+            '      "title": "<evocative title>",\n'
+            '      "logline": "<compelling 1-2 sentence logline>",\n'
+            '      "theme": "<central philosophical question>",\n'
+            '      "dramatic_premise": "<protagonist flaw + external conflict + transformation>",\n'
+            '      "cold_open_hook": "<optional 30s cold open visual hook>",\n'
+            f'      "acts": [{{"act_number": 1, "act_title": "...", "start_scene": 1, "end_scene": {bounds[0][1]}, "dramatic_goal": "...", "key_beat": "..."}} ... exact {num_acts} acts]\n'
+            "    }\n"
+            "  ]\n"
+            "}"
+        )
+
+        messages = [
+            {"role": "system", "content": POLYA_SCREENWRITER_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+        try:
+            parsed = await self._call_llm(messages, retry_on_parse_error=True)
+        except Exception as exc:
+            raise RuntimeError(f"Polya AI Screenwriter: Treatment variants failed due to LLM error: {exc}") from exc
+
+        raw_variants = parsed.get("variants") if isinstance(parsed, dict) else None
+        if not isinstance(raw_variants, list) or len(raw_variants) < 3:
+            raise RuntimeError("Polya AI Screenwriter: Expected 3 Master Treatment variants; Strict LLM Mode refused mock fallback.")
+
+        normalized_variants: list[dict[str, Any]] = []
+        default_specs = [
+            ("character_tragedy_redemption", "Character Tragedy / Redemption"),
+            ("high_stakes_escalation_twist", "High-Stakes Escalation / Twist"),
+            ("atmospheric_mythic_arc", "Atmospheric Mythic Arc"),
+        ]
+        for idx, raw_v in enumerate(raw_variants[:3]):
+            if not isinstance(raw_v, dict):
+                continue
+            acts_in = raw_v.get("acts") or []
+            normalized_acts = []
+            for a_idx, bound in enumerate(bounds):
+                src_act = acts_in[a_idx] if a_idx < len(acts_in) and isinstance(acts_in[a_idx], dict) else {}
+                goal_txt = str(src_act.get("dramatic_goal") or f"Dramatic escalation for Act {a_idx + 1}.").strip()
+                if a_idx == 0 and cold_open_enabled and "Cold Open (Scenes 01-03)" not in goal_txt:
+                    goal_txt = f"Cold Open (Scenes 01-03): High-stakes visual hook montage. Linear narrative starts at Scene 04: {goal_txt}"
+                normalized_acts.append({
+                    "act_number": a_idx + 1,
+                    "act_title": str(src_act.get("act_title") or act_labels_list[a_idx]["title"]),
+                    "start_scene": bound[0],
+                    "end_scene": bound[1],
+                    "dramatic_goal": goal_txt,
+                    "key_beat": str(src_act.get("key_beat") or f"Act {a_idx + 1} Turning Point"),
+                })
+            vid_fb, lbl_fb = default_specs[idx]
+            co_payload = dict(cold_open_30s) if cold_open_30s else None
+            if co_payload and raw_v.get("cold_open_hook"):
+                co_payload["hook_preview"] = str(raw_v["cold_open_hook"]).strip()
+            normalized_variants.append({
+                "variant_id": str(raw_v.get("variant_id") or vid_fb),
+                "pitch_label": str(raw_v.get("pitch_label") or lbl_fb),
+                "pitch_hook": str(raw_v.get("pitch_hook") or raw_v.get("logline") or "").strip(),
+                "title": str(raw_v.get("title") or film_title).strip(),
+                "logline": str(raw_v.get("logline") or film_premise).strip(),
+                "theme": str(raw_v.get("theme") or "Identity vs. Cost").strip(),
+                "dramatic_premise": str(raw_v.get("dramatic_premise") or raw_v.get("logline") or film_premise).strip(),
+                "total_scenes": total_scenes,
+                "structure_type": structure_type,
+                "structure_name": struct_label,
+                "acts": normalized_acts,
+                "act_summaries": {},
+                "cold_open_30s": co_payload,
+                "used_fallback": False,
+            })
+        if len(normalized_variants) < 3:
+            raise RuntimeError("Polya AI Screenwriter: Could not assemble 3 valid Master Treatment variants.")
+        return normalized_variants
+
     # ==========================================================================
     # Phase B: Act-by-Act Screenplay Generation (Strict LLM Mode)
     # ==========================================================================
@@ -2409,20 +3246,13 @@ Return a strictly valid JSON object matching this schema:
 
         context_str = "\n".join(context_chain) if context_chain else "Beginning of story narrative."
 
-        # Active cast formatting
-        cast_summary_lines = []
-        char_names = []
-        if characters:
-            for c in characters:
-                c_name = c.get("name", "Character")
-                char_names.append(c_name)
-                c_role = c.get("role", "Cast")
-                c_desc = c.get("narrative_summary") or c.get("base_prompt", "")
-                cast_summary_lines.append(f"- {c_name} ({c_role}): {c_desc[:100]}")
-        else:
-            char_names = ["Protagonist", "Antagonist"]
-            cast_summary_lines = ["- Protagonist (Main Lead)", "- Antagonist (Opposing Force)"]
-        cast_str = "\n".join(cast_summary_lines)
+        # Active cast formatting with Voice DNA & Act-mapped #State 01-05 continuity
+        cast_str, char_names = self._format_cast_continuity_context(
+            project_context=project_context,
+            characters=characters,
+            act_number=act_number,
+            total_acts=num_acts,
+        )
 
         # Intra-act chunking: 18 scenes per chunk to prevent token limits and timeouts
         CHUNK_SIZE = 18
@@ -2441,6 +3271,63 @@ Return a strictly valid JSON object matching this schema:
         scene_duration = _determine_scene_duration(act_number, duration_mode)
         max_words = 14 if scene_duration <= 5.0 else (28 if scene_duration <= 10.0 else 42)
 
+        if isinstance(project_context, dict):
+            rag_genre = project_context.get("genre_tone") or project_context.get("genre")
+            rag_style_code = (
+                project_context.get("master_style_code")
+                or project_context.get("target_style_code")
+                or project_context.get("style_code")
+            )
+            rag_style_name = project_context.get("style_name") or ""
+            rag_aesthetic_directives = project_context.get("aesthetic_directives") or ""
+        elif project_context:
+            rag_genre = getattr(project_context, "genre_tone", None)
+            rag_style_code = getattr(project_context, "master_style_code", None)
+            rag_style_name = getattr(project_context, "style_name", "")
+            rag_aesthetic_directives = getattr(project_context, "aesthetic_directives", "")
+        else:
+            rag_genre = treatment.get("genre") if isinstance(treatment, dict) else None
+            rag_style_code = treatment.get("style_code") if isinstance(treatment, dict) else None
+            rag_style_name = ""
+            rag_aesthetic_directives = ""
+
+        if rag_style_code and (not rag_style_name or not rag_aesthetic_directives):
+            cat_entry = next((s for s in STYLE_CATALOG if s.get("code") == rag_style_code), None)
+            if cat_entry:
+                rag_style_name = rag_style_name or cat_entry.get("name", "")
+                rag_aesthetic_directives = rag_aesthetic_directives or cat_entry.get("aesthetic_directives", "")
+
+        rag_style_family = get_style_family(rag_style_code or "")
+        duration_tier = "5s_max14" if max_words <= 14 else ("10s_max28" if max_words <= 28 else "15s_max42")
+        rag_scene_beat = f"{act_title}: {act_goal} {key_beat}".strip() or f"Act {act_number}"
+
+        sw_act_res, rag_act_res = await asyncio.gather(
+            ScreenwriterRAGClient.retrieve_scene_craft(
+                style_code=rag_style_code,
+                act_number=act_number,
+                narrative_goal=rag_scene_beat,
+                duration_tier=duration_tier,
+                top_k=3,
+            ),
+            DirectorRAGClient.retrieve(
+                scene_beat=rag_scene_beat,
+                genre=rag_genre,
+                style_code=rag_style_code,
+                top_k=3,
+            ),
+        )
+        rag_act_block = DirectorRAGClient.format_act_context(rag_act_res)
+        sw_directives = sw_act_res.get("writing_directives") or {}
+        sw_writing_summary = (
+            " | ".join(
+                str(sw_directives[k])
+                for k in ("dialogue_density", "action_beat_grammar", "preferred_jl_cut_cadence")
+                if sw_directives.get(k)
+            )
+            or STYLE_FAMILY_WRITING_DIRECTIVES.get(rag_style_family, "")
+        )
+        sw_act_block = str(sw_act_res.get("prompt_block") or "").strip()
+
         for chunk_idx, (c_start, c_end) in enumerate(chunks):
             chunk_scenes_needed = c_end - c_start + 1
 
@@ -2448,10 +3335,10 @@ Return a strictly valid JSON object matching this schema:
             if cold_open_active and c_start <= 3:
                 cold_open_instruction = """
 COLD OPEN (30-SECOND VISUAL HOOK MONTAGE) MANDATE:
-Scenes 1 through 3 MUST serve as a high-velocity 30-second Cold Open hook montage teasing peak action and slapstick chaos before rewinding:
+Scenes 1 through 3 MUST serve as a high-velocity 30-second Cold Open hook montage teasing peak conflict before transitioning to the linear timeline:
 - Scene 1 (0-10s): In-Media-Res Shock Hook + Hero Prop Reveal
-- Scene 2 (10-20s): Fast Slapstick Chaos Tease + Main Obstacle/Rival
-- Scene 3 (20-30s): Peak Climax Preview + Freeze-Frame/Rewind Transition to Scene 04
+- Scene 2 (10-20s): Escalating Kinetic Obstacle + Main Threat/Rival
+- Scene 3 (20-30s): Peak Climax Preview + Time-Cut Transition to Scene 04
 - Scene 4 onwards: Linear narrative starts (Ordinary World Setup).
 """
 
@@ -2471,33 +3358,45 @@ Write scenes for {act_title} (Act {act_number} of {num_acts}) in an ongoing cine
 Title: {treatment.get('title', 'Cinema Feature')}
 Logline: {treatment.get('logline', '')}
 Theme: {treatment.get('theme', '')}
+Visual Style: {rag_style_code or 'Default'} ({rag_style_name or 'Hollywood Cinematic'})
+Style Family: {rag_style_family}
+Aesthetic Directives: {rag_aesthetic_directives or 'Cinematic visual storytelling'}
+Style Writing Directives: {sw_writing_summary}
 
 Current Act: {act_title}
 Act Dramatic Goal: {act_goal}
 Key Dramatic Beat: {key_beat}
-Target Scene Duration: {scene_duration} seconds per scene.
+Target Scene Duration: {scene_duration} seconds per scene ({duration_tier}).
 
-Active Cast Ensemble (Feature these characters by name):
+Active Cast Ensemble & Act Continuity (preserve each speaker's Voice DNA cadence and active #State wear/wardrobe):
 {cast_str}
 {cold_open_instruction}
 PERSISTENT CONTEXT FROM PREVIOUS ACTS:
 {context_str}
 
 {handover_str}
+"""
+            if sw_act_block:
+                prompt += f"\n[SCREENWRITER CRAFT & SCENE EXEMPLARS]\n{sw_act_block}\n"
+            if rag_act_block:
+                prompt += f"\n[DIRECTOR VISUAL GRAMMAR]\n{rag_act_block}\n"
 
+            prompt += f"""
 ASSIGNMENT:
 Write exactly {chunk_scenes_needed} scenes from Scene {c_start} to Scene {c_end}.
 For each scene provide:
 - scene_number (integer from {c_start} to {c_end})
 - slugline (standard uppercase screenplay slugline, e.g. 'EXT. LOCATION - TIME')
-- narrative_goal (dramatic objective advancing the story beat, explicitly naming interacting characters)
+- narrative_goal (dramatic objective advancing the story beat, explicitly naming interacting characters, reflecting active wardrobe/wear state)
 - speaking_character (name of character speaking from active cast, or 'None' for non-verbal/SFX)
-- dialogue (pacing-calibrated spoken line or [SFX: ...] cue)
+- dialogue (pacing-calibrated spoken line reflecting speaker's Voice DNA, or [SFX: ...] atmospheric cue)
 
-DIALOGUE PACING CALIBRATION:
+DRAMATIC CRAFT & DIALOGUE CALIBRATION:
+- Scene Value Shift: Every scene MUST turn an observable dramatic value (+ to - or - to +) through behavior and conflict, NOT passive summary.
+- Anti-Exposition Rule: Show inner tension via physical action and loaded subtext; never have characters announce plot backstory or feelings on the nose.
 - Scene target duration: {scene_duration}s.
 - Spoken dialogue line MUST be strictly between 1 and {max_words} words (delivery speed of ~2.8 words/sec).
-- For non-verbal or action beats, provide atmospheric SFX in brackets e.g. '[SFX: Neural link hums as sirens blare]'.
+- For non-verbal or action beats, provide style-authentic atmospheric SFX in brackets e.g. '[SFX: Rain hisses against steel shutter]'.
 
 Return valid JSON in this exact structure:
 {{
@@ -2579,3 +3478,700 @@ Return valid JSON in this exact structure:
             "used_fallback": False,
             "scenes": all_generated_scenes,
         }
+
+    # ==========================================================================
+    # Phase C: Dialogue Pacing Calibration & Director Polish
+    # ==========================================================================
+
+    @staticmethod
+    def _compute_dialogue_pacing_metrics(dialogue_text: str, max_seconds: float) -> dict[str, Any]:
+        """Deterministically compute spoken word count, syllables, duration, and pacing pass flags."""
+        safe_max_seconds = max_seconds if max_seconds > 0 else 5.0
+        max_allowed_words = max(1, int(safe_max_seconds * 2.8))
+
+        # Strip bracketed/parenthetical non-spoken cues like [NON-VERBAL], [SILENT], (beat)
+        spoken_only = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", dialogue_text or "").strip()
+        words = re.findall(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*", spoken_only)
+        word_count = len(words)
+
+        if word_count == 0:
+            syllable_count = 0
+            estimated_duration = 0.0
+        else:
+            syllable_count = 0
+            for w in words:
+                cleaned_w = re.sub(r"[^a-z]", "", w.lower())
+                if not cleaned_w:
+                    syllable_count += 1
+                elif len(cleaned_w) <= 3:
+                    syllable_count += 1
+                else:
+                    groups = re.findall(r"[aeiouy]+", cleaned_w)
+                    syl = len(groups)
+                    if cleaned_w.endswith("e") and not cleaned_w.endswith(("le", "ye", "ee")) and syl > 1:
+                        syl -= 1
+                    syllable_count += max(1, syl)
+            estimated_duration = round(word_count / 2.8, 2)
+
+        passes_duration_limit = word_count <= max_allowed_words
+        ratio = estimated_duration / safe_max_seconds if safe_max_seconds > 0 else 0.0
+        if ratio > 0.75:
+            transition_type = "J_CUT"
+            audio_lead_seconds = 1.0
+        elif ratio < 0.40:
+            transition_type = "HARD_CUT"
+            audio_lead_seconds = 0.0
+        else:
+            transition_type = "L_CUT"
+            audio_lead_seconds = 0.5
+
+        return {
+            "word_count": word_count,
+            "syllable_count": syllable_count,
+            "estimated_duration_seconds": estimated_duration,
+            "max_allowed_words": max_allowed_words,
+            "max_seconds": safe_max_seconds,
+            "passes_duration_limit": passes_duration_limit,
+            "passes_5s_limit": passes_duration_limit,
+            "transition_type": transition_type,
+            "audio_lead_seconds": audio_lead_seconds,
+        }
+
+    def _finalize_dialogue_alternatives(
+        self,
+        raw_alternatives: Any,
+        dialogue_text: str,
+        max_seconds: float,
+        style_family: str,
+        trimmed_hint: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Build 3 voice/style-aware dialogue takes with deterministic 2.8 wps metrics attached to every take."""
+        specs = [
+            ("subtext_cut", "Subtext-Heavy", "Implies tension beneath calm phrasing; withholds overt exposition."),
+            ("urgent_clipped", "Urgent / Clipped", "Staccato rhythm stripped to essentials for kinetic pacing."),
+            ("emotional_poetic", "Emotional / Poetic", f"Sensory cadence tailored to {style_family} atmosphere."),
+        ]
+        by_id: dict[str, dict[str, Any]] = {}
+        raw_list = raw_alternatives if isinstance(raw_alternatives, list) else []
+        for idx, item in enumerate(raw_list):
+            if not isinstance(item, dict):
+                continue
+            dlg_val = str(item.get("dialogue") or item.get("text") or "").strip()
+            if not dlg_val:
+                continue
+            raw_id = str(item.get("id") or "").strip().lower()
+            target_id = raw_id if raw_id in {s[0] for s in specs} else specs[min(idx, len(specs) - 1)][0]
+            if target_id not in by_id:
+                by_id[target_id] = item
+
+        # Deterministic compression helpers when LLM omits or times out
+        words = re.findall(r"\S+", re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", dialogue_text or "").strip())
+        max_words = max(1, int((max_seconds if max_seconds > 0 else 5.0) * 2.8))
+        trimmed_base = (trimmed_hint or "").strip() or " ".join(words[:max_words]).rstrip(",;:")
+        clipped_fallback = " ".join(words[: max(1, min(len(words), max(3, max_words - 4)))]).rstrip(",;:")
+        if clipped_fallback and clipped_fallback[-1] not in ".!?":
+            clipped_fallback += "."
+        subtext_fallback = (trimmed_base + ("" if trimmed_base.endswith((".", "!", "?")) else ".")) if trimmed_base else "[SFX: Heavy silence]"
+        poetic_fallback = (
+            " ".join(words[: max(1, min(len(words), max_words - 1))]).rstrip(",;:") + "..."
+            if words
+            else "[SFX: Quiet ambient breath in room tone]"
+        )
+        fallback_texts = {
+            "subtext_cut": subtext_fallback,
+            "urgent_clipped": clipped_fallback or subtext_fallback,
+            "emotional_poetic": poetic_fallback,
+        }
+
+        alternatives: list[dict[str, Any]] = []
+        for take_id, default_label, default_note in specs:
+            src = by_id.get(take_id, {})
+            take_dialogue = str(src.get("dialogue") or src.get("text") or fallback_texts[take_id]).strip()
+            det_alt = self._compute_dialogue_pacing_metrics(take_dialogue, max_seconds)
+            alternatives.append({
+                "id": take_id,
+                "label": str(src.get("label") or default_label).strip(),
+                "style_note": str(src.get("style_note") or src.get("rationale") or default_note).strip(),
+                "dialogue": take_dialogue,
+                "word_count": det_alt["word_count"],
+                "syllable_count": det_alt["syllable_count"],
+                "estimated_duration_seconds": det_alt["estimated_duration_seconds"],
+                "passes_duration_limit": det_alt["passes_duration_limit"],
+                "max_allowed_words": det_alt["max_allowed_words"],
+                "transition_type": det_alt["transition_type"],
+                "audio_lead_seconds": det_alt["audio_lead_seconds"],
+            })
+        return alternatives
+
+    async def calibrate_dialogue_pacing(
+        self,
+        dialogue_text: str,
+        max_seconds: float = 5.0,
+        character_name: str | None = None,
+        context: str | None = None,
+        style_code: str | None = None,
+        voice_dna_profile: str | None = None,
+        active_state: dict[str, Any] | str | None = None,
+    ) -> dict[str, Any]:
+        """Analyze acoustic syllable pacing, cut bridge, and 3 voice-aligned alternative spoken takes.
+        Uses unified 2.8 words/sec pacing math deterministically across primary line & all alternatives.
+        """
+        det = self._compute_dialogue_pacing_metrics(dialogue_text, max_seconds)
+        safe_max_seconds = det["max_seconds"]
+        max_allowed_words = det["max_allowed_words"]
+
+        sw_dlg_res = await ScreenwriterRAGClient.retrieve_dialogue_cut(
+            style_code=style_code,
+            max_words=max_allowed_words,
+            dialogue_text=f"{context or ''} {dialogue_text}".strip(),
+            top_k=2,
+        )
+        sw_dlg_block = str(sw_dlg_res.get("prompt_block") or "").strip()
+        resolved_family = sw_dlg_res.get("style_family") or get_style_family(style_code or "")
+        style_directive = STYLE_FAMILY_WRITING_DIRECTIVES.get(resolved_family, "")
+        speaker_continuity = self._format_speaker_continuity_line(
+            character_name=character_name,
+            voice_dna_profile=voice_dna_profile,
+            active_state=active_state,
+        )
+
+        # Attempt LLM analysis + 3 spoken alternatives
+        prompt = (
+            "You are the Polya AI Hollywood Dialogue & Sound Continuity Director. "
+            "Analyze the spoken line for acoustic pacing and sound bridge, AND write 3 distinct spoken rewrites under max_allowed_words honoring the speaker's Voice DNA and active physical/emotional State.\n\n"
+            f"CHARACTER: {character_name or 'Unspecified'}\n"
+            f"DIALOGUE LINE: \"{dialogue_text}\"\n"
+            f"MAX DURATION TARGET: {safe_max_seconds:.1f} seconds (max {max_allowed_words} words @ 2.8 wps)\n"
+            f"STYLE: {style_code or 'Default'} ({resolved_family}) — {style_directive}\n"
+            f"SCENE CONTEXT: {context or 'Standard dramatic pacing'}\n"
+        )
+        if speaker_continuity:
+            prompt += f"\n[SPEAKER VOICE DNA & ACTIVE STATE]\n{speaker_continuity}\n"
+        if sw_dlg_block:
+            prompt += f"\n[SCREENWRITER CRAFT & SUBTEXT CUTS]\n{sw_dlg_block}\n"
+        prompt += (
+            "\nReturn ONLY a JSON object matching this exact schema (each alternative MUST be strictly <= max_allowed_words words):\n"
+            "{\n"
+            '  "word_count": <int>,\n'
+            '  "syllable_count": <int>,\n'
+            '  "estimated_duration_seconds": <float>,\n'
+            '  "passes_duration_limit": <bool>,\n'
+            '  "transition_type": "J_CUT" | "L_CUT" | "HARD_CUT",\n'
+            '  "audio_lead_seconds": <float>,\n'
+            '  "analysis": "<1-2 sentence directorial acoustic analysis>",\n'
+            '  "trimmed_suggestion": "<optional tighter subtext-rich line under max_allowed_words, else null>",\n'
+            '  "alternatives": [\n'
+            '    {"id": "subtext_cut", "label": "Subtext-Heavy", "style_note": "<1 sentence why>", "dialogue": "<spoken line <= max_allowed_words>"},\n'
+            '    {"id": "urgent_clipped", "label": "Urgent / Clipped", "style_note": "<1 sentence why>", "dialogue": "<spoken line <= max_allowed_words>"},\n'
+            '    {"id": "emotional_poetic", "label": "Emotional / Poetic", "style_note": "<1 sentence why>", "dialogue": "<spoken line <= max_allowed_words>"}\n'
+            "  ]\n"
+            "}\n"
+        )
+
+        try:
+            messages = [
+                {"role": "system", "content": "You are an acoustic dialogue consultant and Polya AI sound director."},
+                {"role": "user", "content": prompt},
+            ]
+            raw_resp = await asyncio.wait_for(
+                self._call_llm(messages=messages),
+                timeout=10.0,
+            )
+            parsed = raw_resp if isinstance(raw_resp, dict) else self._clean_and_parse_json(str(raw_resp))
+            if isinstance(parsed, dict) and ("analysis" in parsed or "estimated_duration_seconds" in parsed):
+                llm_lead = parsed.get("audio_lead_seconds")
+                lead_val = float(llm_lead) if isinstance(llm_lead, (int, float)) else det["audio_lead_seconds"]
+                alternatives = self._finalize_dialogue_alternatives(
+                    parsed.get("alternatives"),
+                    dialogue_text=dialogue_text,
+                    max_seconds=safe_max_seconds,
+                    style_family=resolved_family,
+                    trimmed_hint=parsed.get("trimmed_suggestion"),
+                )
+                return {
+                    "word_count": det["word_count"],
+                    "syllable_count": det["syllable_count"],
+                    "estimated_duration_seconds": det["estimated_duration_seconds"],
+                    "passes_duration_limit": det["passes_duration_limit"],
+                    "passes_5s_limit": det["passes_5s_limit"],
+                    "max_allowed_words": det["max_allowed_words"],
+                    "max_seconds": safe_max_seconds,
+                    "transition_type": det["transition_type"],
+                    "audio_lead_seconds": lead_val,
+                    "analysis": parsed.get("analysis") or "LLM-verified acoustic pacing.",
+                    "trimmed_suggestion": parsed.get("trimmed_suggestion"),
+                    "alternatives": alternatives,
+                    "source": "llm",
+                }
+        except Exception as exc:
+            logger.warning("llm_dialogue_calibration_fallback: %s. Using deterministic word_count / 2.8s fallback", exc)
+
+        # Deterministic fallback calculation: word_count / 2.8s
+        fallback_alts = self._finalize_dialogue_alternatives(
+            None,
+            dialogue_text=dialogue_text,
+            max_seconds=safe_max_seconds,
+            style_family=resolved_family,
+        )
+        return {
+            "word_count": det["word_count"],
+            "syllable_count": det["syllable_count"],
+            "estimated_duration_seconds": det["estimated_duration_seconds"],
+            "passes_duration_limit": det["passes_duration_limit"],
+            "passes_5s_limit": det["passes_5s_limit"],
+            "max_allowed_words": det["max_allowed_words"],
+            "max_seconds": safe_max_seconds,
+            "transition_type": det["transition_type"],
+            "audio_lead_seconds": det["audio_lead_seconds"],
+            "analysis": (
+                f"Deterministic pacing calculation ({det['word_count']} words @ 2.8 words/sec = {det['estimated_duration_seconds']}s). "
+                f"{'Adheres to limit.' if det['passes_duration_limit'] else f'Exceeds {safe_max_seconds}s limit; consider trimming.'}"
+            ),
+            "trimmed_suggestion": fallback_alts[0]["dialogue"] if not det["passes_duration_limit"] else None,
+            "alternatives": fallback_alts,
+            "source": "deterministic_fallback",
+        }
+
+    def _finalize_polish_options(
+        self,
+        raw_options: Any,
+        slugline: str,
+        narrative_goal: str,
+        dialogue: str | None,
+        camera_code: str,
+        lighting_code: str,
+        style_family: str,
+    ) -> list[dict[str, Any]]:
+        """Normalize 3 selectable Polish Takes and attach deterministic pacing metrics to every take."""
+        valid_cuts = {"J_CUT", "L_CUT", "HARD_CUT"}
+        specs = [
+            (
+                "subtext_heavy",
+                "Subtext-Heavy",
+                "Highlights unspoken psychological tension beneath minimal gestures.",
+                "#Cam 02",
+                "#Light 03",
+                "L_CUT",
+            ),
+            (
+                "visceral_kinetic",
+                "Visceral / Kinetic",
+                "Pushes dynamic camera energy, tactile impact, and prop/environment urgency.",
+                "#Cam 07",
+                "#Light 01",
+                "J_CUT",
+            ),
+            (
+                "minimalist_poetic",
+                "Minimalist / Poetic",
+                f"Distills framing and stillness tailored to {style_family} atmosphere.",
+                "#Cam 13",
+                "#Light 04",
+                "HARD_CUT",
+            ),
+        ]
+        by_id: dict[str, dict[str, Any]] = {}
+        if isinstance(raw_options, list):
+            for idx, item in enumerate(raw_options):
+                if not isinstance(item, dict) or not item.get("narrative_goal"):
+                    continue
+                tid = str(item.get("take_id") or "").strip().lower()
+                resolved_id = tid if tid in {s[0] for s in specs} else specs[min(idx, len(specs) - 1)][0]
+                if resolved_id not in by_id:
+                    by_id[resolved_id] = item
+
+        parsed_slug = parse_structured_slugline(slugline)
+        if parsed_slug["setting"] and parsed_slug["location"]:
+            base_slug = parsed_slug["normalized"]
+        else:
+            loc_fb = (parsed_slug["location"] or slugline).strip().upper()
+            tod_fb = parsed_slug["time_of_day"] or "CONTINUOUS"
+            base_slug = f"INT./EXT. {loc_fb} - {tod_fb}"
+        base_goal = narrative_goal.strip().rstrip(".")
+
+        options: list[dict[str, Any]] = []
+        for idx, (take_id, default_label, default_rat, default_cam, default_light, default_cut) in enumerate(specs):
+            src = by_id.get(take_id, {})
+            if take_id == "subtext_heavy":
+                fb_goal = f"{base_goal}. Charged silence and guarded eye-line reveal unspoken stakes beneath the surface."
+                fb_dlg = dialogue or "[SFX: Measured breathing across tense room tone]"
+            elif take_id == "visceral_kinetic":
+                fb_goal = f"{base_goal}. Kinetic forward push compresses space and forces an immediate reactive turn."
+                fb_dlg = dialogue or "[SFX: Sharp prop impact and kinetic footstep surge]"
+            else:
+                fb_goal = f"{base_goal}. Stark visual framing isolates emotional shift with restrained behavioral detail."
+                fb_dlg = dialogue or "[SFX: Distant ambient sustain before decisive stillness]"
+
+            t_dlg = str(src.get("dialogue") if src.get("dialogue") is not None else fb_dlg).strip()
+            t_cut = str(src.get("transition_type") or default_cut).strip().upper()
+            if t_cut not in valid_cuts:
+                t_cut = default_cut
+            t_cam = str(src.get("camera_code") or (default_cam if camera_code == "#Cam 01" or idx > 0 else camera_code)).strip()
+            t_light = str(src.get("lighting_code") or (default_light if lighting_code == "#Light 01" or idx > 0 else lighting_code)).strip()
+            t_slug = str(src.get("slugline") or base_slug).strip()
+            t_goal = str(src.get("narrative_goal") or fb_goal).strip()
+            t_notes = str(src.get("director_notes") or f"{default_label} polish aligns {t_cam}/{t_light} optics with {t_cut} rhythm.").strip()
+            t_rat = str(src.get("angle_rationale") or default_rat).strip()
+
+            det_take = self._compute_dialogue_pacing_metrics(t_dlg, 10.0)
+            options.append({
+                "take_id": take_id,
+                "label": str(src.get("label") or default_label).strip(),
+                "angle_rationale": t_rat,
+                "slugline": t_slug,
+                "narrative_goal": t_goal,
+                "dialogue": t_dlg,
+                "camera_code": t_cam,
+                "lighting_code": t_light,
+                "transition_type": t_cut,
+                "director_notes": t_notes,
+                "word_count": det_take["word_count"],
+                "estimated_duration_seconds": det_take["estimated_duration_seconds"],
+                "passes_duration_limit": det_take["passes_duration_limit"],
+            })
+        return options
+
+    async def polish_scene_director_cut(
+        self,
+        scene_number: int,
+        slugline: str,
+        narrative_goal: str,
+        dialogue: str | None = None,
+        style_code: str = "#Style 01",
+        camera_code: str = "#Cam 01",
+        lighting_code: str = "#Light 01",
+        project_context: ProjectNarrativeContext | dict[str, Any] | None = None,
+        voice_dna_profile: str | None = None,
+        active_state: dict[str, Any] | str | None = None,
+        adjacent_scenes: dict[str, Any] | None = None,
+        act_number: int | None = None,
+        speaking_character: str | None = None,
+    ) -> dict[str, Any]:
+        """Polya AI Director Polish: Dual RAG (8766 + 8765) generating 3 selectable creative takes + backward-compatible suggestions."""
+        sw_scene_res, sw_dlg_res, dir_res = await asyncio.gather(
+            ScreenwriterRAGClient.retrieve_scene_craft(
+                style_code=style_code,
+                act_number=act_number,
+                narrative_goal=narrative_goal,
+                duration_tier="10s_max28",
+                top_k=2,
+            ),
+            ScreenwriterRAGClient.retrieve_dialogue_cut(
+                style_code=style_code,
+                max_words=28,
+                dialogue_text=dialogue or narrative_goal,
+                top_k=2,
+            ),
+            DirectorRAGClient.retrieve(
+                scene_beat=f"{slugline}: {narrative_goal}",
+                style_code=style_code,
+                top_k=2,
+            ),
+        )
+        sw_scene_block = str(sw_scene_res.get("prompt_block") or "").strip()
+        sw_dlg_block = str(sw_dlg_res.get("prompt_block") or "").strip()
+        dir_block = DirectorRAGClient.format_act_context(dir_res)
+        style_family = sw_scene_res.get("style_family") or get_style_family(style_code)
+        style_directive = STYLE_FAMILY_WRITING_DIRECTIVES.get(style_family, "")
+
+        continuity_sections: list[str] = []
+        if isinstance(project_context, ProjectNarrativeContext):
+            continuity_sections.append(
+                f"Project: {project_context.title} ({project_context.genre_tone}) | Style Family: {style_family} ({style_directive})\n"
+                f"Premise: {project_context.synopsis[:220]}"
+            )
+            cast_block, _ = self._format_cast_continuity_context(
+                project_context=project_context,
+                act_number=act_number,
+                speaking_character=speaking_character,
+            )
+            continuity_sections.append(f"Cast Continuity:\n{cast_block}")
+        elif isinstance(project_context, dict) and project_context:
+            p_title = project_context.get("title") or "Production"
+            p_genre = project_context.get("genre_tone") or project_context.get("genre") or ""
+            p_syn = str(project_context.get("synopsis") or "")[:220]
+            continuity_sections.append(
+                f"Project: {p_title} ({p_genre}) | Style Family: {style_family} ({style_directive})"
+                + (f"\nPremise: {p_syn}" if p_syn else "")
+            )
+            if project_context.get("cast_characters"):
+                cast_block, _ = self._format_cast_continuity_context(
+                    project_context=project_context,
+                    act_number=act_number,
+                    speaking_character=speaking_character,
+                )
+                continuity_sections.append(f"Cast Continuity:\n{cast_block}")
+
+        speaker_line = self._format_speaker_continuity_line(
+            character_name=speaking_character,
+            voice_dna_profile=voice_dna_profile,
+            active_state=active_state,
+        )
+        if speaker_line:
+            continuity_sections.append(speaker_line)
+
+        if adjacent_scenes:
+            adj_lines: list[str] = []
+            prev_sc = adjacent_scenes.get("prev")
+            next_sc = adjacent_scenes.get("next")
+            if isinstance(prev_sc, dict):
+                adj_lines.append(
+                    f"Previous Scene #{prev_sc.get('scene_number')}: {prev_sc.get('slugline')} — {prev_sc.get('narrative_goal', '')[:120]}"
+                )
+            if isinstance(next_sc, dict):
+                adj_lines.append(
+                    f"Next Scene #{next_sc.get('scene_number')}: {next_sc.get('slugline')} — {next_sc.get('narrative_goal', '')[:120]}"
+                )
+            if adj_lines:
+                continuity_sections.append("Adjacent Scene Beats:\n" + "\n".join(adj_lines))
+
+        prompt = (
+            "You are the Polya AI Hollywood Executive Director & Master Screenwriter. "
+            "Produce 3 genuinely distinct creative polish takes for this scene (subtext_heavy, visceral_kinetic, minimalist_poetic), "
+            "elevating value shift, Voice DNA fidelity, optical staging (#Cam 01-34, #Light 01-14), and audio bridge cuts.\n\n"
+            f"SCENE NUMBER: {scene_number}{f' (Act {act_number})' if act_number else ''}\n"
+            f"CURRENT SLUGLINE: {slugline}\n"
+            f"CURRENT NARRATIVE GOAL: {narrative_goal}\n"
+            f"CURRENT DIALOGUE: {dialogue or 'None / Visual Staging'}\n"
+            f"CURRENT CAMERA: {camera_code}\n"
+            f"CURRENT LIGHTING: {lighting_code}\n"
+            f"STYLE CODE: {style_code} (Family: {style_family})\n\n"
+        )
+        if continuity_sections:
+            prompt += "[PROJECT & SCENE CONTINUITY]\n" + "\n".join(continuity_sections) + "\n\n"
+        if sw_scene_block or sw_dlg_block:
+            prompt += "[SCREENWRITER CRAFT & SUBTEXT]\n"
+            if sw_scene_block:
+                prompt += f"{sw_scene_block}\n"
+            if sw_dlg_block:
+                prompt += f"{sw_dlg_block}\n\n"
+        if dir_block:
+            prompt += f"[DIRECTOR VISUAL GRAMMAR]\n{dir_block}\n\n"
+
+        prompt += (
+            "INSTRUCTIONS:\n"
+            "1. Output 3 selectable creative takes in 'options':\n"
+            "   - take_id='subtext_heavy' (Label: 'Subtext-Heavy')\n"
+            "   - take_id='visceral_kinetic' (Label: 'Visceral / Kinetic')\n"
+            "   - take_id='minimalist_poetic' (Label: 'Minimalist / Poetic')\n"
+            "2. Keep each dialogue strictly under 24 spoken words (2.8 wps) honoring speaker Voice DNA (or atmospheric [SFX: ...] if non-verbal).\n"
+            "3. Assign authentic #Cam 01-#Cam 34, #Light 01-#Light 14, and transition_type ('J_CUT' | 'L_CUT' | 'HARD_CUT') per take.\n\n"
+            "Return ONLY a JSON object matching:\n"
+            "{\n"
+            '  "options": [\n'
+            "    {\n"
+            '      "take_id": "subtext_heavy",\n'
+            '      "label": "Subtext-Heavy",\n'
+            '      "angle_rationale": "<1 sentence focus>",\n'
+            '      "slugline": "<polished slugline>",\n'
+            '      "narrative_goal": "<elevated goal>",\n'
+            '      "dialogue": "<calibrated line or [SFX: ...]>",\n'
+            '      "camera_code": "#Cam 02",\n'
+            '      "lighting_code": "#Light 03",\n'
+            '      "transition_type": "L_CUT",\n'
+            '      "director_notes": "<2 sentence artistic rationale>"\n'
+            "    }\n"
+            "  ]\n"
+            "}\n"
+        )
+
+        try:
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are an award-winning cinematic director and Polya AI screenwriting maestro.",
+                },
+                {"role": "user", "content": prompt},
+            ]
+            parsed = await asyncio.wait_for(
+                self._call_llm(messages, retry_on_parse_error=True),
+                timeout=14.0,
+            )
+            if isinstance(parsed, dict) and (isinstance(parsed.get("options"), list) or parsed.get("narrative_goal")):
+                raw_opts = parsed.get("options")
+                if not isinstance(raw_opts, list) and parsed.get("narrative_goal"):
+                    raw_opts = [{
+                        "take_id": "subtext_heavy",
+                        "slugline": parsed.get("slugline", slugline),
+                        "narrative_goal": parsed.get("narrative_goal", narrative_goal),
+                        "dialogue": parsed.get("dialogue", dialogue),
+                        "camera_code": parsed.get("camera_code", camera_code),
+                        "lighting_code": parsed.get("lighting_code", lighting_code),
+                        "transition_type": parsed.get("transition_type", "L_CUT"),
+                        "director_notes": parsed.get("director_notes", "Director polish elevates dramatic stakes and visual clarity."),
+                    }]
+                options = self._finalize_polish_options(
+                    raw_opts,
+                    slugline=slugline,
+                    narrative_goal=narrative_goal,
+                    dialogue=dialogue,
+                    camera_code=camera_code,
+                    lighting_code=lighting_code,
+                    style_family=style_family,
+                )
+                primary = options[0]
+                return {
+                    "slugline": primary["slugline"],
+                    "narrative_goal": primary["narrative_goal"],
+                    "dialogue": primary["dialogue"],
+                    "camera_code": primary["camera_code"],
+                    "lighting_code": primary["lighting_code"],
+                    "transition_type": primary["transition_type"],
+                    "director_notes": primary["director_notes"],
+                    "options": options,
+                }
+        except Exception as exc:
+            logger.warning("llm_director_polish_procedural_fallback: %s", exc)
+
+        options = self._finalize_polish_options(
+            None,
+            slugline=slugline,
+            narrative_goal=narrative_goal,
+            dialogue=dialogue,
+            camera_code=camera_code,
+            lighting_code=lighting_code,
+            style_family=style_family,
+        )
+        primary = options[0]
+        return {
+            "slugline": primary["slugline"],
+            "narrative_goal": primary["narrative_goal"],
+            "dialogue": primary["dialogue"],
+            "camera_code": primary["camera_code"],
+            "lighting_code": primary["lighting_code"],
+            "transition_type": primary["transition_type"],
+            "director_notes": primary["director_notes"],
+            "options": options,
+        }
+
+    # ==========================================================================
+    # Dual-Brain Shot Coverage Planner (Screenwriter 8766 + Director 8765)
+    # ==========================================================================
+
+    async def plan_scene_shot_split(
+        self,
+        scene_number: int,
+        slugline: str,
+        narrative_goal: str,
+        dialogue: str | None = None,
+        target_duration: float = 10.0,
+        coverage_style: str = "classic_coverage",
+        style_code: str = "#Style 01",
+        act_number: int = 1,
+        voice_dna_profile: str | None = None,
+        active_state: dict[str, Any] | str | None = None,
+        speaking_character: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Co-plan multi-shot coverage (8766 beat/dialogue split + 8765 camera/lens/lighting grammar)."""
+        preset_key = coverage_style if coverage_style in COVERAGE_STYLE_PRESETS else "classic_coverage"
+        preset = COVERAGE_STYLE_PRESETS[preset_key]
+        style_family = get_style_family(style_code)
+        family_optics = _STYLE_FAMILY_OPTICS_DEFAULTS.get(style_family, _STYLE_FAMILY_OPTICS_DEFAULTS["photorealistic"])
+
+        safe_target = max(1.0, float(target_duration or 5.0))
+        if preset.get("single_shot"):
+            needed_shots = 1
+            shot_durations = [round(safe_target, 1)]
+        elif preset_key == "rapid_montage":
+            needed_shots = 1 if safe_target <= 5.0 else (3 if safe_target <= 10.0 else 4)
+            per = round(safe_target / needed_shots, 1)
+            shot_durations = [per] * needed_shots
+        else:
+            needed_shots = 1 if safe_target <= 5.0 else (2 if safe_target <= 10.0 else 3)
+            shot_durations = [5.0] * needed_shots
+
+        sw_res, dir_res = await asyncio.gather(
+            ScreenwriterRAGClient.retrieve_scene_craft(
+                style_code=style_code,
+                act_number=act_number,
+                narrative_goal=f"{narrative_goal} ({preset['label']})",
+                duration_tier="5s_max14" if needed_shots > 1 else "10s_max28",
+                top_k=2,
+            ),
+            DirectorRAGClient.retrieve(
+                scene_beat=f"{preset['label']}: {slugline} — {narrative_goal}",
+                style_code=style_code,
+                top_k=2,
+            ),
+        )
+        sw_block = str(sw_res.get("prompt_block") or "").strip()
+        dir_block = DirectorRAGClient.format_act_context(dir_res)
+        speaker_line = self._format_speaker_continuity_line(speaking_character, voice_dna_profile, active_state)
+
+        prompt = (
+            f"You are co-directing as Polya Screenwriter & Polya Director. Decompose Scene #{scene_number} ({safe_target:.1f}s) into EXACTLY {needed_shots} shot(s) "
+            f"using coverage strategy '{preset['label']}' ({preset['description']}).\n\n"
+            f"SLUGLINE: {slugline}\nNARRATIVE GOAL: {narrative_goal}\nDIALOGUE: {dialogue or 'None / Non-Verbal'}\n"
+            f"STYLE: {style_code} (Family: {style_family})\n"
+        )
+        if speaker_line:
+            prompt += f"\n{speaker_line}\n"
+        if sw_block:
+            prompt += f"\n[SCREENWRITER CRAFT]\n{sw_block}\n"
+        if dir_block:
+            prompt += f"\n[DIRECTOR VISUAL GRAMMAR]\n{dir_block}\n"
+        prompt += (
+            f"\nReturn ONLY valid JSON with key 'shots' containing EXACTLY {needed_shots} objects. "
+            "Each shot MUST include: shot_number (1..N), duration_seconds, camera_code (#Cam 01-#Cam 34), "
+            "lens_code (#Lens 01-#Lens 06), comp_code (#Comp 01-#Comp 08), light_code (#Light 01-#Light 14), "
+            "act_code (#Act 01-#Act 24), speed_code (#Speed 01-#Speed 05), dialogue (beat-split spoken fragment or atmospheric [SFX: ...]), "
+            "transition_type ('J_CUT' | 'L_CUT' | 'HARD_CUT' | 'NONE'). Ensure varied camera_codes across shots."
+        )
+
+        parsed_shots: list[dict[str, Any]] | None = None
+        try:
+            res = await asyncio.wait_for(
+                self._call_llm(
+                    messages=[
+                        {"role": "system", "content": POLYA_SCREENWRITER_SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    retry_on_parse_error=False,
+                ),
+                timeout=12.0,
+            )
+            if isinstance(res, dict) and isinstance(res.get("shots"), list) and len(res["shots"]) > 0:
+                parsed_shots = [s for s in res["shots"] if isinstance(s, dict)]
+        except Exception as exc:
+            logger.info("plan_scene_shot_split_fallback: %s", exc)
+
+        # Deterministic micro-split helper for dialogue across shots + style-aware optics fallback
+        blueprints = preset["shot_blueprints"]
+        raw_dlg = (dialogue or "").strip()
+        dlg_chunks: list[str] = []
+        if raw_dlg and needed_shots > 1:
+            clauses = [c.strip() for c in re.split(r"(?<=[.!?;,])\s+", raw_dlg) if c.strip()]
+            if len(clauses) >= needed_shots:
+                dlg_chunks = clauses[: needed_shots - 1] + [" ".join(clauses[needed_shots - 1 :])]
+            else:
+                words = raw_dlg.split()
+                step = max(1, math.ceil(len(words) / needed_shots))
+                dlg_chunks = [" ".join(words[k * step : (k + 1) * step]).strip() for k in range(needed_shots)]
+        elif raw_dlg:
+            dlg_chunks = [raw_dlg]
+
+        planned: list[dict[str, Any]] = []
+        valid_cuts = {"NONE", "J_CUT", "L_CUT", "HARD_CUT"}
+        for idx in range(needed_shots):
+            bp = blueprints[idx % len(blueprints)]
+            llm_shot = parsed_shots[idx] if (parsed_shots and idx < len(parsed_shots)) else {}
+            fb_dlg = dlg_chunks[idx] if idx < len(dlg_chunks) and dlg_chunks[idx] else None
+            if not fb_dlg and idx == needed_shots - 1 and raw_dlg == "":
+                fb_dlg = "[SFX: Beat reaction & room tone hold]"
+            cut = str(llm_shot.get("transition_type") or bp["transition_type"]).strip().upper()
+            if cut not in valid_cuts:
+                cut = bp["transition_type"]
+            planned.append({
+                "shot_number": idx + 1,
+                "duration_seconds": shot_durations[idx],
+                "camera_code": str(llm_shot.get("camera_code") or bp["camera_code"]),
+                "lens_code": str(llm_shot.get("lens_code") or bp["lens_code"]),
+                "comp_code": str(llm_shot.get("comp_code") or bp["comp_code"]),
+                "light_code": str(llm_shot.get("light_code") or family_optics["light_code"]),
+                "act_code": str(llm_shot.get("act_code") or family_optics["act_code"]),
+                "speed_code": str(llm_shot.get("speed_code") or family_optics["speed_code"]),
+                "dialogue": llm_shot.get("dialogue") if llm_shot.get("dialogue") is not None else fb_dlg,
+                "transition_type": cut,
+                "coverage_style": preset_key,
+            })
+        return planned
