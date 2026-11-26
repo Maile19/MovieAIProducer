@@ -37,6 +37,7 @@ import { Character, SheetPromptItem, Project, api, FlowProxyStatus } from "@/lib
 import { cn } from "@/lib/utils";
 import ObsidianDropdown from "@/components/ui/ObsidianDropdown";
 import AIRenderProviderCard from "@/components/AIRenderProviderCard";
+import FreeGeneratePortals from "@/components/FreeGeneratePortals";
 import { AI_RENDER_PROVIDERS, UserProviderConfig } from "@/config/aiProviders";
 
 const GLOBAL_PROVIDER_STORAGE_KEY = "movieai_global_render_provider_v2";
@@ -206,7 +207,7 @@ export default function CharacterMatrixTab({
   const [downstreamProgressText, setDownstreamProgressText] = useState<string | null>(null);
   const abortDownstreamRef = useRef<boolean>(false);
 
-  // Global Batch Downstream Generation States (Cards 2–8 + Dynamic States for all characters)
+  // Global Batch Downstream Generation States (Cards 4–8 + Dynamic States for all characters; Row 1 Cards 1–3 protected)
   const [isBatchGenerating, setIsBatchGenerating] = useState(false);
   const [isStoppingBatch, setIsStoppingBatch] = useState(false);
   const abortBatchRef = useRef<boolean>(false);
@@ -529,7 +530,7 @@ export default function CharacterMatrixTab({
   // Per-card Upscale 2K Kit modal, revert locking, preview dimensions, and toast feedback
   const [upscalingSlots, setUpscalingSlots] = useState<Record<string, boolean>>({});
   const [upscaleKitModal, setUpscaleKitModal] = useState<{
-    slotKey: "closeup" | "front";
+    slotKey: "closeup" | "expression" | "front";
     positivePrompt: string;
     negativePrompt: string;
     target: { width: number; height: number; aspect_ratio: string };
@@ -539,7 +540,7 @@ export default function CharacterMatrixTab({
     downloadFilename?: string | null;
     downloadError?: string | null;
     isLoadingPrompt?: boolean;
-    copiedField?: "pos" | "neg" | null;
+    copiedField?: "full" | null;
   } | null>(null);
   const [previewSlotMeta, setPreviewSlotMeta] = useState<
     Record<
@@ -857,8 +858,8 @@ export default function CharacterMatrixTab({
 
     setPreviewStatusText(
       isGoogleFlowProvider(addCharImageProvider)
-        ? `Mengirim ${target === "closeup" ? "Slot 1: Close-Up Master Anchor" : target === "expression" ? "Expression Sheet" : "Full Body"} ke antrean Google Flow PRO...`
-        : `Merender ${target === "closeup" ? "Card 1: Character Close-Up (Master Anchor)" : target === "expression" ? "Card 2: Expression Sheet" : "Card 3: Full Body"}...`
+        ? `Mengirim ${target === "closeup" ? "Slot 1: Close-Up Master Anchor" : target === "expression" ? "Expression Sheet" : "Card 3: 4-Panel Master Reference"} ke antrean Google Flow PRO...`
+        : `Merender ${target === "closeup" ? "Card 1: Character Close-Up (Master Anchor)" : target === "expression" ? "Card 2: Expression Sheet" : "Card 3: 4-Panel Master Reference"}...`
     );
 
     const normModalProvider = normalizeProviderId(addCharImageProvider);
@@ -879,8 +880,9 @@ export default function CharacterMatrixTab({
         image_provider: addCharImageProvider,
         model: modalModel,
         target,
-        aspect_ratio: (target === "expression" || target === "both") ? "16:9" : target === "closeup" ? "1:1" : "3:4",
+        aspect_ratio: (target === "expression" || target === "both" || target === "front") ? "16:9" : target === "closeup" ? "1:1" : "3:4",
         preview_token: previewToken || undefined,
+        respect_provider_override: true,
       });
 
       if (res.preview_token) {
@@ -906,7 +908,7 @@ export default function CharacterMatrixTab({
           front: res.slot_dimensions?.front
             ? { ...res.slot_dimensions.front, previous_1k_url: null }
             : target === "front" || target === "both" || target === "all"
-            ? { resolution_width: 768, resolution_height: 1024, is_2k: false, previous_1k_url: null }
+            ? { resolution_width: 1344, resolution_height: 768, is_2k: false, previous_1k_url: null }
             : prev.front,
         }));
         setPreviewStatusText("");
@@ -947,8 +949,8 @@ export default function CharacterMatrixTab({
               setPreviewSlotMeta((prev) => ({
                 ...prev,
                 [slot]: {
-                  resolution_width: attachRes.resolution_width ?? (slot === "expression" ? 1344 : slot === "closeup" ? 1024 : 768),
-                  resolution_height: attachRes.resolution_height ?? (slot === "expression" ? 768 : 1024),
+                  resolution_width: attachRes.resolution_width ?? (slot === "expression" || slot === "front" ? 1344 : 1024),
+                  resolution_height: attachRes.resolution_height ?? (slot === "expression" || slot === "front" ? 768 : 1024),
                   is_2k: !!attachRes.is_2k,
                   previous_1k_url: null,
                 },
@@ -989,9 +991,9 @@ export default function CharacterMatrixTab({
               setPreviewStatusText(
                 `Google Flow sedang memproses ${slot === "closeup" ? "Slot 1 Close-Up" : slot === "expression" ? "Expression Sheet" : "Full Body"} (${elapsedSec}s)...`
               );
-              if (elapsedSec > 240 || pollCount > 80) {
+              if (elapsedSec > 450 || pollCount > 150) {
                 clearInterval(pollInterval);
-                const timeoutMsg = "Waktu tunggu antrean Google Flow habis (240s).";
+                const timeoutMsg = "Waktu tunggu antrean Google Flow habis (450s).";
                 setPreviewError(timeoutMsg);
                 setPreviewErrorMsg(timeoutMsg);
                 setIsPreviewGenerating(false);
@@ -1537,14 +1539,14 @@ export default function CharacterMatrixTab({
                     ...prev,
                     [targetKey]: `Google Flow sedang memproses canvas (${elapsedSec}s)...`,
                   }));
-                  if (elapsedSec > 240) {
+                  if (elapsedSec > 450) {
                     clearInterval(pollTimer);
                     activePollersRef.current.delete(job.job_id);
                     setRenderingTargets((prev) => ({ ...prev, [targetKey]: false }));
                     setPollStatus((prev) => ({ ...prev, [targetKey]: "" }));
                     setTargetErrors((prev) => ({
                       ...prev,
-                      [targetKey]: "Waktu tunggu antrean Google Flow habis (240s).",
+                      [targetKey]: "Waktu tunggu antrean Google Flow habis (450s).",
                     }));
                   }
                 }
@@ -1665,11 +1667,19 @@ export default function CharacterMatrixTab({
         source: "manual_upload",
       });
       setUpscaleKitModal((prev) => (prev && prev.slotKey === slot ? null : prev));
+      const slotLabel =
+        slot === "closeup"
+          ? "Card 1 (Close-Up)"
+          : slot === "expression"
+          ? "Card 2 (Expression Sheet 3x2)"
+          : slot === "front"
+          ? "Card 3 (4-Panel Master Reference)"
+          : slot;
       showUpscaleToast(
         is2k ? "2K Ready Terpasang" : "Foto Diperbarui",
         is2k
-          ? `Aset ${slot === "closeup" ? "Card 1 (Close-Up)" : slot === "front" ? "Card 3 (Front View)" : slot} terpasang pada ${resW}×${resH} (2K Ready).`
-          : `Aset ${slot} diperbarui (${resW}×${resH}).`
+          ? `Aset ${slotLabel} terpasang pada ${resW}×${resH} (2K Ready).`
+          : `Aset ${slotLabel} diperbarui (${resW}×${resH}).`
       );
       if (onSilentRefresh) {
         await onSilentRefresh();
@@ -1727,7 +1737,11 @@ export default function CharacterMatrixTab({
       }));
 
       const aspect_ratio =
-        angle === "expression" ? "16:9" : targetType === "state" || angle === "closeup" ? "1:1" : "3:4";
+        angle === "expression" || angle === "front"
+          ? "16:9"
+          : targetType === "state" || angle === "closeup"
+          ? "1:1"
+          : "3:4";
 
       const res = await api.bible.generateCharacterAsset(effectiveCharId, {
         target_type: targetType,
@@ -1880,8 +1894,8 @@ export default function CharacterMatrixTab({
                   ...prev,
                   [targetKey]: `Google Flow sedang memproses canvas (${elapsedSec}s)...`,
                 }));
-                if (elapsedSec > 240 || pollCount > 80) {
-                  // 240 seconds maximum timeout threshold
+                if (elapsedSec > 450 || pollCount > 150) {
+                  // 450 seconds maximum timeout threshold (allows multi-account failover)
                   clearInterval(pollInterval);
                   activePollersRef.current.delete(jobId);
                   // Anti-Zombie: Cancel job on backend to release Flow account immediately
@@ -1894,7 +1908,7 @@ export default function CharacterMatrixTab({
                   setPollStatus((prev) => ({ ...prev, [targetKey]: "" }));
                   setTargetErrors((prev) => ({
                     ...prev,
-                    [targetKey]: "Waktu tunggu antrean Google Flow habis (240s).",
+                    [targetKey]: "Waktu tunggu antrean Google Flow habis (450s).",
                   }));
                   resolve(false);
                 }
@@ -1947,111 +1961,67 @@ export default function CharacterMatrixTab({
                 : (typeof rawErr?.detail === "string"
                     ? rawErr.detail
                     : JSON.stringify(rawErr)));
+        const finalErrMsg = errMsg || "Gagal melakukan render gambar aset.";
         setTargetErrors((prev) => ({
           ...prev,
-          [targetKey]: errMsg || "Gagal melakukan render gambar aset.",
+          [targetKey]: finalErrMsg,
         }));
+        if (!options?.targetChar) {
+          showUpscaleToast(
+            `Render Gagal (${resolveProviderDisplayInfo(selectedProvider, selectedModel).label})`,
+            finalErrMsg,
+            true
+          );
+        }
       }
       return false;
     }
   };
 
-  // Reusable Downstream Pipeline Runner (Strictly Cards 2–8 + Dynamic States)
-  // Strict Card 1 Protection: Card 1 (Master Anchor) is read-only input anchor and NEVER modified.
+  const hasRequiredMasterAnchors = (char: Character | null | undefined): boolean => {
+    return !!(char?.closeup_image_url?.trim() && char?.front_image_url?.trim());
+  };
+
+  const getMissingMasterAnchorReason = (char: Character | null | undefined): string => {
+    const hasC1 = !!char?.closeup_image_url?.trim();
+    const hasC3 = !!char?.front_image_url?.trim();
+    if (!hasC1 && !hasC3) return "Belum memiliki Card 1 & Card 3 (Row 1 Master Anchors)";
+    if (!hasC1) return "Belum memiliki Card 1: Character Close-Up (Master Anchor)";
+    return "Belum memiliki Card 3: 4-Panel Wardrobe Reference (Master Anchor)";
+  };
+
+  // Reusable Downstream Pipeline Runner (Strictly Cards 4–8 + Dynamic States)
+  // Strict Row 1 Protection: Card 1, Card 2, and Card 3 (Master Anchors) are NEVER modified or overwritten.
   const executeDownstreamForCharacter = async (
     targetChar: Character,
     resumeMode: boolean,
     onStepProgress: (text: string, currentStep: number, totalSteps: number) => void,
     abortRef: React.MutableRefObject<boolean>
   ): Promise<{ success: boolean; error?: string }> => {
-    if (!targetChar?.closeup_image_url) {
+    if (!targetChar?.closeup_image_url?.trim()) {
       return {
         success: false,
         error: "Card 1: Character Close-Up (Master Anchor) belum tersedia.",
       };
     }
+    if (!targetChar?.front_image_url?.trim()) {
+      return {
+        success: false,
+        error: "Card 3: 4-Panel Wardrobe Reference (Master Anchor) belum tersedia.",
+      };
+    }
 
     const workingChar: Character = { ...targetChar };
     const statesList = workingChar.states || [];
-    const totalSteps = 7 + statesList.length; // 7 Cards (Cards 2-8) + N Dynamic States
+    const totalSteps = 5 + statesList.length; // 5 Row-2 Cards (Cards 4-8) + N Dynamic States (10 slots for 5 states)
     let currentStep = 0;
     const failedSlots: string[] = [];
 
     try {
       // ==========================================
-      // PHASE 1: Card 2 & Card 3 (Anchored to Card 1)
+      // PHASE 1: Row 2 Cards 4-8 (Anchors: Card 1 + Card 3; Row 1 Cards 1-3 strictly read-only)
       // ==========================================
-      let card2Ok = false;
-      let card3Ok = false;
-
-      // Card 2: Expression Sheet
-      const card2AlreadyDone = resumeMode && !!workingChar.expression_image_url;
-      let card2Promise: Promise<boolean>;
-      if (card2AlreadyDone) {
-        card2Ok = true;
-        currentStep++;
-        onStepProgress(`[Step ${currentStep}/${totalSteps}] Card 2 (Expression Sheet) sudah ada, dilewati (Resume Mode)`, currentStep, totalSteps);
-        card2Promise = Promise.resolve(true);
-      } else {
-        currentStep++;
-        onStepProgress(`[Step ${currentStep}/${totalSteps}] Merender Card 2 (Expression Sheet)...`, currentStep, totalSteps);
-        card2Promise = handleRenderAsset("sheet", "expression", undefined, { skipRefresh: true, targetChar: workingChar });
-      }
-
-      // Card 3: Full Body Front (Anchored to Card 1)
-      const card3AlreadyDone = resumeMode && !!workingChar.front_image_url;
-      let card3Promise: Promise<boolean>;
-      if (card3AlreadyDone) {
-        card3Ok = true;
-        currentStep++;
-        onStepProgress(`[Step ${currentStep}/${totalSteps}] Card 3 (Full Body Front) sudah ada, dilewati (Resume Mode)`, currentStep, totalSteps);
-        card3Promise = Promise.resolve(true);
-      } else {
-        card3Promise = new Promise<boolean>((resolve) => {
-          setTimeout(async () => {
-            if (abortRef.current) {
-              resolve(false);
-              return;
-            }
-            let success = await handleRenderAsset("turnaround", "front", undefined, { skipRefresh: true, targetChar: workingChar });
-            if (!success && !abortRef.current) {
-              // Guardrail: 1 auto-retry on transient failure for Card 3
-              console.warn("Card 3 (Full Body Front) failed on first attempt. Retrying once (auto-retry)...");
-              onStepProgress(`[Step 2/${totalSteps}] Card 3 mencoba ulang (1x auto-retry)...`, 2, totalSteps);
-              await new Promise((r) => setTimeout(r, 1500));
-              if (!abortRef.current) {
-                success = await handleRenderAsset("turnaround", "front", undefined, { skipRefresh: true, targetChar: workingChar });
-              }
-            }
-            resolve(success);
-          }, 500);
-        });
-      }
-
-      const [p1Card2Result, p1Card3Result] = await Promise.all([card2Promise, card3Promise]);
-      card2Ok = card2AlreadyDone || p1Card2Result;
-      card3Ok = card3AlreadyDone || p1Card3Result;
-
-      if (!card2Ok) {
-        failedSlots.push("Card 2: Expression Sheet");
-      }
-
-      if (abortRef.current) {
-        onStepProgress("Pipeline dihentikan oleh pengguna. Aset yang telah selesai tetap tersimpan.", currentStep, totalSteps);
-        return { success: false, error: "Dihentikan oleh pengguna" };
-      }
-
-      if (!card3Ok) {
-        failedSlots.push("Card 3: Full Body Front");
-        console.warn("Phase 1 halted: Card 3 (Full Body Front) failed. Preserving Card 2 and halting Phase 2 & 3.");
-        onStepProgress("Phase 2 & 3 dihentikan karena Card 3 (Full Body Front) gagal. Hasil Card 2 tetap tersimpan.", currentStep, totalSteps);
-        return { success: false, error: "Card 3 (Full Body Front) gagal dirender." };
-      }
-
-      // ==========================================
-      // PHASE 2: Cards 4-8 (Anchors: Card 1 + Card 3)
-      // ==========================================
-      const phase2Cards = [
+      const row2Cards = [
         { slot: "side", targetType: "turnaround" as const, name: "Card 4: Side Profile", key: "side_image_url" as const },
         { slot: "three_quarter", targetType: "turnaround" as const, name: "Card 5: 3/4 Hero Angle", key: "three_quarter_image_url" as const },
         { slot: "back", targetType: "turnaround" as const, name: "Card 6: Back View", key: "back_image_url" as const },
@@ -2059,7 +2029,7 @@ export default function CharacterMatrixTab({
         { slot: "action", targetType: "sheet" as const, name: "Card 8: Dynamic Action", key: "action_image_url" as const },
       ];
 
-      for (const item of phase2Cards) {
+      for (const item of row2Cards) {
         if (abortRef.current) {
           onStepProgress("Pipeline dihentikan oleh pengguna. Aset yang telah selesai tetap tersimpan.", currentStep, totalSteps);
           return { success: false, error: "Dihentikan oleh pengguna" };
@@ -2081,9 +2051,9 @@ export default function CharacterMatrixTab({
       }
 
       // ==========================================
-      // PHASE 3: Dynamic States (Anchors: Card 1 + Card 3)
+      // PHASE 2: Dynamic States (Anchors: Card 1 + Card 3)
       // ==========================================
-      if (card3Ok && statesList.length > 0) {
+      if (statesList.length > 0) {
         for (const st of statesList) {
           if (abortRef.current) {
             onStepProgress("Pipeline dihentikan oleh pengguna. Aset yang telah selesai tetap tersimpan.", currentStep, totalSteps);
@@ -2101,8 +2071,6 @@ export default function CharacterMatrixTab({
             failedSlots.push(`State ${st.state_code} (${label})`);
           }
         }
-      } else if (!card3Ok && statesList.length > 0) {
-        onStepProgress("Phase 3 dilewati karena Card 3 (Full Body Front) belum siap.", currentStep, totalSteps);
       }
 
       if (failedSlots.length > 0) {
@@ -2119,10 +2087,11 @@ export default function CharacterMatrixTab({
     }
   };
 
-  // One-Click Retry Failed / Missing Only for Single Character
+  // One-Click Retry Failed / Missing Only for Single Character (Strictly Cards 4–8 + States)
   const handleRetryFailedOnly = async (targetChar?: Character) => {
     const charToRun = targetChar || selectedChar;
-    if (!charToRun?.closeup_image_url || isLocked || isRegeneratingAllDownstream || isBatchGenerating) return;
+    if (!hasRequiredMasterAnchors(charToRun) || isLocked || isRegeneratingAllDownstream || isBatchGenerating) return;
+    const safeChar = charToRun!;
 
     if (isGoogleFlowProvider(selectedProvider)) {
       const pStatus = await handleCheckProxy();
@@ -2141,14 +2110,18 @@ export default function CharacterMatrixTab({
     abortDownstreamRef.current = false;
 
     try {
-      await executeDownstreamForCharacter(
-        charToRun,
-        true, // Resume mode: skip completed cards, only process missing/failed!
+      const dsRes = await executeDownstreamForCharacter(
+        safeChar,
+        true, // Resume mode: skip completed Cards 4-8 & States, never touches Cards 1-3!
         (msg) => setDownstreamProgressText(msg),
         abortDownstreamRef
       );
+      if (!dsRes.success && dsRes.error && dsRes.error !== "Dihentikan oleh pengguna") {
+        showUpscaleToast("Retry Missing / Failed Terhenti (Cards 4–8 + States)", dsRes.error, true);
+      }
     } catch (err: any) {
       console.error("Retry failed downstream error:", err);
+      showUpscaleToast("Retry Missing / Failed Gagal", err?.message || "Terjadi kesalahan saat retry downstream.", true);
     } finally {
       setDownstreamProgressText(null);
       setIsStoppingDownstream(false);
@@ -2158,13 +2131,14 @@ export default function CharacterMatrixTab({
       } else {
         await onRefresh({ silent: true });
       }
-      if (charToRun?.id) fetchPrompts(charToRun.id);
+      if (safeChar?.id) fetchPrompts(safeChar.id);
     }
   };
 
-  // One-Click Full Downstream Pipeline for Single Character (Cards 2–8 + Dynamic States)
+  // One-Click Full Downstream Pipeline for Single Character (Cards 4–8 + Dynamic States)
   const handleRegenerateAllDownstream = async () => {
-    if (!selectedChar?.closeup_image_url || isLocked || isRegeneratingAllDownstream || isBatchGenerating) return;
+    if (!hasRequiredMasterAnchors(selectedChar) || isLocked || isRegeneratingAllDownstream || isBatchGenerating) return;
+    const safeChar = selectedChar!;
 
     // Pre-flight check: batalkan langsung jika SOCKS5 proxy sedang offline
     if (isGoogleFlowProvider(selectedProvider)) {
@@ -2172,7 +2146,7 @@ export default function CharacterMatrixTab({
       if (!pStatus.healthy) {
         setProxyOfflineAlert({
           isOpen: true,
-          message: "Regenerate All Downstream Dibatalkan (SOCKS5 Proxy Offline)",
+          message: "Regenerate All Downstream (Cards 4–8 + States) Dibatalkan (SOCKS5 Proxy Offline)",
           detail: pStatus.detail || "Koneksi reverse tunnel HP Android (127.0.0.1:10808) tidak aktif.",
         });
         return;
@@ -2184,14 +2158,18 @@ export default function CharacterMatrixTab({
     abortDownstreamRef.current = false;
 
     try {
-      await executeDownstreamForCharacter(
-        selectedChar,
-        false, // Explicit single-character button re-renders all downstream
+      const dsRes = await executeDownstreamForCharacter(
+        safeChar,
+        false, // Explicit single-character button re-renders all Cards 4-8 + Dynamic States (Row 1 Cards 1-3 untouched)
         (msg) => setDownstreamProgressText(msg),
         abortDownstreamRef
       );
+      if (!dsRes.success && dsRes.error && dsRes.error !== "Dihentikan oleh pengguna") {
+        showUpscaleToast("Pipeline Downstream (Cards 4–8 + States) Terhenti", dsRes.error, true);
+      }
     } catch (err: any) {
       console.error("Downstream generation error:", err);
+      showUpscaleToast("Pipeline Downstream Gagal", err?.message || "Terjadi kesalahan saat render downstream.", true);
     } finally {
       setDownstreamProgressText(null);
       setIsStoppingDownstream(false);
@@ -2201,22 +2179,18 @@ export default function CharacterMatrixTab({
       } else {
         await onRefresh({ silent: true });
       }
-      if (selectedChar?.id) fetchPrompts(selectedChar.id);
+      if (safeChar?.id) fetchPrompts(safeChar.id);
     }
   };
 
-  // Helper to estimate asset count for batch downstream generation
+  // Helper to estimate asset count for batch downstream generation (Strictly Cards 4–8 + Dynamic States)
   const calculateEstimatedAssets = (resume: boolean) => {
-    const readyChars = characters.filter(
-      (c) => c.closeup_image_url && c.closeup_image_url.trim().length > 0
-    );
+    const readyChars = characters.filter((c) => hasRequiredMasterAnchors(c));
     let toRender = 0;
     let alreadyExists = 0;
 
     readyChars.forEach((c) => {
       const slots = [
-        c.expression_image_url,
-        c.front_image_url,
         c.side_image_url,
         c.three_quarter_image_url,
         c.back_image_url,
@@ -2256,16 +2230,12 @@ export default function CharacterMatrixTab({
     setBatchPreflightModalOpen(true);
   };
 
-  // Sequential Batch Orchestrator for All Ready Characters
+  // Sequential Batch Orchestrator for All Ready Characters (Strictly Cards 4–8 + Dynamic States)
   const handleStartBatchDownstream = async () => {
     if (isLocked || isBatchGenerating) return;
 
-    const readyChars = characters.filter(
-      (c) => c.closeup_image_url && c.closeup_image_url.trim().length > 0
-    );
-    const skippedChars = characters.filter(
-      (c) => !c.closeup_image_url || !c.closeup_image_url.trim().length
-    );
+    const readyChars = characters.filter((c) => hasRequiredMasterAnchors(c));
+    const skippedChars = characters.filter((c) => !hasRequiredMasterAnchors(c));
 
     if (readyChars.length === 0) return;
 
@@ -2274,7 +2244,7 @@ export default function CharacterMatrixTab({
       if (!pStatus.healthy) {
         setProxyOfflineAlert({
           isOpen: true,
-          message: "Batch Downstream Dibatalkan (SOCKS5 Proxy Offline)",
+          message: "Batch Downstream (Cards 4–8 + States) Dibatalkan (SOCKS5 Proxy Offline)",
           detail: pStatus.detail || "Koneksi reverse tunnel HP Android (127.0.0.1:10808) tidak aktif.",
         });
         return;
@@ -2292,7 +2262,7 @@ export default function CharacterMatrixTab({
     // Prevent accidental page close or navigation during active batch
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       e.preventDefault();
-      e.returnValue = "Batch Downstream Generation sedang berlangsung. Yakin ingin keluar?";
+      e.returnValue = "Batch Downstream Generation (Cards 4–8 + 5 States) sedang berlangsung. Yakin ingin keluar?";
       return e.returnValue;
     };
     window.addEventListener("beforeunload", handleBeforeUnload);
@@ -2314,8 +2284,8 @@ export default function CharacterMatrixTab({
           totalReady: readyChars.length,
           charName: char.name,
           currentStep: 0,
-          totalSteps: 7 + (char.states?.length || 5),
-          stepText: "Memulai downstream pipeline...",
+          totalSteps: 5 + (char.states?.length || 5),
+          stepText: "Memulai downstream pipeline (Cards 4–8 + States)...",
         });
 
         const res = await executeDownstreamForCharacter(
@@ -2369,7 +2339,7 @@ export default function CharacterMatrixTab({
         skippedChars: skippedChars.map((c) => ({
           name: c.name,
           role: c.role,
-          reason: "Belum memiliki Card 1: Character Close-Up (Master Anchor)",
+          reason: getMissingMasterAnchorReason(c),
         })),
         failedChars,
         wasCancelled: abortBatchRef.current,
@@ -2395,25 +2365,49 @@ export default function CharacterMatrixTab({
     }
   };
 
-  const handleOpenUpscale2kKit = async (slotKey: "closeup" | "front") => {
+  const formatCombinedUpscalePrompt = (
+    positivePrompt: string,
+    negativePrompt?: string | null
+  ): string => {
+    const pos = (positivePrompt || "").trim();
+    const neg = (negativePrompt || "").trim();
+    if (!pos) return neg ? `Negative prompt: ${neg}` : "";
+    if (!neg) return pos;
+    return `${pos}\n\nNegative prompt: ${neg}`;
+  };
+
+  const handleOpenUpscale2kKit = async (slotKey: "closeup" | "expression" | "front") => {
     if (!selectedChar?.id || isLocked) return;
     if (isBatchActive) {
       showBatchLockNotification(`Upscale 2K Kit (${slotKey})`);
       return;
     }
     const cached = sheetPrompts[slotKey];
+    const existingFrontMeta = selectedChar?.sheet_metadata?.front;
+    const isLegacyPortraitFront =
+      slotKey === "front" &&
+      !!existingFrontMeta?.resolution_width &&
+      !!existingFrontMeta?.resolution_height &&
+      existingFrontMeta.resolution_height > existingFrontMeta.resolution_width;
     const defaultTarget =
       slotKey === "closeup"
         ? { width: 2048, height: 2048, aspect_ratio: "1:1" }
-        : { width: 1536, height: 2048, aspect_ratio: "3:4" };
+        : slotKey === "expression"
+        ? { width: 2048, height: 1152, aspect_ratio: "16:9" }
+        : isLegacyPortraitFront
+        ? { width: 1536, height: 2048, aspect_ratio: "3:4" }
+        : { width: 2048, height: 1152, aspect_ratio: "16:9" };
 
     let positivePrompt = cached?.upscale_2k_prompt || "";
     let negativePrompt = cached?.upscale_2k_negative_prompt || "";
     let target = cached?.upscale_2k_target || defaultTarget;
     let styleGateMode = cached?.style_gate_mode || cached?.routing_mode || "full";
 
+    const initialCombinedPrompt = formatCombinedUpscalePrompt(positivePrompt, negativePrompt);
     // Synchronous clipboard write inside click gesture before any async awaits
-    const copyPromise = positivePrompt ? copyTextToClipboard(positivePrompt) : Promise.resolve(false);
+    const copyPromise = initialCombinedPrompt
+      ? copyTextToClipboard(initialCombinedPrompt)
+      : Promise.resolve(false);
 
     setUpscaleKitModal({
       slotKey,
@@ -2450,8 +2444,9 @@ export default function CharacterMatrixTab({
       negativePrompt = fetchedPrompt.upscale_2k_negative_prompt || negativePrompt;
       target = fetchedPrompt.upscale_2k_target || target;
       styleGateMode = fetchedPrompt.style_gate_mode || styleGateMode;
-      if (positivePrompt && !finalCopied) {
-        finalCopied = await copyTextToClipboard(positivePrompt);
+      const fetchedCombinedPrompt = formatCombinedUpscalePrompt(positivePrompt, negativePrompt);
+      if (fetchedCombinedPrompt && !finalCopied) {
+        finalCopied = await copyTextToClipboard(fetchedCombinedPrompt);
       }
     }
 
@@ -2475,19 +2470,21 @@ export default function CharacterMatrixTab({
     if (downloadRes.ok) {
       showUpscaleToast(
         "Upscale 2K Kit Siap",
-        "Foto ter-download & Frozen Prompt ter-copy — proses ke 2K lalu klik Replace"
+        finalCopied
+          ? "Foto ter-download & Full Prompt (Positive + Negative) ter-copy — proses ke 2K lalu klik Replace"
+          : "Foto ter-download — tap Copy Full Prompt (Positive + Negative) lalu proses ke 2K"
       );
     } else {
       showUpscaleToast(
         "Frozen Prompt Siap",
         finalCopied
-          ? "Frozen Prompt ter-copy. Gunakan tombol Download Foto Lagi di modal."
-          : "Silakan copy Frozen Prompt & download foto dari modal Upscale 2K Kit."
+          ? "Full Prompt (Positive + Negative) ter-copy. Gunakan tombol Download Foto Lagi di modal."
+          : "Silakan copy Full Prompt (Positive + Negative) & download foto dari modal Upscale 2K Kit."
       );
     }
   };
 
-  const handleRetryKitDownload = async (slotKey: "closeup" | "front") => {
+  const handleRetryKitDownload = async (slotKey: "closeup" | "expression" | "front") => {
     if (!selectedChar?.id) return;
     setUpscaleKitModal((prev) =>
       prev && prev.slotKey === slotKey
@@ -2570,7 +2567,8 @@ export default function CharacterMatrixTab({
     const isRendering = !!renderingTargets[targetKey];
     const isUploading = !!uploadingSlots[cfg.slot];
     const isUpscaling = !!upscalingSlots[cfg.slot];
-    const isUpscale2kSupportedSlot = cfg.slot === "closeup" || cfg.slot === "front";
+    const isUpscale2kSupportedSlot =
+      cfg.slot === "closeup" || cfg.slot === "expression" || cfg.slot === "front";
     const statusText = pollStatus[targetKey];
     const errorMsg = uploadErrors[cfg.slot] || targetErrors[targetKey];
     const imageUrl = cfg.imageUrl;
@@ -2581,8 +2579,10 @@ export default function CharacterMatrixTab({
     const resH = meta?.resolution_height ?? meta?.height;
     const is2k = !!meta?.is_2k || (!!resW && !!resH && Math.max(resW, resH) >= 1920);
     const hasPrev1k = !!meta?.previous_1k_url;
+    const default2kW = cfg.slot === "closeup" ? 2048 : cfg.aspect === "16:9" ? 2048 : 1536;
+    const default2kH = cfg.slot === "closeup" ? 2048 : cfg.aspect === "16:9" ? 1152 : 2048;
     const resBadgeLabel = is2k
-      ? `2K Ready • ${resW || (cfg.slot === "closeup" ? 2048 : 1536)}×${resH || 2048}`
+      ? `2K Ready • ${resW || default2kW}×${resH || default2kH}`
       : resW && resH
       ? `1K • ${resW}×${resH}`
       : cfg.aspect === "16:9"
@@ -2685,7 +2685,10 @@ export default function CharacterMatrixTab({
               <img
                 src={imageUrl}
                 alt={cfg.title}
-                className="w-full h-full object-cover rounded-lg group-hover/img:scale-105 transition-transform duration-200"
+                className={cn(
+                  "w-full h-full rounded-lg group-hover/img:scale-105 transition-transform duration-200",
+                  cfg.slot === "front" ? "object-contain bg-black/40" : "object-cover"
+                )}
               />
               <span
                 className={cn(
@@ -2719,8 +2722,21 @@ export default function CharacterMatrixTab({
 
         {/* Error Feedback */}
         {errorMsg && (
-          <div className="p-1.5 rounded bg-rose-500/20 border border-rose-500/40 text-[9px] font-mono text-rose-300 truncate">
-            {errorMsg}
+          <div className="p-2 rounded-lg bg-rose-500/15 border border-rose-500/40 text-[10px] font-mono text-rose-200 flex items-start justify-between gap-2">
+            <span className="break-words whitespace-normal leading-snug max-h-24 overflow-y-auto flex-1">
+              {errorMsg}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setUploadErrors((prev) => ({ ...prev, [cfg.slot]: null }));
+                setTargetErrors((prev) => ({ ...prev, [targetKey]: null }));
+              }}
+              className="text-rose-300/80 hover:text-rose-100 shrink-0"
+              title="Tutup pesan error"
+            >
+              <X className="w-3 h-3" />
+            </button>
           </div>
         )}
 
@@ -2842,14 +2858,14 @@ export default function CharacterMatrixTab({
             </button>
           </div>
 
-          {/* Row 3: Manual Upscale 2K Kit & Revert 1K Controls (Card 1 Close-Up & Card 3 Front View ONLY) */}
+          {/* Row 3: Manual Upscale 2K Kit & Revert 1K Controls (Row 1 Master Anchors: Card 1, Card 2, Card 3 ONLY) */}
           {!isLocked && imageUrl && isUpscale2kSupportedSlot && (
             <div className="flex items-center gap-1.5">
               <button
                 type="button"
                 onClick={() => {
                   if (is2k) return;
-                  handleOpenUpscale2kKit(cfg.slot as "closeup" | "front");
+                  handleOpenUpscale2kKit(cfg.slot as "closeup" | "expression" | "front");
                 }}
                 disabled={isBatchActive || isRendering || isUploading || isUpscaling || is2k}
                 className={cn(
@@ -2871,7 +2887,7 @@ export default function CharacterMatrixTab({
                 {is2k ? (
                   <>
                     <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                    <span>2K Ready ({resW || (cfg.slot === "closeup" ? 2048 : 1536)}×{resH || 2048})</span>
+                    <span>2K Ready ({resW || default2kW}×{resH || default2kH})</span>
                   </>
                 ) : (
                   <>
@@ -2956,14 +2972,14 @@ export default function CharacterMatrixTab({
               onClick={handleOpenBatchModal}
               disabled={isBatchGenerating || characters.length === 0}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 disabled:opacity-50 text-canvas font-mono font-bold text-xs transition-all shadow-sm"
-              title="Generate Cards 2–8 + 5 Dynamic States untuk seluruh karakter yang sudah memiliki Card 1 (Master Anchor)"
+              title="Generate Cards 4–8 + 5 Dynamic States untuk seluruh karakter yang sudah memiliki Row 1 Master Anchors (Card 1 & Card 3)"
             >
               {isBatchGenerating ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
               ) : (
                 <Sparkles className="w-3.5 h-3.5" />
               )}
-              <span>Generate All Downstream for All Characters (Cards 2–8 + 5 States)</span>
+              <span>Generate All Downstream for All Characters (Cards 4–8 + 5 States)</span>
             </button>
 
             <button
@@ -2987,7 +3003,7 @@ export default function CharacterMatrixTab({
               <div className="flex items-center gap-2">
                 <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping" />
                 <span className="text-xs font-mono font-bold text-amber-300 uppercase tracking-wider">
-                  Processing Character {batchProgress.currentCharIdx}/{batchProgress.totalReady}: {batchProgress.charName} — Cards 2–8 + 5 States
+                  Processing Character {batchProgress.currentCharIdx}/{batchProgress.totalReady}: {batchProgress.charName} — Cards 4–8 + 5 States
                 </span>
               </div>
               <p className="text-xs font-mono text-obsidian-secondary">
@@ -3039,7 +3055,7 @@ export default function CharacterMatrixTab({
           <div className="flex items-center justify-between text-[10px] font-mono text-obsidian-muted">
             <div className="flex items-center gap-1.5">
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Card 1 Read-Only Protected</span>
+              <span>Row 1 Master Anchors (Card 1–3) Read-Only Protected</span>
             </div>
             <div className="flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
@@ -3462,14 +3478,14 @@ export default function CharacterMatrixTab({
                 <button
                   type="button"
                   onClick={handleRegenerateAllDownstream}
-                  disabled={isRegeneratingAllDownstream || isBatchGenerating || !selectedChar.closeup_image_url}
+                  disabled={isRegeneratingAllDownstream || isBatchGenerating || !hasRequiredMasterAnchors(selectedChar)}
                   className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-canvas font-bold text-xs flex items-center gap-1.5 transition-all shadow-sm"
                   title={
                     isBatchGenerating
                       ? "Batch Downstream sedang berlangsung..."
-                      : !selectedChar.closeup_image_url
-                      ? "Card 1 Close-Up diperlukan sebagai Master Anchor"
-                      : "Jalankan One-Click Full Downstream Pipeline (Card 2–8 + Dynamic States) secara sekuensial berfase"
+                      : !hasRequiredMasterAnchors(selectedChar)
+                      ? getMissingMasterAnchorReason(selectedChar)
+                      : "Jalankan One-Click Full Downstream Pipeline (Cards 4–8 + Dynamic States) tanpa menyentuh Row 1 Master Anchors (Card 1–3)"
                   }
                 >
                   {isRegeneratingAllDownstream ? (
@@ -3480,16 +3496,16 @@ export default function CharacterMatrixTab({
                   <span>
                     {isRegeneratingAllDownstream
                       ? downstreamProgressText || "Processing Pipeline..."
-                      : `Regenerate All Downstream (Cards 2–8 + ${selectedChar.states?.length || 5} States)`}
+                      : `Regenerate All Downstream (Cards 4–8 + ${selectedChar.states?.length || 5} States)`}
                   </span>
                 </button>
 
                 <button
                   type="button"
                   onClick={() => handleRetryFailedOnly(selectedChar)}
-                  disabled={isRegeneratingAllDownstream || isBatchGenerating || !selectedChar.closeup_image_url}
+                  disabled={isRegeneratingAllDownstream || isBatchGenerating || !hasRequiredMasterAnchors(selectedChar)}
                   className="px-3 py-1.5 rounded-lg bg-panel hover:bg-elevated border border-amber-500/40 text-amber-300 font-bold text-xs flex items-center gap-1.5 transition-all shadow-sm disabled:opacity-50"
-                  title="Hanya render ulang kartu dan state yang belum terisi atau gagal pada karakter ini (Resume Mode)"
+                  title="Hanya render ulang slot downstream (Cards 4–8 + States) yang belum terisi atau gagal pada karakter ini (Resume Mode)"
                 >
                   <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
                   <span>Retry Missing / Failed</span>
@@ -3539,14 +3555,14 @@ export default function CharacterMatrixTab({
           </div>
         )}
 
-        {/* ROW 1: Master Biometric & Primary Body Anchors (Card 1: Close-Up &bull; Card 2: Expression Sheet &bull; Card 3: Full Body Front) */}
+        {/* ROW 1: Master Biometric & Primary Body Anchors (Card 1: Close-Up &bull; Card 2: Expression Sheet &bull; Card 3: 4-Panel Composite) */}
         <div className="space-y-2.5">
           <div className="flex items-center justify-between text-xs font-mono">
             <span className="text-[11px] uppercase tracking-wider text-obsidian-secondary font-bold flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-              <span>Row 1 &mdash; Master Anchors (Card 1: Close-Up &bull; Card 2: Expression Sheet 3x2 &bull; Card 3: Full Body Front)</span>
+              <span>Row 1 &mdash; Master Anchors (Card 1: Close-Up &bull; Card 2: Expression Sheet 3x2 &bull; Card 3: 4-Panel Composite)</span>
             </span>
-            <span className="text-[10px] text-obsidian-muted">Master Biometric Face &amp; Primary Anatomy Anchors</span>
+            <span className="text-[10px] text-obsidian-muted">Master Biometric Face &amp; Wardrobe Reference Anchors</span>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
@@ -3582,9 +3598,9 @@ export default function CharacterMatrixTab({
                 slot: "front",
                 title: "CARD 3: FULL BODY (FRONT)",
                 targetType: "turnaround",
-                aspect: "3:4",
+                aspect: "16:9",
                 imageUrl: selectedChar.front_image_url,
-                subtitle: "Orthogonal 0° • Primary Body Anchor",
+                subtitle: "16:9 4-Panel Composite • Headshots + Front/Back Wardrobe",
                 anchorBadge: selectedChar.closeup_image_url ? "Anchor: [Card 1 Close-Up]" : "Master Anchor",
               })}
             </div>
@@ -3609,7 +3625,12 @@ export default function CharacterMatrixTab({
               aspect: "3:4",
               imageUrl: selectedChar.side_image_url,
               subtitle: "Profile 90° • Silhouette",
-              anchorBadge: "Anchors: [Card 1, Card 3]",
+              anchorBadge:
+                sheetPrompts.side?.anchors_used?.length === 2
+                  ? "Anchors: [Card 1, Card 3]"
+                  : sheetPrompts.side?.anchors_used?.length === 1 && sheetPrompts.side.anchors_used[0].includes("Card 3")
+                  ? "Anchor: [Card 3]"
+                  : "Anchors: [Card 1, Card 3]",
             })}
 
             {renderMatrixCard({
@@ -3618,8 +3639,13 @@ export default function CharacterMatrixTab({
               targetType: "turnaround",
               aspect: "3:4",
               imageUrl: selectedChar.three_quarter_image_url,
-              subtitle: "Oblique 45° • Hero Perspective",
-              anchorBadge: "Anchors: [Card 1, Card 3]",
+              subtitle: "Oblique 45° • Full-Body Hero",
+              anchorBadge:
+                sheetPrompts.three_quarter?.anchors_used?.length === 2
+                  ? "Anchors: [Card 1, Card 3]"
+                  : sheetPrompts.three_quarter?.anchors_used?.length === 1 && sheetPrompts.three_quarter.anchors_used[0].includes("Card 3")
+                  ? "Anchor: [Card 3]"
+                  : "Anchors: [Card 1, Card 3]",
             })}
 
             {renderMatrixCard({
@@ -3628,8 +3654,11 @@ export default function CharacterMatrixTab({
               targetType: "turnaround",
               aspect: "3:4",
               imageUrl: selectedChar.back_image_url,
-              subtitle: "Orthogonal 180° • Rear Anatomy",
-              anchorBadge: "Anchors: [Card 1, Card 3]",
+              subtitle: "Orthogonal 180° • Rear Wardrobe",
+              anchorBadge:
+                sheetPrompts.back?.anchors_used?.length === 1 && sheetPrompts.back.anchors_used[0].includes("Card 1")
+                  ? "Anchor: [Card 1]"
+                  : "Anchors: [Card 3, Card 1]",
             })}
 
             {renderMatrixCard({
@@ -3838,8 +3867,18 @@ export default function CharacterMatrixTab({
                   ) : null}
 
                   {errorMsg && (
-                    <div className="p-1.5 rounded bg-rose-500/20 border border-rose-500/40 text-[9px] font-mono text-rose-300 mb-2 truncate">
-                      {errorMsg}
+                    <div className="p-2 rounded-lg bg-rose-500/15 border border-rose-500/40 text-[10px] font-mono text-rose-200 mb-2 flex items-start justify-between gap-2">
+                      <span className="break-words whitespace-normal leading-snug max-h-24 overflow-y-auto flex-1">
+                        {errorMsg}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setTargetErrors((prev) => ({ ...prev, [targetKey]: null }))}
+                        className="text-rose-300/80 hover:text-rose-100 shrink-0"
+                        title="Tutup pesan error"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
                     </div>
                   )}
 
@@ -4389,11 +4428,11 @@ export default function CharacterMatrixTab({
                         </div>
                       </div>
 
-                      {/* Full Body Front */}
+                      {/* Character & Wardrobe Master Reference (4-Panel Composite) */}
                       <div className="p-2 rounded-lg bg-panel/50 border border-border flex flex-col justify-between space-y-1.5">
                         <div className="flex items-center justify-between text-[9px]">
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="font-bold text-obsidian-primary">Card 3: Full Body</span>
+                            <span className="font-bold text-obsidian-primary">Card 3: 4-Panel Ref</span>
                             {isFrontOutdated && (
                               <span
                                 className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[8px] font-semibold flex items-center gap-1"
@@ -4405,7 +4444,7 @@ export default function CharacterMatrixTab({
                             )}
                           </div>
                           <span className="px-1 py-0.2 rounded text-[8px] bg-panel text-obsidian-secondary border border-border">
-                            3:4 Front
+                            16:9 4-Panel
                           </span>
                         </div>
 
@@ -4425,13 +4464,13 @@ export default function CharacterMatrixTab({
                               className="w-full h-full relative group/front cursor-pointer"
                               onClick={() => {
                                 setLightboxImageUrl(previewFrontUrl);
-                                setLightboxTitle("Preview 3: Full Body (Front View)");
+                                setLightboxTitle("Preview 3: 4-Panel Character & Wardrobe Reference");
                               }}
                             >
                               {/* eslint-disable-next-line @next/next/no-img-element */}
                               <img
                                 src={previewFrontUrl}
-                                alt="Full Body Preview"
+                                alt="4-Panel Character & Wardrobe Reference Preview"
                                 className={cn(
                                   "w-full h-full object-contain group-hover/front:scale-105 transition-transform duration-200",
                                   !frontImgLoaded && "opacity-0"
@@ -4455,7 +4494,7 @@ export default function CharacterMatrixTab({
                               >
                                 {previewSlotMeta.front?.is_2k
                                   ? "2K Ready"
-                                  : `1K • ${previewSlotMeta.front?.resolution_width || 768}×${previewSlotMeta.front?.resolution_height || 1024}`}
+                                  : `1K • ${previewSlotMeta.front?.resolution_width || 1344}×${previewSlotMeta.front?.resolution_height || 768}`}
                               </span>
                             </div>
                           ) : (
@@ -4471,7 +4510,7 @@ export default function CharacterMatrixTab({
                             className="flex-1 py-1 px-1.5 rounded bg-canvas hover:bg-elevated border border-border text-[9px] text-obsidian-secondary hover:text-amber-300 font-semibold flex items-center justify-center gap-1 transition-colors disabled:opacity-50"
                           >
                             <RefreshCw className={cn("w-2.5 h-2.5 text-amber-400", isRollingFront && "animate-spin")} />
-                            <span>Re-roll Full Body</span>
+                            <span>Re-roll 4-Panel</span>
                           </button>
                         </div>
                       </div>
@@ -4893,7 +4932,7 @@ export default function CharacterMatrixTab({
                     {sheetPrompts[activePromptModalSlot]?.card_title || `Card: ${activePromptModalSlot.toUpperCase()}`}
                   </span>
                   <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                    Aspect: {sheetPrompts[activePromptModalSlot]?.recommended_aspect_ratio || (activePromptModalSlot === "closeup" ? "1:1" : "3:4")}
+                    Aspect: {sheetPrompts[activePromptModalSlot]?.recommended_aspect_ratio || (activePromptModalSlot === "closeup" ? "1:1" : (activePromptModalSlot === "expression" || activePromptModalSlot === "front") ? "16:9" : "3:4")}
                   </span>
                   {sheetPrompts[activePromptModalSlot]?.routing_mode && (
                     <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 uppercase">
@@ -5494,12 +5533,8 @@ export default function CharacterMatrixTab({
 
       {/* Batch Downstream Pre-Flight Check & Confirmation Modal */}
       {batchPreflightModalOpen && (() => {
-        const readyChars = characters.filter(
-          (c) => c.closeup_image_url && c.closeup_image_url.trim().length > 0
-        );
-        const skippedChars = characters.filter(
-          (c) => !c.closeup_image_url || !c.closeup_image_url.trim().length
-        );
+        const readyChars = characters.filter((c) => hasRequiredMasterAnchors(c));
+        const skippedChars = characters.filter((c) => !hasRequiredMasterAnchors(c));
         const estimates = calculateEstimatedAssets(batchResumeMode);
         const isFlowOffline = isGoogleFlowProvider(selectedProvider) && proxyStatus?.healthy === false;
 
@@ -5513,10 +5548,10 @@ export default function CharacterMatrixTab({
                   </div>
                   <div>
                     <h4 className="font-cinzel text-sm font-bold uppercase text-obsidian-primary">
-                      Generate All Downstream (Cards 2–8 + 5 States)
+                      Generate All Downstream (Cards 4–8 + 5 States)
                     </h4>
                     <p className="text-[11px] font-mono text-obsidian-muted">
-                      Pre-flight check &amp; alokasi antrean render berantai untuk seluruh cast
+                      Pre-flight check &amp; alokasi antrean render Row 2 &amp; States (Row 1 Cards 1–3 tetap aman)
                     </p>
                   </div>
                 </div>
@@ -5540,7 +5575,7 @@ export default function CharacterMatrixTab({
                   <span className="text-base font-bold text-emerald-400">{readyChars.length}</span>
                 </div>
                 <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30">
-                  <span className="text-[10px] text-amber-400 block uppercase">Di-skip (No Card 1)</span>
+                  <span className="text-[10px] text-amber-400 block uppercase">Di-skip (No Card 1/3)</span>
                   <span className="text-base font-bold text-amber-400">{skippedChars.length}</span>
                 </div>
               </div>
@@ -5558,7 +5593,7 @@ export default function CharacterMatrixTab({
                       </span>
                     </div>
                     <p className="text-[11px] text-obsidian-muted leading-tight">
-                      Hanya me-render kartu dan state yang belum memiliki aset gambar. Aset yang sudah selesai tidak akan ditimpa ulang.
+                      Hanya me-render slot downstream (Cards 4–8 &amp; States) yang belum memiliki aset gambar. Row 1 (Cards 1–3) dan aset selesai tidak akan ditimpa.
                     </p>
                   </div>
                   <input
@@ -5574,7 +5609,7 @@ export default function CharacterMatrixTab({
                   <span className="font-bold text-amber-400">
                     {batchResumeMode
                       ? `${estimates.toRender} aset gambar baru (${estimates.alreadyExists} aset sudah ada & dilewati)`
-                      : `${estimates.toRender} aset gambar (seluruh Cards 2–8 + Dynamic States)`}
+                      : `${estimates.toRender} aset gambar (seluruh Cards 4–8 + Dynamic States)`}
                   </span>
                 </div>
               </div>
@@ -5585,19 +5620,19 @@ export default function CharacterMatrixTab({
                   Daftar Antrean Karakter:
                 </span>
                 {characters.map((c) => {
-                  const hasCard1 = !!c.closeup_image_url && c.closeup_image_url.trim().length > 0;
+                  const hasAnchors = hasRequiredMasterAnchors(c);
                   return (
                     <div
                       key={c.id}
                       className={cn(
                         "p-2 rounded-lg border text-xs font-mono flex items-center justify-between transition-colors",
-                        hasCard1
+                        hasAnchors
                           ? "bg-canvas border-border/80 text-obsidian-primary"
                           : "bg-canvas/40 border-dashed border-border/60 text-obsidian-muted"
                       )}
                     >
                       <div className="flex items-center gap-2 truncate">
-                        {hasCard1 ? (
+                        {hasAnchors ? (
                           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                         ) : (
                           <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
@@ -5610,10 +5645,10 @@ export default function CharacterMatrixTab({
                       <span
                         className={cn(
                           "text-[10px] shrink-0 font-semibold",
-                          hasCard1 ? "text-emerald-400" : "text-amber-400/80"
+                          hasAnchors ? "text-emerald-400" : "text-amber-400/80"
                         )}
                       >
-                        {hasCard1 ? "Card 1 Siap ✓" : "Di-skip (Card 1 Kosong)"}
+                        {hasAnchors ? "Anchors Siap ✓" : getMissingMasterAnchorReason(c)}
                       </span>
                     </div>
                   );
@@ -5624,11 +5659,11 @@ export default function CharacterMatrixTab({
               <div className="p-3 rounded-xl bg-amber-500/5 border border-amber-500/20 text-xs space-y-1.5">
                 <div className="flex items-center gap-1.5 font-bold text-amber-400 text-[11px] font-mono">
                   <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                  <span>STRICT CARD 1 PROTECTION ACTIVE</span>
+                  <span>STRICT CARD 1 PROTECTION ACTIVE &bull; ROW 1 (CARDS 1–3) READ-ONLY</span>
                 </div>
                 <p className="text-[11px] text-obsidian-secondary leading-relaxed">
-                  Proses ini <strong>DILARANG KERAS</strong> mengubah atau menimpa Card 1 (Master Anchor).
-                  Card 1 hanya digunakan sebagai read-only visual reference anchor untuk Phase 1, Phase 2, dan Phase 3.
+                  Proses ini <strong>DILARANG KERAS</strong> mengubah atau menimpa Row 1 Master Anchors (Card 1, Card 2, dan Card 3).
+                  Hanya Cards 4–8 dan Dynamic States yang diproses menggunakan Card 1 &amp; Card 3 sebagai anchor read-only.
                 </p>
                 <div className="pt-1 flex items-center justify-between text-[10px] font-mono text-obsidian-muted">
                   <span>Provider: <strong className="text-obsidian-primary">{resolveProviderDisplayInfo(selectedProvider, selectedModel).label}</strong></span>
@@ -5645,7 +5680,7 @@ export default function CharacterMatrixTab({
 
               {readyChars.length === 0 && (
                 <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-mono">
-                  Belum ada karakter yang memiliki Card 1 (Master Anchor). Harap verifikasi setidaknya 1 karakter terlebih dahulu.
+                  Belum ada karakter yang memiliki Card 1 (Close-Up) &amp; Card 3 (4-Panel Wardrobe). Harap verifikasi Row 1 Master Anchors setidaknya 1 karakter terlebih dahulu.
                 </div>
               )}
 
@@ -5761,7 +5796,7 @@ export default function CharacterMatrixTab({
             <div className="p-3 rounded-xl bg-canvas border border-border text-[11px] font-mono text-obsidian-muted flex items-center justify-between">
               <div className="flex items-center gap-1.5">
                 <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                <span>Card 1 Master Anchors Utuh 100%</span>
+                <span>Row 1 Master Anchors (Card 1–3) Utuh 100%</span>
               </div>
               <div className="flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
@@ -5826,12 +5861,12 @@ export default function CharacterMatrixTab({
         </div>
       )}
 
-      {/* Manual Upscale 2K Kit Modal (Card 1 Close-Up & Card 3 Front View) */}
+      {/* Manual Upscale 2K Kit Modal (Row 1 Master Anchors: Card 1, Card 2, Card 3) */}
       {upscaleKitModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="w-full max-w-xl max-h-[92vh] flex flex-col rounded-2xl bg-panel border border-indigo-500/40 shadow-2xl text-obsidian-primary font-mono text-xs overflow-hidden">
             {/* Modal Header */}
-            <div className="flex items-start justify-between gap-2 p-4 border-b border-border bg-canvas/70">
+            <div className="shrink-0 flex items-start justify-between gap-2 p-4 border-b border-border bg-canvas/70">
               <div className="space-y-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-cinzel font-bold text-indigo-300 text-sm flex items-center gap-1.5">
@@ -5841,7 +5876,9 @@ export default function CharacterMatrixTab({
                   <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-500/15 text-indigo-200 border border-indigo-400/30">
                     {upscaleKitModal.slotKey === "closeup"
                       ? `Card 1: Close-Up • ${upscaleKitModal.target.width}×${upscaleKitModal.target.height} (${upscaleKitModal.target.aspect_ratio})`
-                      : `Card 3: Front View • ${upscaleKitModal.target.width}×${upscaleKitModal.target.height} (${upscaleKitModal.target.aspect_ratio})`}
+                      : upscaleKitModal.slotKey === "expression"
+                      ? `Card 2: Expression Sheet (3x2) • ${upscaleKitModal.target.width}×${upscaleKitModal.target.height} (${upscaleKitModal.target.aspect_ratio})`
+                      : `Card 3: 4-Panel Reference • ${upscaleKitModal.target.width}×${upscaleKitModal.target.height} (${upscaleKitModal.target.aspect_ratio})`}
                   </span>
                   <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 uppercase">
                     {(upscaleKitModal.styleGateMode || "full").toUpperCase()}
@@ -5862,7 +5899,7 @@ export default function CharacterMatrixTab({
             </div>
 
             {/* Scrollable Body */}
-            <div className="p-4 space-y-3 overflow-y-auto flex-1">
+            <div className="p-4 space-y-3 overflow-y-auto flex-1 min-h-0">
               {/* Status Strip: Download & Clipboard + Fallback Download */}
               <div className="p-3 rounded-xl bg-canvas border border-border flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
                 <div className="space-y-1 text-[11px]">
@@ -5892,12 +5929,12 @@ export default function CharacterMatrixTab({
                     {upscaleKitModal.clipboardCopied ? (
                       <>
                         <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                        <span className="text-emerald-300">Frozen Upscale 2K Prompt ter-copy ke clipboard</span>
+                        <span className="text-emerald-300">Frozen Prompt (Positive + Negative) ter-copy ke clipboard</span>
                       </>
                     ) : (
                       <>
                         <Copy className="w-3.5 h-3.5 text-obsidian-muted shrink-0" />
-                        <span className="text-obsidian-secondary">Tap Copy Frozen Prompt di bawah jika clipboard belum terisi</span>
+                        <span className="text-obsidian-secondary">Tap Copy Full Prompt (Positive + Negative) di bawah jika clipboard belum terisi</span>
                       </>
                     )}
                   </div>
@@ -5914,28 +5951,51 @@ export default function CharacterMatrixTab({
                 </button>
               </div>
 
-              {/* Frozen Upscale 2K Prompt (Positive) */}
+              {/* Frozen Upscale 2K Prompt (Positive) + Combined Copy Action */}
               <div className="space-y-1.5">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-[11px] font-bold uppercase tracking-wider text-amber-400">
                     Frozen Upscale 2K Prompt (Positive)
                   </span>
                   <button
                     type="button"
-                    disabled={!upscaleKitModal.positivePrompt || !!upscaleKitModal.isLoadingPrompt}
+                    disabled={
+                      (!upscaleKitModal.positivePrompt && !upscaleKitModal.negativePrompt?.trim()) ||
+                      !!upscaleKitModal.isLoadingPrompt
+                    }
                     onClick={async () => {
-                      const ok = await copyTextToClipboard(upscaleKitModal.positivePrompt);
-                      setUpscaleKitModal((prev) =>
-                        prev ? { ...prev, clipboardCopied: ok || prev.clipboardCopied, copiedField: ok ? "pos" : null } : prev
+                      const combined = formatCombinedUpscalePrompt(
+                        upscaleKitModal.positivePrompt,
+                        upscaleKitModal.negativePrompt
                       );
+                      const ok = await copyTextToClipboard(combined);
+                      setUpscaleKitModal((prev) =>
+                        prev ? { ...prev, clipboardCopied: ok || prev.clipboardCopied, copiedField: ok ? "full" : null } : prev
+                      );
+                      if (ok) {
+                        showUpscaleToast(
+                          "Full Prompt Ter-copy",
+                          "Frozen Positive + Negative prompt berhasil disalin ke clipboard."
+                        );
+                      } else {
+                        showUpscaleToast(
+                          "Gagal Copy Prompt",
+                          "Browser memblokir clipboard otomatis. Silakan salin manual dari kotak prompt.",
+                          true
+                        );
+                      }
                       setTimeout(() => {
-                        setUpscaleKitModal((prev) => (prev && prev.copiedField === "pos" ? { ...prev, copiedField: null } : prev));
+                        setUpscaleKitModal((prev) => (prev && prev.copiedField === "full" ? { ...prev, copiedField: null } : prev));
                       }, 2000);
                     }}
                     className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-600 text-canvas font-bold text-[11px] flex items-center gap-1.5 transition-colors disabled:opacity-50"
                   >
-                    {upscaleKitModal.copiedField === "pos" ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{upscaleKitModal.copiedField === "pos" ? "Copied ✓" : "Copy Frozen Prompt"}</span>
+                    {upscaleKitModal.copiedField === "full" ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>
+                      {upscaleKitModal.copiedField === "full"
+                        ? "Copied ✓"
+                        : "Copy Full Prompt (Positive + Negative)"}
+                    </span>
                   </button>
                 </div>
                 {upscaleKitModal.isLoadingPrompt ? (
@@ -5954,29 +6014,13 @@ export default function CharacterMatrixTab({
                 )}
               </div>
 
-              {/* Frozen Negative Prompt (if non-empty) */}
+              {/* Frozen Negative Prompt (preview only — copied together via Copy Full Prompt above) */}
               {upscaleKitModal.negativePrompt?.trim() && (
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[11px] font-bold uppercase tracking-wider text-rose-300">
                       Frozen Negative Prompt
                     </span>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const ok = await copyTextToClipboard(upscaleKitModal.negativePrompt);
-                        setUpscaleKitModal((prev) =>
-                          prev ? { ...prev, copiedField: ok ? "neg" : null } : prev
-                        );
-                        setTimeout(() => {
-                          setUpscaleKitModal((prev) => (prev && prev.copiedField === "neg" ? { ...prev, copiedField: null } : prev));
-                        }, 2000);
-                      }}
-                      className="px-2.5 py-1 rounded-lg bg-canvas hover:bg-elevated border border-border text-obsidian-secondary hover:text-obsidian-primary font-semibold text-[11px] flex items-center gap-1.5 transition-colors"
-                    >
-                      {upscaleKitModal.copiedField === "neg" ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                      <span>{upscaleKitModal.copiedField === "neg" ? "Copied ✓" : "Copy Negative"}</span>
-                    </button>
                   </div>
                   <textarea
                     readOnly
@@ -5987,10 +6031,13 @@ export default function CharacterMatrixTab({
                   />
                 </div>
               )}
+
+              {/* Free Generate Portals (synced with AI Render Provider Card via SQLite & localStorage) */}
+              <FreeGeneratePortals projectId={projectId} />
             </div>
 
             {/* Modal Footer */}
-            <div className="p-4 border-t border-border bg-canvas/70 flex flex-wrap items-center justify-between gap-2">
+            <div className="shrink-0 p-4 border-t border-border bg-canvas/70 flex flex-wrap items-center justify-between gap-2">
               <button
                 type="button"
                 onClick={() => setUpscaleKitModal(null)}

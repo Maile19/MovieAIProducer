@@ -540,11 +540,11 @@ export default function SceneDetailDrawer({
           let consecutiveErrors = 0;
           pollingIntervalRef.current = setInterval(async () => {
             const currentSec = Math.floor((Date.now() - startTime) / 1000);
-            if (currentSec >= 180) {
+            if (currentSec >= 450) {
               stopPolling();
               setIsGeneratingPreview(false);
               setActiveJob(null);
-              const timeoutMsg = "Timeout menunggu antrean Google Flow (180 detik).";
+              const timeoutMsg = "Timeout menunggu antrean Google Flow (450 detik).";
               setPreviewError(timeoutMsg);
               showToast("error", timeoutMsg);
               return;

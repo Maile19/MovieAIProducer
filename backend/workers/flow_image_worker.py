@@ -64,6 +64,38 @@ DEFAULT_MAX_CONCURRENT_BROWSERS = 2
 _LAUNCH_LOCK = threading.Lock()
 _LAST_LAUNCH_TIME = 0.0
 
+# Thread-safe per-job failed account tracking for multi-account failover
+_FAILED_ACCOUNTS_LOCK = threading.Lock()
+_FAILED_ACCOUNTS_BY_JOB: dict[str, set[int]] = {}
+_FAILED_ACCOUNT_ORDER_BY_JOB: dict[str, list[int]] = {}
+
+
+def record_failed_account_for_job(job_id: str, account_id: int) -> list[int]:
+    """Record an account_id that failed for job_id and return ordered tried account IDs."""
+    key = str(job_id)
+    with _FAILED_ACCOUNTS_LOCK:
+        failed_set = _FAILED_ACCOUNTS_BY_JOB.setdefault(key, set())
+        order_list = _FAILED_ACCOUNT_ORDER_BY_JOB.setdefault(key, [])
+        if account_id not in failed_set:
+            failed_set.add(account_id)
+            order_list.append(account_id)
+        return list(order_list)
+
+
+def get_failed_accounts_for_job(job_id: str) -> set[int]:
+    """Return a snapshot copy of account IDs that already failed for job_id."""
+    key = str(job_id)
+    with _FAILED_ACCOUNTS_LOCK:
+        return set(_FAILED_ACCOUNTS_BY_JOB.get(key, ()))
+
+
+def clear_failed_accounts_for_job(job_id: str) -> None:
+    """Remove per-job failover tracking entry once job reaches terminal state."""
+    key = str(job_id)
+    with _FAILED_ACCOUNTS_LOCK:
+        _FAILED_ACCOUNTS_BY_JOB.pop(key, None)
+        _FAILED_ACCOUNT_ORDER_BY_JOB.pop(key, None)
+
 running = True
 
 
@@ -258,6 +290,33 @@ def cleanup_stale_busy_accounts(conn: sqlite3.Connection, stale_threshold_minute
             )
 
 
+def _finalize_unrecoverable_queued_job(
+    conn: sqlite3.Connection,
+    job: sqlite3.Row,
+    failed_accounts: set[int],
+) -> None:
+    """Mark a queued retry job as failed if no viable untried active/busy accounts remain."""
+    job_id = str(job["id"])
+    pref_id = job["preferred_account_id"] if "preferred_account_id" in job.keys() else None
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM flow_accounts WHERE status IN ('active', 'busy')")
+    viable_ids = [
+        r["id"] for r in cursor.fetchall()
+        if r["id"] not in failed_accounts and (not pref_id or r["id"] == pref_id)
+    ]
+    if viable_ids:
+        return
+
+    with _FAILED_ACCOUNTS_LOCK:
+        order_list = list(_FAILED_ACCOUNT_ORDER_BY_JOB.get(job_id, sorted(failed_accounts)))
+    tried_str = ", ".join(f"Akun #{aid}" for aid in order_list) if order_list else "tidak ada akun aktif"
+    prev_err = (job["error_message"] if "error_message" in job.keys() else None) or "Tidak ada akun Google Flow aktif yang tersisa."
+    final_err = f"Gagal di semua akun Google Flow yang dicoba ({tried_str}): {prev_err}"
+    update_job_status(conn, job_id, "failed", error_message=final_err)
+    clear_failed_accounts_for_job(job_id)
+    logger.error(f"[FailoverExhausted] Job {job_id} tidak memiliki sisa akun aktif; ditandai failed ({tried_str}).")
+
+
 def claim_next_job_and_lock_account(
     conn: sqlite3.Connection,
 ) -> tuple[sqlite3.Row | None, sqlite3.Row | None, AccountProfileLock | None]:
@@ -268,7 +327,7 @@ def claim_next_job_and_lock_account(
         SELECT * FROM flow_image_jobs
         WHERE status = 'queued'
         ORDER BY created_at ASC
-        LIMIT 10
+        LIMIT 20
         """
     )
     jobs = cursor.fetchall()
@@ -286,16 +345,21 @@ def claim_next_job_and_lock_account(
         """
     )
     active_accounts = cursor.fetchall()
-    if not active_accounts:
-        return None, None, None
 
     for job in jobs:
-        pref_id = job["preferred_account_id"]
-        candidate_accounts = (
-            [a for a in active_accounts if a["id"] == pref_id]
-            if pref_id
-            else active_accounts
-        )
+        job_id = str(job["id"])
+        failed_accounts = get_failed_accounts_for_job(job_id)
+        pref_id = job["preferred_account_id"] if "preferred_account_id" in job.keys() else None
+        candidate_accounts = [
+            a for a in active_accounts
+            if a["id"] not in failed_accounts and (not pref_id or a["id"] == pref_id)
+        ]
+
+        if not candidate_accounts:
+            retry_count = int(job["retry_count"] or 0) if "retry_count" in job.keys() else 0
+            if failed_accounts or retry_count > 0:
+                _finalize_unrecoverable_queued_job(conn, job, failed_accounts)
+            continue
 
         for acc in candidate_accounts:
             acc_id = acc["id"]
@@ -354,7 +418,7 @@ def claim_job_for_specific_account(
     character_id: str | None = None,
 ) -> sqlite3.Row | None:
     """Atomically claim the next queued job eligible for a currently held warm account.
-    Enforces strict character isolation: warm session can only claim subsequent jobs for the SAME character.
+    Enforces strict character isolation and excludes jobs that already failed on account_id.
     """
     cursor = conn.cursor()
     with conn:
@@ -366,7 +430,7 @@ def claim_job_for_specific_account(
                   AND (preferred_account_id IS NULL OR preferred_account_id = ?)
                   AND character_id = ?
                 ORDER BY created_at ASC
-                LIMIT 1
+                LIMIT 10
                 """,
                 (account_id, character_id),
             )
@@ -377,36 +441,38 @@ def claim_job_for_specific_account(
                 WHERE status = 'queued'
                   AND (preferred_account_id IS NULL OR preferred_account_id = ?)
                 ORDER BY created_at ASC
-                LIMIT 1
+                LIMIT 10
                 """,
                 (account_id,),
             )
-        job = cursor.fetchone()
-        if not job:
-            return None
+        jobs = cursor.fetchall()
+        for job in jobs:
+            job_id = str(job["id"])
+            if account_id in get_failed_accounts_for_job(job_id):
+                continue
 
-        now_iso = datetime.now(timezone.utc).isoformat()
-        cursor.execute(
-            """
-            UPDATE flow_image_jobs
-            SET status = 'processing', assigned_account_id = ?, started_at = ?
-            WHERE id = ? AND status = 'queued'
-            """,
-            (account_id, now_iso, job["id"]),
-        )
-        if cursor.rowcount > 0:
+            now_iso = datetime.now(timezone.utc).isoformat()
             cursor.execute(
                 """
-                UPDATE flow_accounts
-                SET status = 'busy', updated_at = ?
-                WHERE id = ?
+                UPDATE flow_image_jobs
+                SET status = 'processing', assigned_account_id = ?, started_at = ?
+                WHERE id = ? AND status = 'queued'
                 """,
-                (now_iso, account_id),
+                (account_id, now_iso, job["id"]),
             )
-            logger.info(
-                f"[WarmClaim] Job {job['id']} (char={job['character_id']}) claimed by warm Akun #{account_id}."
-            )
-            return job
+            if cursor.rowcount > 0:
+                cursor.execute(
+                    """
+                    UPDATE flow_accounts
+                    SET status = 'busy', updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now_iso, account_id),
+                )
+                logger.info(
+                    f"[WarmClaim] Job {job['id']} (char={job['character_id']}) claimed by warm Akun #{account_id}."
+                )
+                return job
     return None
 
 
@@ -415,29 +481,28 @@ def has_queued_jobs_for_other_accounts(
     current_account_id: int,
     current_character_id: str | None = None,
 ) -> bool:
-    """Check if queued jobs exist that could run on other accounts or for other characters."""
+    """Check if queued jobs exist that could run on other accounts, for other characters, or failed on current account."""
     cursor = conn.cursor()
-    if current_character_id:
-        cursor.execute(
-            """
-            SELECT 1 FROM flow_image_jobs
-            WHERE status = 'queued'
-              AND ((preferred_account_id IS NULL OR preferred_account_id != ?) OR character_id != ?)
-            LIMIT 1
-            """,
-            (current_account_id, current_character_id),
-        )
-    else:
-        cursor.execute(
-            """
-            SELECT 1 FROM flow_image_jobs
-            WHERE status = 'queued'
-              AND (preferred_account_id IS NULL OR preferred_account_id != ?)
-            LIMIT 1
-            """,
-            (current_account_id,),
-        )
-    return cursor.fetchone() is not None
+    cursor.execute(
+        """
+        SELECT id, preferred_account_id, character_id FROM flow_image_jobs
+        WHERE status = 'queued'
+        LIMIT 20
+        """
+    )
+    for row in cursor.fetchall():
+        job_id = str(row["id"])
+        pref_id = row["preferred_account_id"]
+        job_char = str(row["character_id"]) if row["character_id"] else None
+        if pref_id is not None and pref_id != current_account_id:
+            return True
+        if current_character_id and job_char != current_character_id:
+            return True
+        if current_account_id in get_failed_accounts_for_job(job_id):
+            return True
+        if not current_character_id and pref_id is None:
+            return True
+    return False
 
 
 def mark_account_status(
@@ -734,7 +799,12 @@ def update_job_status(
             conn.execute(
                 """
                 UPDATE flow_image_jobs
-                SET status = 'queued', retry_count = retry_count + 1, error_message = ?, debug_screenshot_url = ?
+                SET status = 'queued',
+                    assigned_account_id = NULL,
+                    started_at = NULL,
+                    retry_count = retry_count + 1,
+                    error_message = ?,
+                    debug_screenshot_url = ?
                 WHERE id = ? AND status != 'cancelled'
                 """,
                 (error_message, debug_screenshot_url, job_id),
@@ -780,34 +850,152 @@ def record_account_failure(
             cursor.execute(
                 """
                 UPDATE flow_accounts
-                SET status = 'cooldown', cooldown_until = ?, consecutive_failures = ?, last_error = ?, updated_at = ?
+                SET status = 'cooldown', cooldown_until = ?, consecutive_failures = ?, last_error = ?, last_used_at = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (cooldown_until, fails, error_msg, now_utc, account_id),
+                (cooldown_until, fails, error_msg, now_utc, now_utc, account_id),
             )
             logger.warning(f"Akun #{account_id} mengalami {fails} kegagalan berturut-turut. Cooldown {cooldown_minutes}m.")
         else:
-            # Explicitly reset status back to 'active' on transient failures to prevent freezing accounts in 'busy'
+            # Explicitly reset status back to 'active' and advance last_used_at so failed account moves to back of LRU
             cursor.execute(
                 """
                 UPDATE flow_accounts
-                SET status = 'active', consecutive_failures = ?, last_error = ?, updated_at = ?
+                SET status = 'active', consecutive_failures = ?, last_error = ?, last_used_at = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (fails, error_msg, now_utc, account_id),
+                (fails, error_msg, now_utc, now_utc, account_id),
             )
-            logger.info(f"Akun #{account_id} kegagalan {fails}/3 dicatat. Status di-reset ke 'active'.")
+            logger.info(f"Akun #{account_id} kegagalan {fails}/3 dicatat. Status di-reset ke 'active' (LRU updated).")
+
+
+def handle_job_failure_and_failover(
+    conn: sqlite3.Connection,
+    job_id: str,
+    account_id: int,
+    error_msg: str,
+    *,
+    is_permission_error: bool = False,
+    is_proxy_offline: bool = False,
+    debug_screenshot_url: str | None = None,
+    cooldown_minutes: int = 15,
+) -> str:
+    """Update account state and either requeue job for another active Flow account or mark final failed."""
+    if is_proxy_offline or "SOCKS5_PROXY_OFFLINE" in error_msg:
+        mark_account_status(conn, account_id, "active")
+        update_job_status(conn, job_id, "failed", error_message="SOCKS5_PROXY_OFFLINE")
+        clear_failed_accounts_for_job(job_id)
+        return "failed"
+
+    if is_permission_error:
+        mark_account_status(conn, account_id, "need_relogin", last_error=error_msg)
+        logger.warning(f"[AuthExpired] Akun #{account_id} butuh relogin -> status diubah ke 'need_relogin'.")
+    else:
+        record_account_failure(conn, account_id, error_msg, cooldown_minutes=cooldown_minutes)
+
+    tried_accounts = record_failed_account_for_job(job_id, account_id)
+    failed_set = set(tried_accounts)
+
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT status, retry_count, max_retries, preferred_account_id FROM flow_image_jobs WHERE id = ?",
+        (job_id,),
+    )
+    job_row = cursor.fetchone()
+    if not job_row or job_row["status"] == "cancelled":
+        clear_failed_accounts_for_job(job_id)
+        return "cancelled"
+
+    current_retry = int(job_row["retry_count"] or 0)
+    effective_max_retries = max(int(job_row["max_retries"] or 3), 4)
+    pref_id = job_row["preferred_account_id"]
+
+    cursor.execute("SELECT id FROM flow_accounts WHERE status = 'active' ORDER BY id ASC")
+    remaining_active_ids = [
+        r["id"] for r in cursor.fetchall()
+        if r["id"] not in failed_set and (not pref_id or r["id"] == pref_id)
+    ]
+
+    if remaining_active_ids and current_retry < effective_max_retries:
+        update_job_status(
+            conn,
+            job_id,
+            "queued",
+            debug_screenshot_url=debug_screenshot_url,
+            error_message=error_msg,
+            increment_retry=True,
+        )
+        logger.warning(
+            f"[Failover] Job {job_id} gagal di Akun #{account_id} ({error_msg}) -> "
+            f"requeued ke antrean untuk akun Google Flow berikutnya "
+            f"(retry {current_retry + 1}/{effective_max_retries}; tried={tried_accounts})"
+        )
+        return "requeued"
+
+    tried_str = ", ".join(f"Akun #{aid}" for aid in tried_accounts)
+    final_err = f"Gagal di semua akun Google Flow yang dicoba ({tried_str}): {error_msg}"
+    update_job_status(
+        conn,
+        job_id,
+        "failed",
+        error_message=final_err,
+        debug_screenshot_url=debug_screenshot_url,
+    )
+    clear_failed_accounts_for_job(job_id)
+    logger.error(f"[FailoverExhausted] Job {job_id} gagal permanen setelah mencoba [{tried_str}]: {error_msg}")
+    return "failed"
 
 
 def find_matching_locator(page: Page, selectors: list[str], timeout_ms: int = 3000):
-    for sel in selectors:
+    """Return first visible locator matching any selector, polling up to timeout_ms.
+
+    Playwright's Locator.is_visible() ignores timeout and checks instantaneously;
+    we poll until deadline so dynamic UI controls (settings trigger, upload modal,
+    add-to-prompt button, prompt input) are reliably awaited.
+    """
+    if not selectors:
+        return None
+    deadline = time.monotonic() + max(0.0, timeout_ms / 1000.0)
+    while True:
+        for sel in selectors:
+            try:
+                loc = page.locator(sel).first
+                if loc.is_visible():
+                    return loc
+            except Exception:
+                continue
+        if time.monotonic() >= deadline:
+            return None
+        page.wait_for_timeout(150)
+
+
+def _is_perceptual_clone_of_refs(raw_bytes: bytes, candidate_paths: list[str]) -> bool:
+    """Detect exact OR re-encoded/resized clones of uploaded anchor images."""
+    if not raw_bytes or not candidate_paths:
+        return False
+    try:
+        with Image.open(io.BytesIO(raw_bytes)) as cand_im:
+            cand_thumb = cand_im.convert("RGB").resize((64, 64), Image.Resampling.BILINEAR)
+    except Exception:
+        return False
+
+    for rp in candidate_paths:
+        if not rp or not os.path.exists(rp) or os.path.getsize(rp) <= 1024:
+            continue
         try:
-            loc = page.locator(sel).first
-            if loc.is_visible(timeout=timeout_ms):
-                return loc
+            with open(rp, "rb") as rf:
+                ref_bytes = rf.read()
+            if raw_bytes == ref_bytes:
+                return True
+            with Image.open(io.BytesIO(ref_bytes)) as ref_im:
+                ref_thumb = ref_im.convert("RGB").resize((64, 64), Image.Resampling.BILINEAR)
+            diff = ImageChops.difference(cand_thumb, ref_thumb)
+            mean_diff = sum(ImageStat.Stat(diff).mean) / 3.0
+            if mean_diff < 4.5:
+                return True
         except Exception:
             continue
-    return None
+    return False
 
 
 def get_full_resolution_url(src: str) -> str:
@@ -1045,38 +1233,28 @@ def execute_flow_generation(
     t_init_start = time.perf_counter()
     entry_url = selectors.get("entry_url", "https://flow.google.com/")
 
-    # 1. Navigasi / Reset Proyek Bersih
-    if not is_warm or "/project/" not in page.url:
-        try:
-            page.goto(entry_url, wait_until="domcontentloaded", timeout=30000)
-        except Exception as ne:
-            err_str = str(ne)
-            if any(term in err_str for term in [
-                "ERR_PROXY_CONNECTION_FAILED",
-                "ERR_SOCKS_CONNECTION_FAILED",
-                "ERR_TUNNEL_CONNECTION_FAILED",
-                "ERR_CONNECTION_RESET",
-                "ERR_NAME_NOT_RESOLVED",
-            ]):
-                raise ProxyOfflineError(f"SOCKS5_PROXY_OFFLINE: {ne}")
-            logger.info(f"Navigasi goto({entry_url}) warning: {ne}")
+    # 1. Navigasi / Reset Proyek Bersih (selalu mulai dari entry_url agar warm session bebas leftover anchor & aspect ratio)
+    if is_warm:
+        logger.info(f"[{card_label}] Sesi warm aktif. Reset navigasi ke kanvas baru agar bebas anchor & rasio lama...")
+    try:
+        page.goto(entry_url, wait_until="domcontentloaded", timeout=30000)
+    except Exception as ne:
+        err_str = str(ne)
+        if any(term in err_str for term in [
+            "ERR_PROXY_CONNECTION_FAILED",
+            "ERR_SOCKS_CONNECTION_FAILED",
+            "ERR_TUNNEL_CONNECTION_FAILED",
+            "ERR_CONNECTION_RESET",
+            "ERR_NAME_NOT_RESOLVED",
+        ]):
+            raise ProxyOfflineError(f"SOCKS5_PROXY_OFFLINE: {ne}")
+        logger.info(f"Navigasi goto({entry_url}) warning: {ne}")
 
-        if page.url.startswith("chrome-error://"):
-            raise ProxyOfflineError(f"SOCKS5_PROXY_OFFLINE: Chrome navigasi ke {page.url}")
+    if page.url.startswith("chrome-error://"):
+        raise ProxyOfflineError(f"SOCKS5_PROXY_OFFLINE: Chrome navigasi ke {page.url}")
 
-        page.wait_for_timeout(2000)
-        dismiss_onboarding_dialogs(page)
-    else:
-        # Warm context reset: Klik 'New Project' agar kanvas & prompt bersih tanpa leftover anchor bleed
-        logger.info(f"[{card_label}] Sesi warm aktif. Memastikan kanvas bersih & bebas dari anchor lama...")
-        try:
-            dismiss_onboarding_dialogs(page)
-            new_btn = find_matching_locator(page, selectors.get("new_project_button", []), timeout_ms=3000)
-            if new_btn:
-                new_btn.click(force=True)
-                page.wait_for_timeout(2000)
-        except Exception as e:
-            logger.debug(f"Warm project reset click: {e}")
+    page.wait_for_timeout(1500 if is_warm else 2000)
+    dismiss_onboarding_dialogs(page)
 
     # Deteksi URL Login Google
     current_url = page.url
@@ -1197,6 +1375,17 @@ def execute_flow_generation(
 
     browser_init_ms = round((time.perf_counter() - t_init_start) * 1000, 2)
 
+    # Bersihkan sisa media-chip lama SEBELUM upload anchor baru (jangan pernah dijalankan setelah upload!)
+    try:
+        page.evaluate("""() => {
+            const chips = document.querySelectorAll('.media-chip, .reference-chip, [role="button"][aria-label*="delete" i], [role="button"][aria-label*="remove" i], .attachment-chip, button.media-chip-remove');
+            for (const c of chips) {
+                try { c.click(); } catch(e) {}
+            }
+        }""")
+    except Exception:
+        pass
+
     # Snapshot awal elemen <img> sebelum upload / prompt untuk mencegah false claim
     blacklisted_ref_srcs: set[str] = set()
     try:
@@ -1210,18 +1399,28 @@ def execute_flow_generation(
 
     # 6. Upload Reference Images (Optimized JPEG 1024px quality 93)
     t_upload_start = time.perf_counter()
+    valid_paths: list[str] = []
+    optimized_paths: list[str] = []
     if ref_paths:
         valid_paths = [
             p for p in ref_paths
             if os.path.exists(p) and os.path.getsize(p) > 2048 and "mock_" not in os.path.basename(p)
         ][:4]
 
+        if len(valid_paths) != len(ref_paths):
+            logger.warning(
+                f"[{card_label}] Beberapa anchor tidak valid/ditemukan: expected={len(ref_paths)}, valid={len(valid_paths)} ({ref_paths})"
+            )
+
         if valid_paths:
             # Optimasi anchor image ke JPEG 1024px quality 93 (reduksi ~88% ukuran transfer)
             optimized_paths = [get_optimized_anchor_path(p) for p in valid_paths]
+            anchor_summary = [
+                f"Image {idx + 1}={os.path.basename(orig)}->{os.path.basename(opt)}({os.path.getsize(opt) // 1024}KB)"
+                for idx, (orig, opt) in enumerate(zip(valid_paths, optimized_paths))
+            ]
             logger.info(
-                f"[{card_label}] Mengunggah {len(optimized_paths)} anchor gambar (JPEG Q93 cache) ke Flow: "
-                f"{[os.path.basename(p) for p in optimized_paths]}"
+                f"[{card_label}] Mengunggah {len(optimized_paths)} anchor gambar (JPEG Q93 cache) ke Flow: {anchor_summary}"
             )
 
             uploaded = False
@@ -1230,19 +1429,19 @@ def execute_flow_generation(
                     ".add-menu-trigger",
                     "button[aria-label*='Tambahkan bahan' i]",
                     "button:has-text('add')",
-                ]), timeout_ms=2000)
+                ]), timeout_ms=4000)
 
                 if add_btn:
                     add_btn.click()
-                    page.wait_for_timeout(800)
+                    page.wait_for_timeout(600)
                     upload_btn = find_matching_locator(page, selectors.get("upload_media_menu_item", [
                         "button:has-text('Upload media')",
                         "[role='menuitem']:has-text('Upload media')",
                         "button:has-text('Upload')",
-                    ]), timeout_ms=2000)
+                    ]), timeout_ms=4000)
 
                     if upload_btn:
-                        with page.expect_file_chooser(timeout=7000) as fc_info:
+                        with page.expect_file_chooser(timeout=8000) as fc_info:
                             upload_btn.click()
                         file_chooser = fc_info.value
                         file_chooser.set_files(optimized_paths)
@@ -1254,27 +1453,27 @@ def execute_flow_generation(
                             "button:has-text('Setuju')",
                             "button:has-text('I agree')",
                             "button:has-text('Agree')",
-                        ], timeout_ms=3000)
+                        ], timeout_ms=3500)
                         if agree_btn:
                             logger.info(f"[{card_label}] Modal persetujuan hak cipta gambar ('Saya setuju') terdeteksi, mengklik...")
                             agree_btn.click(force=True)
-                            page.wait_for_timeout(1000)
+                            page.wait_for_timeout(1200)
 
-                        # Klik 'Tambahkan ke perintah'
+                        # Klik 'Tambahkan ke perintah' (tunggu hingga upload multi-anchor selesai diproses UI)
                         add_to_prompt = find_matching_locator(page, selectors.get("add_to_prompt_button", [
                             "button:has-text('Tambahkan ke perintah')",
                             "button:has-text('Add to prompt')",
-                        ]), timeout_ms=3000)
+                        ]), timeout_ms=8000)
                         if add_to_prompt:
                             add_to_prompt.click()
-                            page.wait_for_timeout(1000)
+                            page.wait_for_timeout(1500 if len(optimized_paths) > 1 else 1000)
                         uploaded = True
 
                 if not uploaded:
-                    ref_input_loc = find_matching_locator(page, selectors.get("reference_image_input", []), timeout_ms=2000)
+                    ref_input_loc = find_matching_locator(page, selectors.get("reference_image_input", []), timeout_ms=4000)
                     if ref_input_loc:
                         ref_input_loc.set_input_files(optimized_paths)
-                        page.wait_for_timeout(1500)
+                        page.wait_for_timeout(2000)
                         uploaded = True
 
                 # Karantina URL elemen media referensi yang baru terpasang di DOM
@@ -1295,7 +1494,7 @@ def execute_flow_generation(
 
     # 7. Masukkan Prompt
     try:
-        if page.locator(".cdk-overlay-backdrop").is_visible(timeout=400):
+        if page.locator(".cdk-overlay-backdrop").is_visible():
             page.keyboard.press("Escape")
             page.wait_for_timeout(400)
     except Exception:
@@ -1312,18 +1511,7 @@ def execute_flow_generation(
     # Bersihkan prompt: normalisasi whitespace & hilangkan newline mentah
     clean_prompt = " ".join(prompt.split())
 
-    # Bersihkan sisa media-chip dan konten lama di kanvas
-    try:
-        page.evaluate("""() => {
-            const chips = document.querySelectorAll('.media-chip, .reference-chip, [role="button"][aria-label*="delete" i], [role="button"][aria-label*="remove" i], .attachment-chip, button.media-chip-remove');
-            for (const c of chips) {
-                try { c.click(); } catch(e) {}
-            }
-        }""")
-    except Exception:
-        pass
-
-    # Bersihkan teks prompt input
+    # Bersihkan teks prompt input (tanpa menyentuh media-chip anchor yang baru di-upload!)
     try:
         page.evaluate("""(el) => {
             el.focus();
@@ -1374,6 +1562,17 @@ def execute_flow_generation(
     except Exception:
         pass
     page.wait_for_timeout(600)
+
+    # Karantina ulang semua <img> yang sudah ada tepat sebelum klik Generate agar upload thumbnail async tidak ter-claim sebagai hasil!
+    try:
+        pre_gen_imgs = set(page.evaluate("""() => {
+            return Array.from(document.querySelectorAll('img'))
+                .map(i => i.currentSrc || i.src || '')
+                .filter(Boolean);
+        }"""))
+        blacklisted_ref_srcs.update(pre_gen_imgs)
+    except Exception:
+        pass
 
     # 8. Klik Generate
     gen_loc = find_matching_locator(page, selectors.get("generate_button", []), timeout_ms=5000)
@@ -1456,9 +1655,22 @@ def execute_flow_generation(
 
                 let inPrompt = false;
                 let cur = img;
-                for (let d = 0; d < 5 && cur; d++) {
+                for (let d = 0; d < 8 && cur; d++) {
                     const cls = (cur.className || '').toString().toLowerCase();
-                    if (cls.includes('prompt') || cls.includes('media-chip') || cls.includes('reference') || cls.includes('cdk-overlay')) {
+                    const tag = (cur.tagName || '').toLowerCase();
+                    const aria = ((cur.getAttribute && cur.getAttribute('aria-label')) || '').toLowerCase();
+                    const tid = ((cur.getAttribute && cur.getAttribute('data-testid')) || '').toLowerCase();
+                    if (
+                        tag === 'flow-prompt-box' ||
+                        cls.includes('prompt') ||
+                        cls.includes('media-chip') ||
+                        cls.includes('reference') ||
+                        cls.includes('attachment') ||
+                        cls.includes('cdk-overlay') ||
+                        aria.includes('reference') ||
+                        aria.includes('bahan') ||
+                        tid.includes('reference')
+                    ) {
                         inPrompt = true; break;
                     }
                     cur = cur.parentElement;
@@ -1519,16 +1731,11 @@ def execute_flow_generation(
                 if not valid_pil:
                     continue
 
-                # Cek clone terhadap referensi
-                is_clone = False
-                if ref_paths:
-                    for rp in ref_paths:
-                        if os.path.exists(rp) and os.path.getsize(rp) > 1024:
-                            with open(rp, "rb") as rf:
-                                if raw_bytes == rf.read():
-                                    is_clone = True
-                                    break
-                if is_clone:
+                # Cek clone eksak maupun perseptual terhadap semua anchor (original + JPEG cache)
+                all_clone_candidates = list(dict.fromkeys([*(ref_paths or []), *(optimized_paths or [])]))
+                if _is_perceptual_clone_of_refs(raw_bytes, all_clone_candidates):
+                    logger.warning(f"[{card_label}] Kandidat <img> terdeteksi sebagai clone anchor referensi ({cand_src[:80]}...), mengabaikan dan melanjutkan polling...")
+                    blacklisted_ref_srcs.add(cand_src)
                     continue
 
             except Exception:
@@ -1581,7 +1788,7 @@ def worker_thread_loop(worker_slot_id: int):
         warm_character_id: str | None = None
         last_activity_time: float = time.time()
 
-        def close_warm_context():
+        def close_warm_context(reset_status_to_active: bool = True):
             nonlocal warm_context, warm_page, warm_account, warm_lock, warm_batch_count, warm_character_id
             if warm_context:
                 try:
@@ -1592,11 +1799,12 @@ def worker_thread_loop(worker_slot_id: int):
                 warm_page = None
 
             if warm_account and warm_lock:
-                conn = get_db_connection()
-                try:
-                    mark_account_status(conn, warm_account["id"], "active")
-                finally:
-                    conn.close()
+                if reset_status_to_active:
+                    conn = get_db_connection()
+                    try:
+                        mark_account_status(conn, warm_account["id"], "active")
+                    finally:
+                        conn.close()
                 warm_lock.release()
                 logger.info(f"[WorkerSlot-{worker_slot_id}] Profil Akun #{warm_account['id']} ditutup & lock dilepas.")
 
@@ -1673,6 +1881,7 @@ def worker_thread_loop(worker_slot_id: int):
                             record_account_success(conn, warm_account["id"])
                         finally:
                             conn.close()
+                        clear_failed_accounts_for_job(job_id)
 
                         warm_batch_count += 1
                         last_activity_time = time.time()
@@ -1680,15 +1889,46 @@ def worker_thread_loop(worker_slot_id: int):
                         time.sleep(1.0)
                         continue
 
-                    except Exception as e:
-                        logger.error(f"[WorkerSlot-{worker_slot_id}] Error pada warm job {job_id}: {e}")
+                    except PermissionError as e:
+                        err_str = str(e)
+                        failed_acc_id = warm_account["id"]
+                        logger.error(
+                            f"[WorkerSlot-{worker_slot_id}] PermissionError (login expired) pada warm job {job_id} "
+                            f"Akun #{failed_acc_id}: {err_str}"
+                        )
+                        close_warm_context(reset_status_to_active=False)
                         conn = get_db_connection()
                         try:
-                            update_job_status(conn, job_id, "failed", error_message=str(e))
-                            record_account_failure(conn, warm_account["id"], str(e), cooldown_minutes=cooldown_minutes)
+                            handle_job_failure_and_failover(
+                                conn,
+                                job_id,
+                                failed_acc_id,
+                                err_str,
+                                is_permission_error=True,
+                                cooldown_minutes=cooldown_minutes,
+                            )
                         finally:
                             conn.close()
-                        close_warm_context()
+                        time.sleep(1.5)
+                        continue
+
+                    except Exception as e:
+                        err_str = str(e)
+                        failed_acc_id = warm_account["id"]
+                        logger.error(f"[WorkerSlot-{worker_slot_id}] Error pada warm job {job_id}: {err_str}")
+                        close_warm_context(reset_status_to_active=False)
+                        conn = get_db_connection()
+                        try:
+                            handle_job_failure_and_failover(
+                                conn,
+                                job_id,
+                                failed_acc_id,
+                                err_str,
+                                is_proxy_offline=isinstance(e, ProxyOfflineError) or ("SOCKS5_PROXY_OFFLINE" in err_str),
+                                cooldown_minutes=cooldown_minutes,
+                            )
+                        finally:
+                            conn.close()
                         time.sleep(2.0)
                         continue
 
@@ -1741,6 +1981,8 @@ def worker_thread_loop(worker_slot_id: int):
 
             os.environ["DISPLAY"] = ":99"
             selectors = load_selectors()
+            context = None
+            page = None
 
             try:
                 context = pw.chromium.launch_persistent_context(
@@ -1769,6 +2011,7 @@ def worker_thread_loop(worker_slot_id: int):
                     record_account_success(conn, account_id)
                 finally:
                     conn.close()
+                clear_failed_accounts_for_job(job_id)
 
                 # Simpan context sebagai warm session
                 warm_context = context
@@ -1782,13 +2025,16 @@ def worker_thread_loop(worker_slot_id: int):
                     f"[WorkerSlot-{worker_slot_id}] Job {job_id} SUKSES! Browser tetap warm untuk job berikutnya (char={warm_character_id})."
                 )
 
-            except Exception as e:
+            except PermissionError as e:
                 err_str = str(e)
-                logger.error(f"[WorkerSlot-{worker_slot_id}] Gagal memproses Job {job_id} pada Akun #{account_id}: {err_str}")
+                logger.error(
+                    f"[WorkerSlot-{worker_slot_id}] PermissionError (login expired) pada Job {job_id} "
+                    f"Akun #{account_id}: {err_str}"
+                )
                 debug_fn = f"{job_id}_err.png"
                 debug_path = DEBUG_DIR / debug_fn
                 try:
-                    if 'page' in locals() and page:
+                    if page:
                         page.screenshot(path=str(debug_path), full_page=True)
                         debug_url = f"/media/debug/{debug_fn}"
                     else:
@@ -1796,23 +2042,69 @@ def worker_thread_loop(worker_slot_id: int):
                 except Exception:
                     debug_url = None
 
-                conn = get_db_connection()
-                try:
-                    if "SOCKS5_PROXY_OFFLINE" in err_str:
-                        update_job_status(conn, job_id, "failed", error_message="SOCKS5_PROXY_OFFLINE")
-                    else:
-                        update_job_status(
-                            conn, job_id, "failed", error_message=err_str, debug_screenshot_url=debug_url
-                        )
-                        record_account_failure(conn, account_id, err_str, cooldown_minutes=cooldown_minutes)
-                finally:
-                    conn.close()
-
-                if 'context' in locals() and context:
+                if context:
                     try:
                         context.close()
                     except Exception:
                         pass
+
+                conn = get_db_connection()
+                try:
+                    handle_job_failure_and_failover(
+                        conn,
+                        job_id,
+                        account_id,
+                        err_str,
+                        is_permission_error=True,
+                        debug_screenshot_url=debug_url,
+                        cooldown_minutes=cooldown_minutes,
+                    )
+                finally:
+                    conn.close()
+
+                profile_lock.release()
+                warm_context = None
+                warm_page = None
+                warm_account = None
+                warm_lock = None
+                warm_batch_count = 0
+                warm_character_id = None
+                time.sleep(1.5)
+
+            except Exception as e:
+                err_str = str(e)
+                logger.error(f"[WorkerSlot-{worker_slot_id}] Gagal memproses Job {job_id} pada Akun #{account_id}: {err_str}")
+                debug_fn = f"{job_id}_err.png"
+                debug_path = DEBUG_DIR / debug_fn
+                try:
+                    if page:
+                        page.screenshot(path=str(debug_path), full_page=True)
+                        debug_url = f"/media/debug/{debug_fn}"
+                    else:
+                        debug_url = None
+                except Exception:
+                    debug_url = None
+
+                if context:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+
+                conn = get_db_connection()
+                try:
+                    handle_job_failure_and_failover(
+                        conn,
+                        job_id,
+                        account_id,
+                        err_str,
+                        is_proxy_offline=isinstance(e, ProxyOfflineError) or ("SOCKS5_PROXY_OFFLINE" in err_str),
+                        debug_screenshot_url=debug_url,
+                        cooldown_minutes=cooldown_minutes,
+                    )
+                finally:
+                    conn.close()
+
                 profile_lock.release()
                 warm_context = None
                 warm_page = None
