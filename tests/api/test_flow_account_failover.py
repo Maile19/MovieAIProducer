@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import io
+import os
 from pathlib import Path
 import sqlite3
 import uuid
@@ -398,3 +399,340 @@ def test_warm_session_failure_excludes_same_job_and_requeues_for_other_account(
     assert job2_row["status"] == "completed"
     assert job2_row["retry_count"] == 1
     assert job2_row["assigned_account_id"] != 2
+
+
+def _noisy_png_bytes(width: int, height: int) -> bytes:
+    """Create a >50KB valid PNG image for Phase 1 capture tests."""
+    raw_pixels = os.urandom(width * height * 3)
+    img = Image.frombytes("RGB", (width, height), raw_pixels)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_worker_saves_jpg_and_records_2k_output(
+    _isolated_flow_state: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Scenario 5: Successful 2K output is saved as .jpg (Q95) with 2K dimensions on Account #1."""
+    db_path = _isolated_flow_state
+    job_id = _insert_job(db_path)
+
+    buf_2k = io.BytesIO()
+    Image.new("RGB", (2048, 1152), color=(40, 80, 120)).save(buf_2k, format="JPEG", quality=92)
+    bytes_2k = buf_2k.getvalue()
+
+    def _exec_2k(page, selectors, job, account, is_warm=False):
+        assert selectors.get("target_resolution") == "2k"
+        fiw.running = False
+        return bytes_2k
+
+    _install_worker_loop_fakes(monkeypatch, _exec_2k)
+    monkeypatch.setattr(fiw, "running", True)
+    fiw.worker_thread_loop(0)
+
+    conn = fiw.get_db_connection()
+    job_row = conn.execute("SELECT * FROM flow_image_jobs WHERE id = ?", (job_id,)).fetchone()
+    conn.close()
+
+    assert job_row["status"] == "completed"
+    assert job_row["output_filename"] == f"{job_id}.jpg"
+    assert job_row["image_url"] == f"/media/images/{job_id}.jpg"
+    saved_path = fiw.MEDIA_DIR / f"{job_id}.jpg"
+    assert saved_path.exists()
+    with Image.open(saved_path) as im:
+        assert im.format == "JPEG"
+        assert im.size == (2048, 1152)
+
+
+def test_phase2_failure_falls_back_to_1k_without_account_failover(
+    _isolated_flow_state: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Scenario 6: Phase 1 succeeds (1K), Phase 2 fails -> saves 1K .jpg on Account #1 without failing over."""
+    db_path = _isolated_flow_state
+    job_id = _insert_job(db_path)
+    png_1k = _noisy_png_bytes(1024, 1024)
+    assert len(png_1k) > 50_000
+
+    class _FakeElement:
+        def __init__(self, visible: bool = False):
+            self._visible = visible
+
+        def is_visible(self, timeout=None):
+            return self._visible
+
+        def is_disabled(self):
+            return False
+
+        def scroll_into_view_if_needed(self):
+            pass
+
+        def click(self, *args, **kwargs):
+            pass
+
+        def focus(self):
+            pass
+
+        def inner_text(self):
+            return "ok"
+
+        def element_handle(self):
+            return object()
+
+    class _FakeLocator:
+        def __init__(self, visible: bool = False):
+            self.first = _FakeElement(visible=visible)
+
+        def is_visible(self, timeout=None):
+            return self.first.is_visible(timeout=timeout)
+
+        def inner_text(self):
+            return ""
+
+    class _FakeKeyboard:
+        def press(self, key):
+            pass
+
+    class _FakeResponse:
+        ok = True
+
+        def body(self):
+            return png_1k
+
+    class _FakeRequest:
+        def get(self, url, timeout=30000):
+            return _FakeResponse()
+
+    fake_clock = [1000.0]
+
+    class _FakePage:
+        url = "https://flow.google.com/project/test-proj"
+        keyboard = _FakeKeyboard()
+        request = _FakeRequest()
+
+        def goto(self, *args, **kwargs):
+            pass
+
+        def wait_for_timeout(self, ms):
+            fake_clock[0] += ms / 1000.0
+
+        def screenshot(self, *args, **kwargs):
+            pass
+
+        def locator(self, sel):
+            return _FakeLocator(visible=("ProseMirror" in sel))
+
+        def evaluate(self, script, arg=None):
+            if isinstance(arg, dict) and "blacklistedSrcs" in arg:
+                return {
+                    "is_loading": False,
+                    "reason": None,
+                    "candidates": [
+                        {
+                            "src": "https://flow.google.com/asb/fake_token_123=s512",
+                            "naturalWidth": 512,
+                            "naturalHeight": 512,
+                            "isNew": True,
+                        }
+                    ],
+                }
+            if "execCommand" in script:
+                return True
+            return []
+
+    attempts: list[int] = []
+
+    def _boom_phase2(page, selectors, cand_src, target_resolution, timeout_ms=75000):
+        raise RuntimeError("Simulated 2K download timeout")
+
+    orig_exec = fiw.execute_flow_generation
+
+    def _wrapped_exec(page, selectors, job, account, is_warm=False):
+        attempts.append(account["id"])
+        fiw.running = False
+        return orig_exec(_FakePage(), selectors, job, account, is_warm=is_warm)
+
+    _install_worker_loop_fakes(monkeypatch, _wrapped_exec)
+    monkeypatch.setattr(fiw, "_download_upscaled_from_tile", _boom_phase2)
+    monkeypatch.setattr(fiw.time, "time", lambda: fake_clock[0])
+    monkeypatch.setattr(
+        fiw,
+        "load_selectors",
+        lambda: {
+            "entry_url": "https://flow.google.com/",
+            "prompt_input": ["div.ProseMirror"],
+            "generate_button": [".generate-icon-button"],
+        },
+    )
+    monkeypatch.setattr(fiw, "running", True)
+    fiw.worker_thread_loop(0)
+
+    assert attempts == [1]
+    conn = fiw.get_db_connection()
+    job_row = conn.execute("SELECT * FROM flow_image_jobs WHERE id = ?", (job_id,)).fetchone()
+    acc1 = conn.execute("SELECT * FROM flow_accounts WHERE id = 1").fetchone()
+    conn.close()
+
+    assert job_row["status"] == "completed"
+    assert job_row["retry_count"] == 0
+    assert job_row["assigned_account_id"] == 1
+    assert acc1["consecutive_failures"] == 0
+    with Image.open(fiw.MEDIA_DIR / f"{job_id}.jpg") as im:
+        assert im.size == (1024, 1024)
+
+
+def test_download_upscaled_4k_disabled_cascades_to_2k_and_cleans_overlays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Scenario 7: 4K locked/disabled cascades to 2K download, and dismisses .cdk-overlay-pane in finally."""
+    dl_2k_file = tmp_path / "flow_2k.jpg"
+    Image.new("RGB", (2048, 2048), color=(30, 120, 180)).save(dl_2k_file, format="JPEG", quality=92)
+
+    class _FakeDownload:
+        def path(self):
+            return str(dl_2k_file)
+
+    class _FakeDownloadCM:
+        def __init__(self):
+            self.value = _FakeDownload()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _MenuBtn:
+        def __init__(self, *, disabled: bool = False, on_click=None):
+            self._disabled = disabled
+            self._on_click = on_click
+
+        def is_visible(self):
+            return True
+
+        def is_disabled(self):
+            return self._disabled
+
+        def get_attribute(self, name):
+            if name == "aria-disabled":
+                return "true" if self._disabled else "false"
+            return ""
+
+        def hover(self):
+            pass
+
+        def click(self, *args, **kwargs):
+            if self._on_click:
+                self._on_click()
+
+    class _FakeTile:
+        def __init__(self):
+            self.first = self
+
+        def scroll_into_view_if_needed(self):
+            pass
+
+        def hover(self):
+            pass
+
+        def locator(self, sel):
+            return self
+
+        def is_visible(self):
+            return True
+
+        def click(self, *args, **kwargs):
+            pass
+
+    class _OverlayPane:
+        def __init__(self, page):
+            self._page = page
+
+        def is_visible(self):
+            return self._page.overlay_open
+
+    class _FakeKeyboard:
+        def __init__(self, page):
+            self._page = page
+
+        def press(self, key):
+            if key == "Escape":
+                self._page.escape_presses += 1
+                self._page.overlay_open = False
+
+    class _FakePage:
+        def __init__(self, *, fail_2k: bool = False):
+            self.overlay_open = False
+            self.escape_presses = 0
+            self.fail_2k = fail_2k
+            self.keyboard = _FakeKeyboard(self)
+            self.cleared_tags = 0
+
+        def wait_for_timeout(self, ms):
+            pass
+
+        def evaluate(self, script, arg=None):
+            if "removeAttribute('data-flow-target-tile')" in script and arg is None:
+                self.cleared_tags += 1
+            return True
+
+        def locator(self, sel):
+            if sel == "[data-flow-target-tile='1']":
+                return _FakeTile()
+            if sel == ".cdk-overlay-pane":
+                class _Wrap:
+                    def __init__(self, p):
+                        self.first = _OverlayPane(p)
+                return _Wrap(self)
+            return self
+
+        def expect_download(self, timeout=75000):
+            if self.fail_2k:
+                raise RuntimeError("2K download failed")
+            return _FakeDownloadCM()
+
+    selectors = {
+        "tile_container_selectors": ["flow-image-tile"],
+        "tile_more_options_button": ["button[aria-label*='Opsi lainnya']"],
+        "menu_download_item": [".cdk-overlay-pane button[role='menuitem']:has-text('Download')"],
+        "download_resolution_items": {
+            "4k": [".cdk-overlay-pane button[role='menuitem']:has-text('4K')"],
+            "2k": [".cdk-overlay-pane button[role='menuitem']:has-text('2K')"],
+        },
+    }
+
+    page = _FakePage(fail_2k=False)
+
+    def _fake_find_in_scope(scope, sels, timeout_ms=3000):
+        page.overlay_open = True
+        return _MenuBtn(disabled=False)
+
+    def _fake_find(p, sels, timeout_ms=3000):
+        s0 = sels[0] if sels else ""
+        if "4K" in s0:
+            return _MenuBtn(disabled=True)  # 4K locked behind AI Ultra Upgrade
+        if "2K" in s0:
+            return _MenuBtn(disabled=False)
+        return _MenuBtn(disabled=False)
+
+    monkeypatch.setattr(fiw, "_find_matching_in_scope", _fake_find_in_scope)
+    monkeypatch.setattr(fiw, "find_matching_locator", _fake_find)
+
+    raw_bytes, tier = fiw._download_upscaled_from_tile(
+        page, selectors, "https://flow.google.com/asb/test=s512", "4k", timeout_ms=15000
+    )
+    assert tier == "2k"
+    assert raw_bytes is not None
+    with Image.open(io.BytesIO(raw_bytes)) as im:
+        assert im.size == (2048, 2048)
+    assert page.escape_presses >= 1
+    assert page.overlay_open is False
+    assert page.cleared_tags >= 1
+
+    # Also verify full cascade 4K disabled -> 2K failure -> (None, "1k_fallback")
+    page_fail = _FakePage(fail_2k=True)
+    raw_fail, tier_fail = fiw._download_upscaled_from_tile(
+        page_fail, selectors, "https://flow.google.com/asb/test=s512", "4k", timeout_ms=15000
+    )
+    assert raw_fail is None
+    assert tier_fail == "1k_fallback"
+    assert page_fail.overlay_open is False

@@ -290,6 +290,23 @@ def cleanup_stale_busy_accounts(conn: sqlite3.Connection, stale_threshold_minute
             )
 
 
+def touch_account_busy_timestamp(conn: sqlite3.Connection, account_id: int) -> None:
+    """Refresh flow_accounts.updated_at between Phase 1 and Phase 2 to prevent stale-busy reclamation."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        with conn:
+            conn.execute(
+                """
+                UPDATE flow_accounts
+                SET updated_at = ?
+                WHERE id = ? AND status = 'busy'
+                """,
+                (now_iso, account_id),
+            )
+    except Exception:
+        pass
+
+
 def _finalize_unrecoverable_queued_job(
     conn: sqlite3.Connection,
     job: sqlite3.Row,
@@ -566,6 +583,43 @@ def normalize_asset_slot(slot: str | None) -> str:
     return "front"
 
 
+def _resolve_image_disk_path(image_url: str | None) -> Path | None:
+    """Resolve /media/images/<file> or local filesystem path to an existing file on disk."""
+    if not image_url:
+        return None
+    clean = image_url.split("?")[0].strip()
+    if clean.startswith("/media/images/"):
+        rel_name = Path(clean.replace("/media/images/", "", 1)).name
+        cand = MEDIA_DIR / rel_name
+        if cand.exists() and cand.is_file():
+            return cand
+    p = Path(clean)
+    if p.exists() and p.is_file():
+        return p
+    return None
+
+
+def _read_local_image_dimensions(image_url: str | None) -> tuple[int, int] | None:
+    """Inspect saved output image dimensions (width, height) via Pillow."""
+    disk_path = _resolve_image_disk_path(image_url)
+    if not disk_path:
+        return None
+    try:
+        with Image.open(disk_path) as im:
+            return im.size
+    except Exception:
+        return None
+
+
+def save_flow_image_jpeg(raw_image: bytes, dest_path: Path, quality: int = 95) -> tuple[int, int]:
+    """Convert raw image bytes to RGB and save as high-quality JPEG (Q95, optimize=True)."""
+    with Image.open(io.BytesIO(raw_image)) as opened:
+        rgb_img = opened.convert("RGB")
+        dims = rgb_img.size
+        rgb_img.save(dest_path, format="JPEG", quality=quality, optimize=True)
+    return dims
+
+
 def auto_attach_job_result(conn: sqlite3.Connection, job_id: str, image_url: str):
     """Atomically auto-attach completed Google Flow image result to character, state, or scene shot in SQLite."""
     try:
@@ -587,6 +641,11 @@ def auto_attach_job_result(conn: sqlite3.Connection, job_id: str, image_url: str
         if not row:
             return
 
+        dims = _read_local_image_dimensions(image_url)
+        actual_w, actual_h = dims if dims else (None, None)
+        is_2k_flag = bool(actual_w and actual_h and max(actual_w, actual_h) >= 1920)
+        now_iso = datetime.now(timezone.utc).isoformat()
+
         char_id = str(row[0]) if row[0] else None
         asset_slot = row[1]
         target_type = row[2]
@@ -606,8 +665,55 @@ def auto_attach_job_result(conn: sqlite3.Connection, job_id: str, image_url: str
                 "UPDATE character_states SET image_url = ? WHERE id = ?",
                 (image_url, state_id),
             )
+            parent_char_id = char_id
+            if not parent_char_id:
+                try:
+                    st_row = conn.execute(
+                        "SELECT character_id FROM character_states WHERE id = ?",
+                        (state_id,),
+                    ).fetchone()
+                    if st_row and st_row[0]:
+                        parent_char_id = str(st_row[0])
+                except Exception:
+                    parent_char_id = None
+
+            if parent_char_id:
+                try:
+                    char_row = conn.execute(
+                        "SELECT sheet_metadata, dna_seed FROM characters WHERE id = ?",
+                        (parent_char_id,),
+                    ).fetchone()
+                    if char_row:
+                        existing_meta = {}
+                        if char_row[0]:
+                            try:
+                                existing_meta = json.loads(char_row[0]) if isinstance(char_row[0], str) else dict(char_row[0])
+                            except Exception:
+                                existing_meta = {}
+                        existing_meta[f"state_{state_id}"] = {
+                            "image_url": image_url,
+                            "prompt": prompt,
+                            "anchors_used": ref_paths,
+                            "provider": "google_flow",
+                            "seed": char_row[1],
+                            "aspect_ratio": aspect_ratio,
+                            "width": actual_w,
+                            "height": actual_h,
+                            "resolution_width": actual_w,
+                            "resolution_height": actual_h,
+                            "is_2k": is_2k_flag,
+                            "rendered_at": now_iso,
+                            "status": "completed",
+                        }
+                        conn.execute(
+                            "UPDATE characters SET sheet_metadata = ? WHERE id = ?",
+                            (json.dumps(existing_meta), parent_char_id),
+                        )
+                except Exception as meta_exc:
+                    logger.warning(f"[AutoAttach] State sheet_metadata merge warning for state={state_id}: {meta_exc}")
+
             if cur.rowcount > 0:
-                logger.info(f"[AutoAttach] Attached {job_id} -> character_state={state_id}")
+                logger.info(f"[AutoAttach] Attached {job_id} -> character_state={state_id} (is_2k={is_2k_flag})")
             else:
                 logger.warning(f"[AutoAttach] CharacterState {state_id} not found for job {job_id}")
             return
@@ -650,7 +756,12 @@ def auto_attach_job_result(conn: sqlite3.Connection, job_id: str, image_url: str
                 "provider": "google_flow",
                 "seed": dna_seed,
                 "aspect_ratio": aspect_ratio,
-                "rendered_at": datetime.now(timezone.utc).isoformat(),
+                "width": actual_w,
+                "height": actual_h,
+                "resolution_width": actual_w,
+                "resolution_height": actual_h,
+                "is_2k": is_2k_flag,
+                "rendered_at": now_iso,
                 "status": "completed",
             }
 
@@ -659,7 +770,7 @@ def auto_attach_job_result(conn: sqlite3.Connection, job_id: str, image_url: str
                 (image_url, json.dumps(existing_meta), char_id),
             )
             if cur.rowcount > 0:
-                logger.info(f"[AutoAttach] Attached {job_id} -> character={char_id} slot={slot_key} (col={target_col})")
+                logger.info(f"[AutoAttach] Attached {job_id} -> character={char_id} slot={slot_key} (col={target_col}, is_2k={is_2k_flag})")
             else:
                 logger.warning(f"[AutoAttach] Zero rows updated for character {char_id}")
             return
@@ -669,7 +780,6 @@ def auto_attach_job_result(conn: sqlite3.Connection, job_id: str, image_url: str
                 "SELECT id, fg_bg_layers FROM shots WHERE id = ?",
                 (direct_shot_id,),
             ).fetchone()
-            now_iso = datetime.now(timezone.utc).isoformat()
             if shot_row:
                 s_id = str(shot_row[0])
                 raw_layers = shot_row[1]
@@ -682,12 +792,15 @@ def auto_attach_job_result(conn: sqlite3.Connection, job_id: str, image_url: str
                 existing_layers["preview_url"] = image_url
                 existing_layers["preview_provider"] = "google_flow"
                 existing_layers["job_id"] = job_id
+                existing_layers["preview_width"] = actual_w
+                existing_layers["preview_height"] = actual_h
+                existing_layers["is_2k"] = is_2k_flag
                 existing_layers["updated_at"] = now_iso
                 conn.execute(
                     "UPDATE shots SET fg_bg_layers = ? WHERE id = ?",
                     (json.dumps(existing_layers), s_id),
                 )
-                logger.info(f"[AutoAttach] Attached {job_id} -> direct shot={s_id}")
+                logger.info(f"[AutoAttach] Attached {job_id} -> direct shot={s_id} (is_2k={is_2k_flag})")
                 return
 
         if scene_id:
@@ -696,7 +809,6 @@ def auto_attach_job_result(conn: sqlite3.Connection, job_id: str, image_url: str
                 (scene_id,),
             ).fetchone()
 
-            now_iso = datetime.now(timezone.utc).isoformat()
             if shot_row:
                 shot_id = str(shot_row[0])
                 raw_layers = shot_row[1]
@@ -707,10 +819,13 @@ def auto_attach_job_result(conn: sqlite3.Connection, job_id: str, image_url: str
                     except Exception:
                         existing_layers = {}
 
-                # Non-destructive JSON merge: retain old keys, only add/update preview_url, preview_provider, job_id, updated_at
+                # Non-destructive JSON merge: retain old keys, only add/update preview fields
                 existing_layers["preview_url"] = image_url
                 existing_layers["preview_provider"] = "google_flow"
                 existing_layers["job_id"] = job_id
+                existing_layers["preview_width"] = actual_w
+                existing_layers["preview_height"] = actual_h
+                existing_layers["is_2k"] = is_2k_flag
                 existing_layers["updated_at"] = now_iso
 
                 cur = conn.execute(
@@ -718,7 +833,7 @@ def auto_attach_job_result(conn: sqlite3.Connection, job_id: str, image_url: str
                     (json.dumps(existing_layers), shot_id),
                 )
                 if cur.rowcount > 0:
-                    logger.info(f"[AutoAttach] Attached {job_id} -> scene={scene_id} shot={shot_id}")
+                    logger.info(f"[AutoAttach] Attached {job_id} -> scene={scene_id} shot={shot_id} (is_2k={is_2k_flag})")
                 else:
                     logger.warning(f"[AutoAttach] Zero rows updated for shot {shot_id} in scene {scene_id}")
             else:
@@ -730,6 +845,9 @@ def auto_attach_job_result(conn: sqlite3.Connection, job_id: str, image_url: str
                     "preview_url": image_url,
                     "preview_provider": "google_flow",
                     "job_id": job_id,
+                    "preview_width": actual_w,
+                    "preview_height": actual_h,
+                    "is_2k": is_2k_flag,
                     "updated_at": now_iso,
                 }
                 conn.execute(
@@ -741,7 +859,7 @@ def auto_attach_job_result(conn: sqlite3.Connection, job_id: str, image_url: str
                     """,
                     (new_shot_id, scene_id, dur, json.dumps(layers), now_iso),
                 )
-                logger.info(f"[AutoAttach] Created shot #1 and attached {job_id} -> scene={scene_id} shot={new_shot_id}")
+                logger.info(f"[AutoAttach] Created shot #1 and attached {job_id} -> scene={scene_id} shot={new_shot_id} (is_2k={is_2k_flag})")
             return
     except Exception as exc:
         logger.error(f"[AutoAttach] Failed to auto-attach job {job_id}: {exc}", exc_info=True)
@@ -1093,6 +1211,226 @@ def download_image_from_src(page: Page, src: str) -> bytes | None:
     return None
 
 
+def normalize_target_resolution(value: str | None) -> str:
+    """Normalize target resolution setting ('1k', '2k', or '4k'), defaulting to '2k'."""
+    norm = (value or "2k").strip().lower()
+    return norm if norm in ("1k", "2k", "4k") else "2k"
+
+
+def _dismiss_cdk_overlays(page: Page) -> None:
+    """Dismiss any open Angular Material overlay panes so warm sessions remain clean."""
+    for _ in range(2):
+        try:
+            pane = page.locator(".cdk-overlay-pane").first
+            if not pane.is_visible():
+                break
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(200)
+        except Exception:
+            break
+
+
+def _is_locator_disabled(loc) -> bool:
+    """Check whether a menu item locator is disabled or locked."""
+    try:
+        if loc.is_disabled():
+            return True
+    except Exception:
+        pass
+    try:
+        if (loc.get_attribute("aria-disabled") or "").lower() == "true":
+            return True
+        cls = (loc.get_attribute("class") or "").lower()
+        if "disabled" in cls:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _find_matching_in_scope(scope, selectors: list[str], timeout_ms: int = 3000):
+    """Poll selectors inside a Playwright Locator scope until one is visible."""
+    if not selectors:
+        return None
+    deadline = time.monotonic() + max(0.0, timeout_ms / 1000.0)
+    while True:
+        for sel in selectors:
+            try:
+                loc = scope.locator(sel).first
+                if loc.is_visible():
+                    return loc
+            except Exception:
+                continue
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.15)
+
+
+def _tag_target_tile(page: Page, cand_src: str, tile_selectors: list[str]) -> bool:
+    """Mark the closest tile container owning cand_src with data-flow-target-tile='1'."""
+    base_src = re.sub(r"=[^/]+$", "", cand_src or "")
+    try:
+        return bool(
+            page.evaluate(
+                """(data) => {
+                    for (const old of document.querySelectorAll('[data-flow-target-tile]')) {
+                        old.removeAttribute('data-flow-target-tile');
+                    }
+                    const candSrc = data.candSrc || '';
+                    const baseSrc = data.baseSrc || '';
+                    const tileSels = data.tileSels || [];
+                    const imgs = Array.from(document.querySelectorAll('img'));
+                    const match = imgs.find(img => {
+                        const s = img.currentSrc || img.src || '';
+                        return (candSrc && s === candSrc) || (baseSrc && s.startsWith(baseSrc));
+                    });
+                    if (!match) return false;
+                    let target = null;
+                    for (const sel of tileSels) {
+                        const found = match.closest(sel);
+                        if (found) { target = found; break; }
+                    }
+                    if (!target) {
+                        let cur = match.parentElement;
+                        for (let d = 0; d < 6 && cur; d++) {
+                            const btns = cur.querySelectorAll('button');
+                            if (btns.length >= 1 && btns.length <= 6) {
+                                target = cur;
+                                break;
+                            }
+                            cur = cur.parentElement;
+                        }
+                    }
+                    if (!target) target = match.parentElement;
+                    if (!target) return false;
+                    target.setAttribute('data-flow-target-tile', '1');
+                    return true;
+                }""",
+                {"candSrc": cand_src, "baseSrc": base_src, "tileSels": tile_selectors},
+            )
+        )
+    except Exception:
+        return False
+
+
+def _clear_target_tile_tag(page: Page) -> None:
+    try:
+        page.evaluate(
+            """() => {
+                for (const el of document.querySelectorAll('[data-flow-target-tile]')) {
+                    el.removeAttribute('data-flow-target-tile');
+                }
+            }"""
+        )
+    except Exception:
+        pass
+
+
+def _download_upscaled_from_tile(
+    page: Page,
+    selectors: dict[str, Any],
+    cand_src: str,
+    target_resolution: str,
+    timeout_ms: int = 75000,
+) -> tuple[bytes | None, str]:
+    """Trigger Google Flow's post-generation 2K/4K export with 4K->2K->1K cascade."""
+    eff_res = normalize_target_resolution(target_resolution)
+    if eff_res == "1k" or not cand_src:
+        return None, "1k"
+
+    tiers = ["4k", "2k"] if eff_res == "4k" else ["2k"]
+    tile_selectors = selectors.get("tile_container_selectors") or [
+        "flow-image-tile",
+        "flow-tile-container",
+        "flow-grid-tile-container",
+    ]
+    more_selectors = selectors.get("tile_more_options_button") or [
+        "button[aria-label*='Opsi lainnya' i]",
+        "button[aria-label*='More options' i]",
+        "button.mat-mdc-menu-trigger:has(mat-icon:has-text('more_vert'))",
+    ]
+    dl_menu_selectors = selectors.get("menu_download_item") or [
+        ".cdk-overlay-pane button[role='menuitem']:has-text('Download')",
+        ".cdk-overlay-pane button[role='menuitem']:has-text('Unduh')",
+        ".cdk-overlay-pane [role='menuitem']:has(mat-icon:has-text('download'))",
+    ]
+    res_map = selectors.get("download_resolution_items") or {}
+
+    for tier in tiers:
+        min_long_edge = 3840 if tier == "4k" else 1920
+        tier_selectors = res_map.get(tier) or [
+            f".cdk-overlay-pane button[role='menuitem']:has-text('{tier.upper()}')",
+            f".cdk-overlay-pane [role='menuitem']:has-text('{tier.upper()}')",
+        ]
+
+        for attempt in range(2):
+            try:
+                _dismiss_cdk_overlays(page)
+                if not _tag_target_tile(page, cand_src, tile_selectors):
+                    raise RuntimeError("Tile container untuk kandidat gambar tidak ditemukan.")
+
+                tile = page.locator("[data-flow-target-tile='1']").first
+                tile.scroll_into_view_if_needed()
+                tile.hover()
+                page.wait_for_timeout(250)
+
+                more_btn = _find_matching_in_scope(tile, more_selectors, timeout_ms=2500)
+                if not more_btn:
+                    raise RuntimeError("Tombol 'Opsi lainnya' pada tile tidak ditemukan.")
+                more_btn.click(force=True)
+                page.wait_for_timeout(450)
+
+                dl_item = find_matching_locator(page, dl_menu_selectors, timeout_ms=3000)
+                if not dl_item:
+                    raise RuntimeError("Menu item 'Download' tidak ditemukan di overlay.")
+
+                dl_item.hover()
+                page.wait_for_timeout(550)
+                res_btn = find_matching_locator(page, tier_selectors, timeout_ms=1200)
+                if not res_btn:
+                    dl_item.click(force=True)
+                    page.wait_for_timeout(550)
+                    res_btn = find_matching_locator(page, tier_selectors, timeout_ms=2000)
+
+                if not res_btn:
+                    logger.info(f"[Cascade] Opsi resolusi {tier.upper()} tidak ditemukan di submenu.")
+                    break
+
+                if _is_locator_disabled(res_btn):
+                    logger.info(f"[Cascade] Opsi resolusi {tier.upper()} terkunci/disabled (butuh Upgrade), cascade ke tier berikutnya...")
+                    break
+
+                logger.info(f"[Phase2] Memicu download native {tier.upper()} dari Google Flow (timeout={timeout_ms // 1000}s)...")
+                with page.expect_download(timeout=timeout_ms) as dl_info:
+                    res_btn.click()
+                dl = dl_info.value
+                dl_path = dl.path()
+                if not dl_path or not os.path.exists(dl_path):
+                    raise RuntimeError(f"File hasil download {tier.upper()} tidak ditemukan.")
+
+                raw_bytes = Path(dl_path).read_bytes()
+                with Image.open(io.BytesIO(raw_bytes)) as im:
+                    w, h = im.size
+                if max(w, h) < min_long_edge:
+                    raise RuntimeError(
+                        f"Dimensi download {tier.upper()} ({w}x{h}) di bawah ambang {min_long_edge}px."
+                    )
+                logger.info(
+                    f"[Phase2] Download {tier.upper()} SUKSES: {w}x{h}, {len(raw_bytes) / 1024.0:.1f} KB"
+                )
+                return raw_bytes, tier
+
+            except Exception as exc:
+                logger.warning(f"[Phase2] Percobaan {attempt + 1}/2 untuk {tier.upper()} gagal: {exc}")
+                if attempt == 0:
+                    page.wait_for_timeout(500)
+            finally:
+                _dismiss_cdk_overlays(page)
+                _clear_target_tile_tag(page)
+
+    return None, "1k_fallback"
+
+
 def dismiss_onboarding_dialogs(page: Page, max_attempts: int = 4) -> None:
     """Otomatis mendeteksi dan menyelesaikan onboarding terms, modal dialog, dan banner pengumuman."""
     for attempt in range(max_attempts):
@@ -1188,6 +1526,7 @@ def execute_flow_generation(
     job: sqlite3.Row,
     account: sqlite3.Row,
     is_warm: bool = False,
+    target_resolution: str | None = None,
 ) -> bytes:
     """Execute single Google Flow image generation job with warm session reuse & telemetry."""
     t_start = time.perf_counter()
@@ -1594,6 +1933,8 @@ def execute_flow_generation(
     t_gen_start = time.perf_counter()
     start_wait = time.time()
     result_bytes: bytes | None = None
+    accepted_cand_src: str | None = None
+    accepted_dims: tuple[int, int] = (0, 0)
 
     while time.time() - start_wait < 90:
         elapsed = time.time() - start_wait
@@ -1743,10 +2084,12 @@ def execute_flow_generation(
 
             file_size_kb = len(raw_bytes) / 1024.0
             logger.info(
-                f"[DIAGNOSTIK] Gambar resolusi penuh berhasil ditangkap: "
+                f"[DIAGNOSTIK] Gambar base 1K berhasil ditangkap: "
                 f"PIL={pil_w}x{pil_h}, Ukuran={file_size_kb:.2f} KB ({len(raw_bytes)} bytes)"
             )
             result_bytes = raw_bytes
+            accepted_cand_src = cand_src
+            accepted_dims = (pil_w, pil_h)
             candidate_accepted = True
             break
 
@@ -1759,6 +2102,50 @@ def execute_flow_generation(
         raise RuntimeError("Gagal menangkap gambar hasil dari Google Flow dalam 90 detik.")
 
     generate_wait_ms = round((time.perf_counter() - t_gen_start - (download_ms / 1000.0)) * 1000, 2)
+
+    # Phase 2: Post-generation native 2K/4K download with guaranteed 1K fallback
+    eff_target_res = normalize_target_resolution(target_resolution or selectors.get("target_resolution"))
+    phase2_download_ms = 0.0
+    captured_tier = "1k"
+    cap_w, cap_h = accepted_dims
+
+    if eff_target_res in ("2k", "4k") and accepted_cand_src:
+        try:
+            touch_conn = get_db_connection()
+            try:
+                touch_account_busy_timestamp(touch_conn, account["id"])
+            finally:
+                touch_conn.close()
+        except Exception:
+            pass
+
+        t_p2_start = time.perf_counter()
+        p2_timeout_ms = 120000 if eff_target_res == "4k" else 75000
+        try:
+            upscaled_bytes, resolved_tier = _download_upscaled_from_tile(
+                page,
+                selectors,
+                accepted_cand_src,
+                eff_target_res,
+                timeout_ms=p2_timeout_ms,
+            )
+            if upscaled_bytes:
+                with Image.open(io.BytesIO(upscaled_bytes)) as up_im:
+                    cap_w, cap_h = up_im.size
+                result_bytes = upscaled_bytes
+                captured_tier = resolved_tier
+            else:
+                logger.warning(
+                    f"[Fallback1K] [{card_label}] Download {eff_target_res.upper()} gagal/terkunci; "
+                    f"menyimpan gambar 1K ({cap_w}x{cap_h}) tanpa failover akun."
+                )
+        except Exception as p2_exc:
+            logger.warning(
+                f"[Fallback1K] [{card_label}] Phase 2 error ({p2_exc}); "
+                f"menyimpan gambar 1K ({cap_w}x{cap_h}) tanpa failover akun."
+            )
+        phase2_download_ms = round((time.perf_counter() - t_p2_start) * 1000, 2)
+
     total_ms = round((time.perf_counter() - t_start) * 1000, 2)
 
     logger.info(
@@ -1767,6 +2154,9 @@ def execute_flow_generation(
         f"upload_ms={upload_ms:.0f} "
         f"generate_wait_ms={generate_wait_ms:.0f} "
         f"download_ms={download_ms:.0f} "
+        f"phase2_download_ms={phase2_download_ms:.0f} "
+        f"captured_dims={cap_w}x{cap_h} "
+        f"tier={captured_tier} "
         f"total_ms={total_ms:.0f}"
     )
 
@@ -1837,6 +2227,7 @@ def worker_thread_loop(worker_slot_id: int):
             socks5_proxy = (settings.get("socks5_proxy") or DEFAULT_SOCKS5_URL).strip()
             max_batch_size = 4
             cooldown_minutes = int(settings.get("cooldown_minutes", 15))
+            target_resolution = normalize_target_resolution(settings.get("target_resolution"))
 
             # SOCKS5 Pre-Flight Check (with 5s in-memory TTL cache)
             proxy_health = get_cached_socks5_health(socks5_proxy, ttl_seconds=5.0)
@@ -1863,14 +2254,14 @@ def worker_thread_loop(worker_slot_id: int):
                         f"Akun #{warm_account['id']} (Batch: {warm_batch_count + 1}/{max_batch_size})..."
                     )
                     selectors = load_selectors()
+                    selectors["target_resolution"] = target_resolution
                     try:
                         raw_image = execute_flow_generation(
                             warm_page, selectors, subsequent_job, warm_account, is_warm=True
                         )
-                        img_filename = f"{job_id}.png"
+                        img_filename = f"{job_id}.jpg"
                         img_disk_path = MEDIA_DIR / img_filename
-                        image = Image.open(io.BytesIO(raw_image)).convert("RGB")
-                        image.save(img_disk_path, format="PNG", optimize=True)
+                        save_flow_image_jpeg(raw_image, img_disk_path, quality=95)
                         image_url = f"/media/images/{img_filename}"
 
                         conn = get_db_connection()
@@ -1981,6 +2372,7 @@ def worker_thread_loop(worker_slot_id: int):
 
             os.environ["DISPLAY"] = ":99"
             selectors = load_selectors()
+            selectors["target_resolution"] = target_resolution
             context = None
             page = None
 
@@ -1997,10 +2389,9 @@ def worker_thread_loop(worker_slot_id: int):
 
                 raw_image = execute_flow_generation(page, selectors, job, account, is_warm=False)
 
-                img_filename = f"{job_id}.png"
+                img_filename = f"{job_id}.jpg"
                 img_disk_path = MEDIA_DIR / img_filename
-                image = Image.open(io.BytesIO(raw_image)).convert("RGB")
-                image.save(img_disk_path, format="PNG", optimize=True)
+                save_flow_image_jpeg(raw_image, img_disk_path, quality=95)
                 image_url = f"/media/images/{img_filename}"
 
                 conn = get_db_connection()

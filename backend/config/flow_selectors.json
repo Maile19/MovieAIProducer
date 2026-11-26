@@ -265,5 +265,35 @@
     "a[download]",
     "button[aria-label*='Export' i]",
     "button:has-text('Export')"
-  ]
+  ],
+  "tile_container_selectors": [
+    "flow-image-tile",
+    "flow-tile-container",
+    "flow-grid-tile-container"
+  ],
+  "tile_more_options_button": [
+    "button[aria-label*='Opsi lainnya' i]",
+    "button[aria-label*='More options' i]",
+    "button.mat-mdc-menu-trigger:has(mat-icon:has-text('more_vert'))",
+    "button.mat-mdc-menu-trigger:has(mat-icon:has-text('more_horiz'))"
+  ],
+  "menu_download_item": [
+    ".cdk-overlay-pane button[role='menuitem']:has-text('Download')",
+    ".cdk-overlay-pane button[role='menuitem']:has-text('Unduh')",
+    ".cdk-overlay-pane [role='menuitem']:has(mat-icon:has-text('download'))"
+  ],
+  "download_resolution_items": {
+    "1k": [
+      ".cdk-overlay-pane button[role='menuitem']:has-text('1K')",
+      ".cdk-overlay-pane [role='menuitem']:has-text('1K')"
+    ],
+    "2k": [
+      ".cdk-overlay-pane button[role='menuitem']:has-text('2K')",
+      ".cdk-overlay-pane [role='menuitem']:has-text('2K')"
+    ],
+    "4k": [
+      ".cdk-overlay-pane button[role='menuitem']:has-text('4K')",
+      ".cdk-overlay-pane [role='menuitem']:has-text('4K')"
+    ]
+  }
 }

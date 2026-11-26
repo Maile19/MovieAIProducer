@@ -1,12 +1,22 @@
+from datetime import datetime, timezone
+import io
 import json
+from pathlib import Path
 import sqlite3
 import uuid
-import pytest
-from datetime import datetime, timezone
+
 from fastapi.testclient import TestClient
+from PIL import Image
+import pytest
 
 from backend.app.main import app
-from backend.workers.flow_image_worker import auto_attach_job_result, normalize_asset_slot, update_job_status
+from backend.workers import flow_image_worker as fiw
+from backend.workers.flow_image_worker import (
+    auto_attach_job_result,
+    normalize_asset_slot,
+    save_flow_image_jpeg,
+    update_job_status,
+)
 
 
 def test_normalize_asset_slot():
@@ -326,3 +336,203 @@ def test_api_attach_preview_endpoint_and_list_scenes_sync(client: TestClient, au
     detail = get_sc_resp.json()["data"]
     assert detail["preview_url"] == test_preview_url
     assert detail["preview_provider"] == "google_flow"
+
+
+def _make_jpeg_bytes(width: int, height: int) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), color=(90, 140, 210)).save(buf, format="JPEG", quality=92)
+    return buf.getvalue()
+
+
+def test_worker_auto_attach_2k_metadata_cards_states_and_shots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify auto_attach_job_result reads saved .jpg dimensions and propagates is_2k across cards, states, and shots."""
+    monkeypatch.setattr(fiw, "MEDIA_DIR", tmp_path)
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE characters (
+            id CHAR(36) PRIMARY KEY,
+            project_id CHAR(36),
+            name VARCHAR(128),
+            closeup_image_url VARCHAR(512),
+            front_image_url VARCHAR(512),
+            side_image_url VARCHAR(512),
+            three_quarter_image_url VARCHAR(512),
+            back_image_url VARCHAR(512),
+            tpose_image_url VARCHAR(512),
+            action_image_url VARCHAR(512),
+            expression_image_url VARCHAR(512),
+            dna_seed INTEGER,
+            sheet_metadata JSON
+        );
+    """)
+    conn.execute("""
+        CREATE TABLE character_states (
+            id CHAR(36) PRIMARY KEY,
+            character_id CHAR(36),
+            image_url VARCHAR(512)
+        );
+    """)
+    conn.execute("""
+        CREATE TABLE scenes (
+            id CHAR(36) PRIMARY KEY,
+            duration_target FLOAT DEFAULT 5.0
+        );
+    """)
+    conn.execute("""
+        CREATE TABLE shots (
+            id CHAR(36) PRIMARY KEY,
+            scene_id CHAR(36) NOT NULL,
+            shot_number INTEGER NOT NULL,
+            fg_bg_layers JSON NOT NULL
+        );
+    """)
+    conn.execute("""
+        CREATE TABLE flow_image_jobs (
+            id CHAR(36) PRIMARY KEY,
+            project_id CHAR(36),
+            scene_id CHAR(36),
+            shot_id CHAR(36),
+            character_id CHAR(36),
+            asset_slot VARCHAR(32),
+            target_type VARCHAR(32),
+            state_id CHAR(36),
+            prompt TEXT,
+            aspect_ratio VARCHAR(10),
+            reference_image_paths JSON,
+            status VARCHAR(20),
+            output_filename VARCHAR(255),
+            image_url VARCHAR(512),
+            debug_screenshot_url VARCHAR(512),
+            error_message TEXT,
+            retry_count INTEGER DEFAULT 0,
+            max_retries INTEGER DEFAULT 3,
+            created_at DATETIME,
+            started_at DATETIME,
+            completed_at DATETIME
+        );
+    """)
+
+    char_id = str(uuid.uuid4())
+    state_id = str(uuid.uuid4())
+    scene_id = str(uuid.uuid4())
+    shot_id = str(uuid.uuid4())
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    conn.execute(
+        "INSERT INTO characters (id, name, dna_seed, sheet_metadata) VALUES (?, ?, ?, ?);",
+        (char_id, "Nadia", 777111, json.dumps({})),
+    )
+    conn.execute(
+        "INSERT INTO character_states (id, character_id, image_url) VALUES (?, ?, NULL);",
+        (state_id, char_id),
+    )
+    conn.execute("INSERT INTO scenes (id, duration_target) VALUES (?, 6.0);", (scene_id,))
+    conn.execute(
+        "INSERT INTO shots (id, scene_id, shot_number, fg_bg_layers) VALUES (?, ?, 1, ?);",
+        (shot_id, scene_id, json.dumps({"existing_key": "keep_me"})),
+    )
+
+    # 1. Card slot ('front') with 2K JPEG (2752x1536)
+    job_card = str(uuid.uuid4())
+    card_path = tmp_path / f"{job_card}.jpg"
+    dims_2k = save_flow_image_jpeg(_make_jpeg_bytes(2752, 1536), card_path, quality=95)
+    assert dims_2k == (2752, 1536)
+    assert card_path.read_bytes().startswith(b"\xff\xd8\xff")
+
+    conn.execute(
+        """
+        INSERT INTO flow_image_jobs (
+            id, character_id, asset_slot, target_type, prompt, aspect_ratio, status, created_at
+        ) VALUES (?, ?, 'front', 'turnaround', 'Front 2K', '16:9', 'processing', ?);
+        """,
+        (job_card, char_id, now_iso),
+    )
+    conn.commit()
+    update_job_status(
+        conn, job_card, "completed", output_filename=f"{job_card}.jpg", image_url=f"/media/images/{job_card}.jpg"
+    )
+
+    # 2. Dynamic State with 2K JPEG (2048x2048)
+    job_state = str(uuid.uuid4())
+    state_path = tmp_path / f"{job_state}.jpg"
+    save_flow_image_jpeg(_make_jpeg_bytes(2048, 2048), state_path, quality=95)
+    conn.execute(
+        """
+        INSERT INTO flow_image_jobs (
+            id, character_id, target_type, state_id, prompt, aspect_ratio, status, created_at
+        ) VALUES (?, ?, 'state', ?, 'State 01 2K', '1:1', 'processing', ?);
+        """,
+        (job_state, char_id, state_id, now_iso),
+    )
+    conn.commit()
+    update_job_status(
+        conn, job_state, "completed", output_filename=f"{job_state}.jpg", image_url=f"/media/images/{job_state}.jpg"
+    )
+
+    char_row = conn.execute("SELECT front_image_url, sheet_metadata FROM characters WHERE id = ?;", (char_id,)).fetchone()
+    meta = json.loads(char_row["sheet_metadata"])
+    assert char_row["front_image_url"] == f"/media/images/{job_card}.jpg"
+    assert meta["front"]["resolution_width"] == 2752
+    assert meta["front"]["resolution_height"] == 1536
+    assert meta["front"]["is_2k"] is True
+
+    state_row = conn.execute("SELECT image_url FROM character_states WHERE id = ?;", (state_id,)).fetchone()
+    assert state_row["image_url"] == f"/media/images/{job_state}.jpg"
+    assert meta[f"state_{state_id}"]["resolution_width"] == 2048
+    assert meta[f"state_{state_id}"]["resolution_height"] == 2048
+    assert meta[f"state_{state_id}"]["is_2k"] is True
+
+    # 3. Scene/Shot with 1K JPEG (1376x768) -> is_2k=False
+    job_shot = str(uuid.uuid4())
+    shot_path = tmp_path / f"{job_shot}.jpg"
+    save_flow_image_jpeg(_make_jpeg_bytes(1376, 768), shot_path, quality=95)
+    conn.execute(
+        """
+        INSERT INTO flow_image_jobs (
+            id, scene_id, shot_id, prompt, aspect_ratio, status, created_at
+        ) VALUES (?, ?, ?, 'Shot 1K', '16:9', 'processing', ?);
+        """,
+        (job_shot, scene_id, shot_id, now_iso),
+    )
+    conn.commit()
+    update_job_status(
+        conn, job_shot, "completed", output_filename=f"{job_shot}.jpg", image_url=f"/media/images/{job_shot}.jpg"
+    )
+    shot_row = conn.execute("SELECT fg_bg_layers FROM shots WHERE id = ?;", (shot_id,)).fetchone()
+    layers = json.loads(shot_row["fg_bg_layers"])
+    assert layers["existing_key"] == "keep_me"
+    assert layers["preview_width"] == 1376
+    assert layers["preview_height"] == 768
+    assert layers["is_2k"] is False
+    conn.close()
+
+
+def test_flow_settings_target_resolution_roundtrip(client: TestClient, auth_headers: dict[str, str]):
+    """Verify GET/PUT /api/flow/settings defaults target_resolution='2k' and persists 1k/2k/4k."""
+    get_res = client.get("/api/flow/settings", headers=auth_headers)
+    assert get_res.status_code == 200
+    assert get_res.json()["settings"]["target_resolution"] == "2k"
+
+    for res_val in ("4k", "1k", "2k"):
+        put_res = client.put(
+            "/api/flow/settings",
+            json={"target_resolution": res_val},
+            headers=auth_headers,
+        )
+        assert put_res.status_code == 200
+        assert put_res.json()["settings"]["target_resolution"] == res_val
+
+        verify_res = client.get("/api/flow/settings", headers=auth_headers)
+        assert verify_res.status_code == 200
+        assert verify_res.json()["settings"]["target_resolution"] == res_val
+
+    bad_res = client.put(
+        "/api/flow/settings",
+        json={"target_resolution": "8k"},
+        headers=auth_headers,
+    )
+    assert bad_res.status_code == 422

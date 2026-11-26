@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 import subprocess
-from typing import Any
+from typing import Any, Literal
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -48,6 +48,12 @@ class FlowSettingsUpdateRequest(BaseModel):
     max_delay_sec: int | None = Field(default=None, ge=2, le=120)
     cooldown_minutes: int | None = Field(default=None, ge=1, le=1440)
     worker_enabled: bool | None = None
+    target_resolution: Literal["1k", "2k", "4k"] | None = None
+
+
+def _normalize_target_resolution(value: str | None) -> str:
+    norm = (value or "2k").strip().lower()
+    return norm if norm in ("1k", "2k", "4k") else "2k"
 
 
 # ==============================================================================
@@ -485,6 +491,7 @@ async def get_settings_endpoint(
             "max_delay_sec": int(data.get("max_delay_sec", 12)),
             "cooldown_minutes": int(data.get("cooldown_minutes", 15)),
             "worker_enabled": data.get("worker_enabled", "true").lower() == "true",
+            "target_resolution": _normalize_target_resolution(data.get("target_resolution")),
         }
     }
 
@@ -509,6 +516,8 @@ async def update_settings_endpoint(
         updates["cooldown_minutes"] = str(patch.cooldown_minutes)
     if patch.worker_enabled is not None:
         updates["worker_enabled"] = "true" if patch.worker_enabled else "false"
+    if patch.target_resolution is not None:
+        updates["target_resolution"] = _normalize_target_resolution(patch.target_resolution)
 
     for key, value in updates.items():
         stmt = select(FlowSettingModel).where(FlowSettingModel.key == key)
@@ -536,5 +545,6 @@ async def update_settings_endpoint(
             "max_delay_sec": int(data.get("max_delay_sec", 12)),
             "cooldown_minutes": int(data.get("cooldown_minutes", 15)),
             "worker_enabled": data.get("worker_enabled", "true").lower() == "true",
+            "target_resolution": _normalize_target_resolution(data.get("target_resolution")),
         },
     }

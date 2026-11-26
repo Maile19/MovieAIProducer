@@ -3795,7 +3795,9 @@ def _build_attachment_file_response(
         "webp": "image/webp",
     }
     media_type = media_type_map.get(ext, "application/octet-stream")
-    download_filename = f"{char_slug}_{filename_token}_1k.{ext}"
+    dims = _read_image_dimensions_from_path(local_path)
+    res_tag = "2k" if (dims and max(dims) >= 1920) else "1k"
+    download_filename = f"{char_slug}_{filename_token}_{res_tag}.{ext}"
     return FileResponse(
         path=local_path,
         media_type=media_type,

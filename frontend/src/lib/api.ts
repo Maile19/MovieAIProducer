@@ -864,6 +864,7 @@ export interface FlowSettings {
   max_delay_sec: number;
   cooldown_minutes: number;
   worker_enabled: boolean;
+  target_resolution?: "1k" | "2k" | "4k";
 }
 
 export interface FlowProxyStatus {

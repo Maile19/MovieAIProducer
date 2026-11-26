@@ -39,6 +39,7 @@ export default function SettingsPage() {
     max_delay_sec: 12,
     cooldown_minutes: 15,
     worker_enabled: true,
+    target_resolution: "2k",
   });
   const [proxyStatus, setProxyStatus] = useState<FlowProxyStatus | null>(null);
 
@@ -77,7 +78,10 @@ export default function SettingsPage() {
       ]);
       setWorkerStatus(accRes.worker_service);
       setAccounts(accRes.accounts);
-      setSettings(setRes.settings);
+      setSettings({
+        ...setRes.settings,
+        target_resolution: setRes.settings.target_resolution || "2k",
+      });
       setProxyStatus(proxyRes);
     } catch (err: any) {
       console.error("Gagal memuat data Google Flow:", err);
@@ -435,6 +439,33 @@ export default function SettingsPage() {
                     </span>
                   </label>
                 </div>
+              </div>
+            </div>
+
+            {/* Target Output Resolution */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
+              <div className="space-y-1.5">
+                <label className="text-[11px] font-mono text-obsidian-secondary flex items-center justify-between">
+                  <span>Target Resolusi Output Google Flow</span>
+                  <span className="text-[9px] text-amber-400">JPEG Q95 • 0 Poin (2K)</span>
+                </label>
+                <select
+                  value={settings.target_resolution || "2k"}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      target_resolution: e.target.value as "1k" | "2k" | "4k",
+                    })
+                  }
+                  className="w-full px-3 py-1.5 rounded-lg bg-canvas border border-border text-obsidian-primary text-xs font-mono focus:outline-none focus:border-amber-500 transition-colors"
+                >
+                  <option value="2k">2K Native Upscale (0 Poin • Direkomendasikan)</option>
+                  <option value="1k">1K Asli (Tercepat • Base 1024px)</option>
+                  <option value="4k">4K AI Ultra (Butuh Upgrade/Poin • Cascade ke 2K/1K jika terkunci)</option>
+                </select>
+                <p className="text-[10px] text-obsidian-muted">
+                  Mode 2K mengunduh hasil native ~2048px secara gratis (0 kredit) dengan fallback otomatis ke 1K jika upscale gagal.
+                </p>
               </div>
             </div>
 
