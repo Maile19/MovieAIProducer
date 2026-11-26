@@ -101,11 +101,15 @@ def test_character_and_state_management(client: TestClient, auth_headers: dict[s
         assert item["positive_prompt"]
         assert item["negative_prompt"]
         assert item["copy_ready_text"]
-        assert item["recommended_aspect_ratio"] == ("16:9" if slot == "expression" else "3:4")
+        assert item["recommended_aspect_ratio"] == ("16:9" if slot in ("expression", "front") else "3:4")
         if slot == "expression":
             assert item["width"] == 1344
             assert item["height"] == 768
             assert "3-column by 2-row grid" in item["positive_prompt"]
+        elif slot == "front":
+            assert item["width"] == 1344
+            assert item["height"] == 768
+            assert "3-column, 4-panel" in item["positive_prompt"]
         else:
             assert item["width"] == 768
             assert item["height"] == 1024

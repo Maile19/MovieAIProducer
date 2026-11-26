@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request
@@ -23,6 +25,63 @@ from backend.app.infrastructure.database.base import Base
 import backend.app.infrastructure.database.models  # noqa: F401  (register ORM metadata)
 
 
+def _seed_flow_pool_if_empty(connection) -> None:
+    """Idempotently seed Google Flow 6-account registry & default worker settings if empty."""
+    inspector = sa_inspect(connection)
+    tables = set(inspector.get_table_names())
+    if "flow_accounts" in tables:
+        acc_count = connection.execute(text("SELECT COUNT(*) FROM flow_accounts")).scalar() or 0
+        if acc_count == 0:
+            now_dt = datetime.now(timezone.utc)
+            today_str = now_dt.strftime("%Y-%m-%d")
+            profiles_root = Path("/opt/flow-profiles")
+            has_profiles_root = profiles_root.exists() and profiles_root.is_dir()
+            for acc_id in range(1, 7):
+                profile_dir = f"/opt/flow-profiles/akun_{acc_id}"
+                cookies_path = Path(profile_dir) / "Default" / "Cookies"
+                if has_profiles_root:
+                    acc_status = "active" if (cookies_path.exists() and cookies_path.stat().st_size > 0) else "need_relogin"
+                    last_err = (
+                        None
+                        if acc_status == "active"
+                        else f"Profil belum login Google Flow. Jalankan ./scripts/login_flow_profile.sh {acc_id} untuk login."
+                    )
+                else:
+                    acc_status = "active"
+                    last_err = None
+                connection.execute(
+                    text(
+                        "INSERT INTO flow_accounts "
+                        "(id, label, profile_dir, status, daily_count, last_reset_date, total_count, consecutive_failures, last_error, updated_at) "
+                        "VALUES (:id, :label, :profile_dir, :status, 0, :last_reset_date, 0, 0, :last_error, :updated_at)"
+                    ),
+                    {
+                        "id": acc_id,
+                        "label": f"Akun Pro {acc_id}",
+                        "profile_dir": profile_dir,
+                        "status": acc_status,
+                        "last_reset_date": today_str,
+                        "last_error": last_err,
+                        "updated_at": now_dt,
+                    },
+                )
+
+    if "flow_settings" in tables:
+        defaults = {
+            "socks5_proxy": "socks5://127.0.0.1:10808",
+            "batch_size_per_account": "4",
+            "min_delay_sec": "5",
+            "max_delay_sec": "12",
+            "cooldown_minutes": "15",
+            "worker_enabled": "true",
+        }
+        for k, v in defaults.items():
+            connection.execute(
+                text("INSERT OR IGNORE INTO flow_settings (key, value) VALUES (:k, :v)"),
+                {"k": k, "v": v},
+            )
+
+
 def _ensure_sqlite_schema_sync(connection) -> None:
     """Create missing tables and idempotently add late-added columns on existing SQLite DBs.
 
@@ -33,17 +92,17 @@ def _ensure_sqlite_schema_sync(connection) -> None:
     Base.metadata.create_all(connection)
 
     inspector = sa_inspect(connection)
-    if "characters" not in inspector.get_table_names():
-        return
-
-    columns = {col["name"] for col in inspector.get_columns("characters")}
-    if "sheet_overrides" not in columns:
-        connection.execute(
-            text(
-                "ALTER TABLE characters "
-                "ADD COLUMN sheet_overrides JSON NOT NULL DEFAULT '{}'"
+    if "characters" in inspector.get_table_names():
+        columns = {col["name"] for col in inspector.get_columns("characters")}
+        if "sheet_overrides" not in columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE characters "
+                    "ADD COLUMN sheet_overrides JSON NOT NULL DEFAULT '{}'"
+                )
             )
-        )
+
+    _seed_flow_pool_if_empty(connection)
 
 
 def create_app() -> FastAPI:

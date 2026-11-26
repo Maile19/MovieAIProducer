@@ -159,14 +159,16 @@ def test_eight_sheet_matrix_hierarchy_and_sequential_anchoring():
     assert "#D4D4D4" not in card_expr["positive_prompt"]
     assert "butterfly/clamshell studio lighting" in card_expr["positive_prompt"]
 
-    # 2. Card 3: Full Body Front (Anchored strictly to Card 1 Close-Up)
+    # 2. Card 3: 4-Panel Character & Wardrobe Master Reference (Anchored strictly to Card 1 Close-Up)
     card_front = compile_sheet_prompt(char, proj, bible, "front")
-    assert card_front["recommended_aspect_ratio"] == "3:4"
-    assert card_front["width"] == 768
-    assert card_front["height"] == 1024
+    assert card_front["recommended_aspect_ratio"] == "16:9"
+    assert card_front["width"] == 1344
+    assert card_front["height"] == 768
     assert len(card_front["ref_candidates"]) == 1
     assert card_front["ref_candidates"][0][0] == "Card 1 Character Close-Up"
     assert card_front["ref_candidates"][0][1] == "/api/v1/assets/previews/char_closeup_master.png"
+    assert "3-column, 4-panel" in card_front["positive_prompt"]
+    assert "NO head shown" in card_front["positive_prompt"]
     assert "#D4D4D4" not in card_front["positive_prompt"]
     assert "butterfly/clamshell studio lighting" in card_front["positive_prompt"]
 
@@ -177,14 +179,21 @@ def test_eight_sheet_matrix_hierarchy_and_sequential_anchoring():
     assert card_side["ref_candidates"][1][0] == "Card 3 Full Body Front"
     assert "#D4D4D4" not in card_side["positive_prompt"]
 
-    # 4. Cards 5-8: three_quarter, back, tpose, action (strictly Card 1 and Card 3)
-    for slot in ["three_quarter", "back", "tpose", "action"]:
+    # 4. Cards 5-8: three_quarter, tpose, action (Card 1 -> Card 3) & back (Card 3 Primary -> Card 1 Hair)
+    for slot in ["three_quarter", "tpose", "action"]:
         card = compile_sheet_prompt(char, proj, bible, slot)
         assert len(card["ref_candidates"]) == 2, f"{slot} must reference Card 1 and Card 3"
         assert card["ref_candidates"][0][0] == "Card 1 Character Close-Up"
         assert card["ref_candidates"][1][0] == "Card 3 Full Body Front"
         assert "#D4D4D4" not in card["positive_prompt"]
         assert "butterfly/clamshell studio lighting" in card["positive_prompt"]
+
+    card_back = compile_sheet_prompt(char, proj, bible, "back")
+    assert len(card_back["ref_candidates"]) == 2, "back must reference Card 3 (Primary) and Card 1 (Secondary Hair)"
+    assert card_back["ref_candidates"][0][0] == "Card 3 Full Body Front"
+    assert card_back["ref_candidates"][1][0] == "Card 1 Character Close-Up"
+    assert "#D4D4D4" not in card_back["positive_prompt"]
+    assert "butterfly/clamshell studio lighting" in card_back["positive_prompt"]
 
     # 5. Slot ordering in get_character_sheet_prompts
     slots = ["closeup", "expression", "front", "side", "three_quarter", "back", "tpose", "action"]
@@ -750,13 +759,15 @@ def test_stylized_anime_multimodal_anchoring_no_photorealism():
     assert "3-column by 2-row grid" in card2["positive_prompt"]
     assert "delicate cel-shading" in card2["positive_prompt"]
 
-    # Verify Card 3 Full Body Front specifics
+    # Verify Card 3 4-Panel Character & Wardrobe Master Reference specifics
     card3 = compile_sheet_prompt(char, proj, bible, "front")
-    assert card3["width"] == 768 and card3["height"] == 1024
+    assert card3["recommended_aspect_ratio"] == "16:9"
+    assert card3["width"] == 1344 and card3["height"] == 768
     assert len(card3["ref_candidates"]) == 1
     assert card3["ref_candidates"][0][0] == "Card 1 Character Close-Up"
     assert "frayed, charcoal-gray flight suit" in card3["positive_prompt"]
-    assert "model sheet A-pose" in card3["positive_prompt"]
+    assert "3-column, 4-panel" in card3["positive_prompt"]
+    assert "NO head shown" in card3["positive_prompt"]
 
     # Verify Dynamic State specifics (#State 01) - Anchors [Card 1, Card 3], Card 2 strictly excluded
     state01 = CharacterStateModel(
@@ -871,26 +882,42 @@ def test_strict_card_1_read_only_protection_during_downstream_generation(client:
 def test_frontend_batch_downstream_orchestrator_guardrails():
     """
     Verify frontend CharacterMatrixTab.tsx implementation guarantees:
-    1. Global button label: 'Generate All Downstream for All Characters (Cards 2–8 + 5 States)'
-    2. Strict Card 1 protection: Card 1 is read-only input anchor and never modified.
-    3. Resume Mode / Skip Existing Assets toggle support.
-    4. Screen Wake Lock integration for mobile browser background resistance.
-    5. Target isolation: options?.targetChar ?? selectedChar.
-    6. Graceful skip for characters without Card 1.
-    7. Zero leakage of forbidden words ('polia' / 'hermes').
+    1. Global button label: 'Generate All Downstream for All Characters (Cards 4–8 + 5 States)'
+    2. Single-character button label: 'Regenerate All Downstream (Cards 4–8 + ...)'
+    3. Strict Row 1 protection: Cards 1, 2, 3 are NEVER included in executeDownstreamForCharacter or calculateEstimatedAssets.
+    4. Resume Mode / Skip Existing Assets toggle support.
+    5. Screen Wake Lock integration for mobile browser background resistance.
+    6. Target isolation: options?.targetChar ?? selectedChar.
+    7. Graceful skip for characters without Row 1 Master Anchors (Card 1 & Card 3).
+    8. Zero leakage of forbidden words ('polia' / 'hermes').
     """
     frontend_code = Path("frontend/src/components/bible/CharacterMatrixTab.tsx").read_text(encoding="utf-8")
 
-    # 1. Button label exact match
-    assert "Generate All Downstream for All Characters (Cards 2–8 + 5 States)" in frontend_code
+    # 1. Button labels exact match (Cards 4-8 + 5 States ONLY)
+    assert "Generate All Downstream for All Characters (Cards 4–8 + 5 States)" in frontend_code
+    assert "Regenerate All Downstream (Cards 4–8 +" in frontend_code
+    assert "Cards 2–8" not in frontend_code
 
-    # 2. Card 1 protection comments and logic
-    assert "Card 1 (Master Anchor) is read-only input anchor and NEVER modified" in frontend_code or "Card 1: Character Close-Up (Master Anchor) belum tersedia" in frontend_code
+    # 2. Row 1 Master Anchors (Cards 1-3) strictly protected & excluded from batch downstream
     assert "STRICT CARD 1 PROTECTION ACTIVE" in frontend_code
+    assert "const totalSteps = 5 + statesList.length;" in frontend_code
+    exec_start = frontend_code.index("const executeDownstreamForCharacter = async")
+    exec_end = frontend_code.index("const handleRetryFailedOnly = async")
+    exec_block = frontend_code[exec_start:exec_end]
+    for row2_slot in ('"side"', '"three_quarter"', '"back"', '"tpose"', '"action"'):
+        assert row2_slot in exec_block
+    assert '"expression"' not in exec_block
+    assert '"front"' not in exec_block
 
-    # 3. Resume Mode support
+    # 3. Resume Mode locked ON support (cannot be unchecked, always trims URLs & passes skipExisting)
     assert "batchResumeMode" in frontend_code
+    assert "const batchResumeMode = true" in frontend_code
+    assert "setBatchResumeMode" not in frontend_code
     assert "Skip kartu &amp; state yang sudah ter-generate (Resume Mode)" in frontend_code or "Skip kartu & state yang sudah ter-generate (Resume Mode)" in frontend_code
+    assert "Terkunci Aktif" in frontend_code
+    assert ".trim()" in exec_block
+    assert "skipExisting: resumeMode" in exec_block
+    assert "skip_existing: options?.skipExisting ? true : undefined" in frontend_code
 
     # 4. Mobile Screen Wake Lock support
     assert "requestWakeLock" in frontend_code
@@ -900,9 +927,11 @@ def test_frontend_batch_downstream_orchestrator_guardrails():
     # 5. Target isolation in handleRenderAsset
     assert "options?.targetChar ?? selectedChar" in frontend_code
 
-    # 6. Graceful skip for characters without Card 1
-    assert "c.closeup_image_url" in frontend_code
-    assert "Di-skip (No Card 1)" in frontend_code or "Belum memiliki Card 1" in frontend_code
+    # 6. Graceful skip for characters without Card 1 / Card 3
+    assert "closeup_image_url" in frontend_code
+    assert "front_image_url" in frontend_code
+    assert "hasRequiredMasterAnchors" in frontend_code
+    assert "Di-skip (No Card 1/3)" in frontend_code or "Belum memiliki Card 1" in frontend_code
 
     # 7. Zero forbidden words leakage
     assert "polia" not in frontend_code.lower()
@@ -1145,6 +1174,273 @@ def test_global_render_provider_overrides_stale_9router_in_all_preview_endpoints
         assert req.provider_id == "gpt-2-6"
         assert req.model_id == "gpt-image-2.6"
         assert req.api_key_override == "sk-proj-global-preview-key"
+
+
+def test_flow_accounts_seeded_and_character_sheet_accepts_google_flow_aliases(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    """Verify Flow accounts are auto-seeded globally, FreePortals/render-provider preserves configs, and google_flow/google-flow aliases queue Character Sheet jobs."""
+    # 1. Global /api/flow/accounts must return the 6 seeded accounts
+    acc_res = client.get("/api/flow/accounts", headers=auth_headers)
+    assert acc_res.status_code == 200, acc_res.text
+    accounts = acc_res.json()["accounts"]
+    assert len(accounts) == 6
+    assert any(a["status"] == "active" for a in accounts)
+
+    # 2. Create project + character
+    proj_res = client.post(
+        "/api/v1/projects",
+        json={"title": "Flow Recovery Test", "target_style_code": "#Style 01"},
+        headers=auth_headers,
+    )
+    assert proj_res.status_code == 201
+    project_id = proj_res.json()["data"]["id"]
+
+    char_res = client.post(
+        f"/api/v1/projects/{project_id}/characters",
+        json={"name": "Raka", "role": "PROTAGONIST", "base_prompt": "Indonesian man 30s"},
+        headers=auth_headers,
+    )
+    assert char_res.status_code == 201
+    char_id = char_res.json()["data"]["id"]
+
+    # 3. Save render-provider with google_flow alias and then update freePortals with partial configs -> existing keys preserved
+    put1 = client.put(
+        f"/api/v1/projects/{project_id}/render-provider",
+        json={
+            "activeProviderId": "google_flow",
+            "applyToAllScenes": True,
+            "configs": {
+                "google-flow": {"baseUrl": "https://labs.google/fx/api", "apiKey": "", "modelId": "flow-imagen-anchor-pro"},
+                "seedream-5-5": {"baseUrl": "https://ark.ap-southeast.bytepluses.com/api/v3", "apiKey": "sk-secret-keep", "modelId": "seedream-5.5"},
+            },
+            "freePortals": [],
+        },
+    )
+    assert put1.status_code == 200
+    assert put1.json()["activeProviderId"] == "google-flow"
+
+    put2 = client.put(
+        f"/api/v1/projects/{project_id}/render-provider",
+        json={
+            "activeProviderId": "google-flow",
+            "applyToAllScenes": True,
+            "configs": {},
+            "freePortals": [{"id": "fp-1", "name": "Whisk", "url": "https://labs.google/fx/tools/whisk"}],
+        },
+    )
+    assert put2.status_code == 200
+    get_cfg = client.get(f"/api/v1/projects/{project_id}/render-provider")
+    assert get_cfg.status_code == 200
+    assert get_cfg.json()["configs"]["seedream-5-5"]["apiKey"].startswith("sk-s••••")
+    assert len(get_cfg.json()["freePortals"]) == 1
+
+    # 4. Real DB FlowAccountModel check inside _assert_socks5_healthy_for_flow (only mock SOCKS5 socket check)
+    with patch(
+        "backend.app.api.v1.bible.get_cached_socks5_health",
+        return_value={"healthy": True, "status": "online", "proxy_url": "socks5://127.0.0.1:10808", "detail": "ok"},
+    ):
+        gen_res = client.post(
+            f"/api/v1/characters/{char_id}/generate-asset",
+            json={"target_type": "sheet", "angle": "closeup", "provider": "google_flow", "aspect_ratio": "1:1"},
+            headers=auth_headers,
+        )
+    assert gen_res.status_code == 200, gen_res.text
+    assert gen_res.json()["status"] == "queued"
+    assert gen_res.json()["provider"] == "google_flow"
+
+
+def test_generate_character_asset_skip_existing_and_manual_rerender_overwrite(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    """
+    Verify backend skip_existing guard & manual Re-render overwrite contract:
+    1. With skip_existing=True, non-empty sheet slots (Cards 4-8) and state slots are skipped
+       without invoking image providers or queueing Flow jobs, returning status='skipped'
+       and preserving existing image URLs.
+    2. Whitespace-only URLs (e.g. '   ') are normalized via .strip() and treated as empty,
+       so skip_existing=True still renders them.
+    3. Manual single-card Re-render (skip_existing omitted / False) is permitted to overwrite
+       existing photos on both sheet slots and state slots.
+    """
+    from backend.app.infrastructure.database.models.character import CharacterModel, CharacterStateModel
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session
+    from backend.app.core.config import get_settings
+
+    proj_resp = client.post(
+        "/api/v1/projects",
+        json={"title": "Skip Existing Guardrail Proj", "settings": {"synopsis": "Verifying skip_existing vs manual rerender."}},
+        headers=auth_headers,
+    )
+    assert proj_resp.status_code == 201
+    project_id = proj_resp.json()["data"]["id"]
+
+    char_resp = client.post(
+        f"/api/v1/projects/{project_id}/characters",
+        json={
+            "name": "Aria Vance",
+            "role": "PROTAGONIST",
+            "base_prompt": "Woman in 30s, sharp cheekbones, dark tactical coat",
+            "dna_seed": 445566,
+        },
+        headers=auth_headers,
+    )
+    assert char_resp.status_code == 201
+    char_id = char_resp.json()["data"]["id"]
+
+    existing_side_url = "/api/v1/assets/previews/existing_card4_side.png"
+    existing_state1_url = "/api/v1/assets/previews/existing_state01.png"
+
+    settings = get_settings()
+    engine = create_engine(f"sqlite:///{settings.database_path}")
+    with Session(engine) as session:
+        c = session.execute(select(CharacterModel).where(CharacterModel.id == uuid.UUID(char_id))).scalar_one()
+        c.closeup_image_url = "/api/v1/assets/previews/master_c1.png"
+        c.front_image_url = "/api/v1/assets/previews/master_c3.png"
+        c.side_image_url = f"  {existing_side_url}  "
+        c.three_quarter_image_url = "   "  # whitespace-only must NOT be skipped
+        c.back_image_url = None
+
+        st1 = CharacterStateModel(
+            character_id=c.id,
+            state_code="#State 01",
+            state_label="Baseline",
+            wardrobe="Dark tactical coat",
+            image_url=f" {existing_state1_url} ",
+        )
+        st2 = CharacterStateModel(
+            character_id=c.id,
+            state_code="#State 02",
+            state_label="Battle Damaged",
+            wardrobe="Torn tactical coat",
+            image_url="   ",  # whitespace-only must NOT be skipped
+        )
+        session.add_all([st1, st2])
+        session.commit()
+        state1_id = str(st1.id)
+        state2_id = str(st2.id)
+
+    class _CountingFastImageProvider(MockFastImageProvider):
+        def __init__(self):
+            self.call_count = 0
+
+        async def generate(self, request: ImageGenerationRequest) -> ImageGenerationResult:
+            self.call_count += 1
+            return await super().generate(request)
+
+    mock_provider = _CountingFastImageProvider()
+    with patch("backend.app.api.v1.bible.get_image_provider", return_value=mock_provider):
+        # 1. skip_existing=True on populated Card 4 (side) -> MUST skip without calling provider
+        skip_side = client.post(
+            f"/api/v1/characters/{char_id}/generate-asset",
+            json={
+                "target_type": "turnaround",
+                "angle": "side",
+                "provider": "ag_gemini_flash",
+                "skip_existing": True,
+            },
+            headers=auth_headers,
+        )
+        assert skip_side.status_code == 200, skip_side.text
+        assert skip_side.json()["status"] == "skipped"
+        assert skip_side.json()["skipped"] is True
+        assert skip_side.json()["image_url"] == existing_side_url
+        assert mock_provider.call_count == 0
+
+        # 2. skip_existing=True on populated State 01 -> MUST skip without calling provider
+        skip_state1 = client.post(
+            f"/api/v1/characters/{char_id}/generate-downstream",
+            json={
+                "target_type": "state",
+                "state_id": state1_id,
+                "provider": "ag_gemini_flash",
+                "skip_existing": True,
+            },
+            headers=auth_headers,
+        )
+        assert skip_state1.status_code == 200, skip_state1.text
+        assert skip_state1.json()["status"] == "skipped"
+        assert skip_state1.json()["skipped"] is True
+        assert skip_state1.json()["image_url"] == existing_state1_url
+        assert mock_provider.call_count == 0
+
+        # 3. skip_existing=True on whitespace-only Card 5 (three_quarter) -> MUST render
+        render_3q = client.post(
+            f"/api/v1/characters/{char_id}/generate-asset",
+            json={
+                "target_type": "turnaround",
+                "angle": "three_quarter",
+                "provider": "ag_gemini_flash",
+                "skip_existing": True,
+            },
+            headers=auth_headers,
+        )
+        assert render_3q.status_code == 200, render_3q.text
+        assert render_3q.json()["status"] == "completed"
+        assert mock_provider.call_count == 1
+
+        # 4. skip_existing=True on whitespace-only State 02 -> MUST render
+        render_state2 = client.post(
+            f"/api/v1/characters/{char_id}/generate-asset",
+            json={
+                "target_type": "state",
+                "state_id": state2_id,
+                "provider": "ag_gemini_flash",
+                "skip_existing": True,
+            },
+            headers=auth_headers,
+        )
+        assert render_state2.status_code == 200, render_state2.text
+        assert render_state2.json()["status"] == "completed"
+        assert mock_provider.call_count == 2
+
+        # 5. Manual single-card Re-render (skip_existing omitted / False) -> MUST overwrite existing Card 4 & State 01
+        rerender_side = client.post(
+            f"/api/v1/characters/{char_id}/generate-asset",
+            json={
+                "target_type": "turnaround",
+                "angle": "side",
+                "provider": "ag_gemini_flash",
+            },
+            headers=auth_headers,
+        )
+        assert rerender_side.status_code == 200, rerender_side.text
+        assert rerender_side.json()["status"] == "completed"
+        assert rerender_side.json()["image_url"] != existing_side_url
+        assert mock_provider.call_count == 3
+
+        rerender_state1 = client.post(
+            f"/api/v1/characters/{char_id}/generate-asset",
+            json={
+                "target_type": "state",
+                "state_id": state1_id,
+                "provider": "ag_gemini_flash",
+                "skip_existing": False,
+            },
+            headers=auth_headers,
+        )
+        assert rerender_state1.status_code == 200, rerender_state1.text
+        assert rerender_state1.json()["status"] == "completed"
+        assert rerender_state1.json()["image_url"] != existing_state1_url
+        assert mock_provider.call_count == 4
+
+    # 6. Verify skip_existing=True also short-circuits before Google Flow proxy/queue check
+    with patch("backend.app.api.v1.bible._assert_socks5_healthy_for_flow", side_effect=AssertionError("Should not check Flow proxy when skipped")):
+        skip_flow_side = client.post(
+            f"/api/v1/characters/{char_id}/generate-asset",
+            json={
+                "target_type": "turnaround",
+                "angle": "side",
+                "provider": "google_flow",
+                "skip_existing": True,
+            },
+            headers=auth_headers,
+        )
+        assert skip_flow_side.status_code == 200, skip_flow_side.text
+        assert skip_flow_side.json()["status"] == "skipped"
+        assert skip_flow_side.json()["skipped"] is True
+
 
 
 

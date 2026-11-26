@@ -19,6 +19,10 @@ from backend.app.domain.screenwriter import sanitize_negative_prompts_for_style
 
 CASTING_CLOSEUP_PRESET_ID = "CASTING_CLOSEUP_REALISTIC_V1"
 
+# Canonical Row 1 vs Row 2 Downstream Batch boundaries (Row 1 Master Anchors are NEVER overwritten by batch downstream)
+ROW1_MASTER_ANCHOR_SLOTS: tuple[str, ...] = ("closeup", "expression", "front")
+ROW2_DOWNSTREAM_BATCH_SLOTS: tuple[str, ...] = ("side", "three_quarter", "back", "tpose", "action")
+
 RoutingMode = Literal["full", "light_override", "strict_bypass"]
 
 # ==============================================================================
@@ -98,6 +102,107 @@ _REFERENCE_LOCK_PREFIX = (
     "bone structure, eye shape, iris color, nose bridge, lip shape, natural skin tone, age, ethnicity, "
     "hair texture, and distinguishing facial marks."
 )
+
+# Slot-specific anti-close-up & wardrobe-drift negative tokens (prepended before FROZEN_NEGATIVE_PROMPT
+# so both separate-negative providers and fold_negative_bans_into_positive preserve them).
+ANTI_CLOSEUP_NEGATIVE_TOKENS = (
+    "close-up, extreme close-up, headshot, face-only portrait, cropped at shoulders, "
+    "tight face framing, passport photo, bust portrait, torso-only crop"
+)
+
+CARD5_THREE_QUARTER_NEGATIVE_TOKENS = (
+    f"{ANTI_CLOSEUP_NEGATIVE_TOKENS}, flat 0-degree front-facing view, symmetrical mugshot stance"
+)
+
+CARD6_BACK_NEGATIVE_TOKENS = (
+    "front view, facing camera, visible front face, close-up, extreme close-up, headshot, "
+    "cropped at shoulders, tight face framing, passport photo, swapped jacket, "
+    "capelet instead of coat, altered coat length, missing back straps, inconsistent rear wardrobe"
+)
+
+
+def get_slot_negative_prefix(slot_key: str) -> str:
+    """Return slot-specific negative bans for Row 2 full-body turnaround cards."""
+    norm = (slot_key or "").lower().strip()
+    if norm == "three_quarter":
+        return CARD5_THREE_QUARTER_NEGATIVE_TOKENS
+    if norm == "back":
+        return CARD6_BACK_NEGATIVE_TOKENS
+    if norm in ("side", "tpose", "action"):
+        return ANTI_CLOSEUP_NEGATIVE_TOKENS
+    return ""
+
+
+def build_downstream_anchor_directives(
+    *,
+    slot_key: str,
+    ref_labels: list[str],
+    ref_noun: str,
+) -> str:
+    """Build explicit Image 1 / Image 2 role-separation directives matching exact attachment order.
+
+    Prevents Card 1 (close-up headshot) from overriding full-body framing in Cards 4-8
+    or causing rear-wardrobe drift in Card 6 (back view).
+    """
+    norm = (slot_key or "").lower().strip()
+    if not ref_labels:
+        return ""
+
+    has_c1 = any("Card 1" in lbl for lbl in ref_labels)
+    has_c3 = any("Card 3" in lbl for lbl in ref_labels)
+    c1_idx = next((i + 1 for i, lbl in enumerate(ref_labels) if "Card 1" in lbl), None)
+    c3_idx = next((i + 1 for i, lbl in enumerate(ref_labels) if "Card 3" in lbl), None)
+
+    if norm == "back":
+        parts: list[str] = []
+        if c3_idx is not None:
+            parts.append(
+                f"Reference Image {c3_idx} (Card 3 4-Panel Composite — PRIMARY ANCHOR): "
+                "STRICTLY copy 100% of the rear wardrobe construction from Panel 4 (the right-hand full-body rear wardrobe column of Image "
+                f"{c3_idx}): exact jacket/coat design, coat length, shoulder fur/collar placement, rear straps and seams, fabric weave, "
+                "colors, trousers, and boots without substituting a different cloak, poncho, or robe; match rear hair contour and length from the left-column portraits."
+            )
+        if c1_idx is not None:
+            parts.append(
+                f"Reference Image {c1_idx} (Card 1 Close-Up — SECONDARY HAIR/AGE REFERENCE ONLY): "
+                f"Use Image {c1_idx} ONLY for hair color, hair strand texture, and subject age consistency. "
+                f"DO NOT render a frontal face, DO NOT copy the close-up crop or shoulder framing of Image {c1_idx}, "
+                f"and DO NOT replace Image {c3_idx or 1}'s rear jacket/coat silhouette with Image {c1_idx}'s front collar."
+            )
+        return " ".join(parts)
+
+    if norm in ("side", "three_quarter", "tpose", "action"):
+        parts = []
+        if c1_idx is not None and c3_idx is not None:
+            parts.append(
+                f"Strict Multi-Anchor Role Separation ({len(ref_labels)} attached images): "
+                f"Image {c1_idx} (Card 1 Close-Up) is locked STRICTLY for biometric facial identity of the {ref_noun} "
+                f"(bone structure, eyes, nose, beard, hair, age, and skin marks) — CRITICAL: DO NOT copy the tight close-up headshot crop, "
+                f"shoulder-level framing, or 1:1 composition from Image {c1_idx}. "
+                f"Image {c3_idx} (Card 3 4-Panel Composite) is locked STRICTLY for 100% full-body wardrobe, outfit, and body-proportion fidelity "
+                f"(exact outer jacket/coat, inner tunic/shirt, collar, belts/straps, trousers, boots, fabric textures, and colors from the full-body columns of Image {c3_idx})."
+            )
+        elif c1_idx is not None:
+            parts.append(
+                f"Reference Image {c1_idx} (Card 1 Close-Up) is locked strictly for facial biometric identity ONLY; "
+                f"DO NOT copy the close-up headshot framing or crop from Image {c1_idx} — render a complete head-to-toe full-body figure."
+            )
+        elif c3_idx is not None:
+            parts.append(
+                f"Reference Image {c3_idx} (Card 3 4-Panel Composite) is locked strictly for 100% facial identity and full-body wardrobe fidelity "
+                "(jacket/coat, inner layers, trousers, boots, textures, and proportions)."
+            )
+        return " ".join(parts)
+
+    if norm == "state":
+        if has_c1 and has_c3 and c1_idx is not None and c3_idx is not None:
+            return (
+                f"Image {c1_idx} (Card 1 Close-Up) locks exact biometric facial identity and cranial proportions; "
+                f"Image {c3_idx} (Card 3 4-Panel Composite) locks baseline body proportions and silhouette while applying the state progression."
+            )
+        return f"Strictly preserving character identity and baseline proportions from the reference {ref_noun} while applying state progression."
+
+    return ""
 
 # ==============================================================================
 # DETERMINISTIC STYLE GATE (#Style 01 - #Style 18)
@@ -647,13 +752,16 @@ def get_downstream_frozen_layers(
         STUDIO_BACKDROP_TONE=studio_backdrop_tone or "neutral medium-grey",
     )
 
+    slot_neg_prefix = get_slot_negative_prefix(slot_key)
+    combined_neg = f"{slot_neg_prefix}, {gate.negative_prompt}" if slot_neg_prefix else gate.negative_prompt
+
     return {
         "bypassed": False,
         "routing_mode": gate.routing_mode,
         "style_code": gate.style_code,
         "layer_1": layer_1,
         "layer_2": layer_2,
-        "negative_prompt": gate.negative_prompt,
+        "negative_prompt": combined_neg,
         "layers_applied": ["layer_1", "layer_2"],
     }
 
@@ -666,7 +774,7 @@ UPSCALE_2K_TARGET_DIMENSIONS: dict[str, tuple[int, int, str]] = {
     "closeup": (2048, 2048, "1:1"),
     "preview_closeup": (2048, 2048, "1:1"),
     "expression": (2048, 1152, "16:9"),
-    "front": (1536, 2048, "3:4"),
+    "front": (2048, 1152, "16:9"),
     "side": (1536, 2048, "3:4"),
     "three_quarter": (1536, 2048, "3:4"),
     "back": (1536, 2048, "3:4"),
@@ -740,8 +848,8 @@ def fold_negative_bans_into_positive(
             if t.lower() not in {"cgi", "3d render", "unreal engine"}
         ]
 
-    # Pick concise core bans (up to 12 tokens) so we keep positive prompt clean and within limits
-    core_tokens = raw_tokens[:12]
+    # Pick concise core bans (up to 16 tokens) so slot-specific anti-closeup/wardrobe bans and style bans stay intact
+    core_tokens = raw_tokens[:16]
     if not core_tokens:
         return clean_pos
     return f"{clean_pos.rstrip('. ')}. Strictly avoid: {', '.join(core_tokens)}."
@@ -757,11 +865,26 @@ def compile_upscale_2k_prompt(
     studio_backdrop_tone: str = "neutral medium-grey",
     has_override: bool = False,
     has_injuries_or_wear: bool = False,
+    aspect_ratio: str | None = None,
 ) -> dict[str, Any]:
     """Compile reference-guided native 2K refinement prompt for any slot or dynamic state."""
     gate = resolve_style_gate(style_code)
     norm_slot = (slot_key or "closeup").lower().strip()
-    target_w, target_h, target_ar = resolve_upscale_2k_target_dimensions(norm_slot)
+    target_w, target_h, target_ar = resolve_upscale_2k_target_dimensions(norm_slot, aspect_ratio=aspect_ratio)
+
+    if norm_slot == "front" and target_ar == "16:9":
+        composite_lock = (
+            "Preserve the exact 3-column 4-panel composite grid layout, crisp thin 1-2px white divider lines, "
+            "and neck-to-shoe headless wardrobe cropping in the center and right columns."
+        )
+    elif norm_slot == "expression":
+        composite_lock = (
+            "Preserve the exact 3-column by 2-row (3x2) 6-panel expression grid layout, clean panel divider lines, "
+            "identical facial biometric identity, hairstyle silhouette, and wardrobe collar across all six expression panels "
+            "without merging, cropping, or altering the sheet layout."
+        )
+    else:
+        composite_lock = ""
 
     if gate.routing_mode in ("full", "light_override"):
         layer_1 = gate.layer_1_text
@@ -773,7 +896,7 @@ def compile_upscale_2k_prompt(
         layer_2 = gate.layer_2_template.format(
             STUDIO_BACKDROP_TONE=studio_backdrop_tone or "neutral medium-grey",
         )
-        parts = [UPSCALE_2K_LOCK_PREFIX, base_positive_prompt.strip()]
+        parts = [UPSCALE_2K_LOCK_PREFIX, composite_lock, base_positive_prompt.strip()]
         if has_override:
             # User manual override remains primary subject directive while still enforcing frozen 2K micro-detail
             if layer_1 not in base_positive_prompt:
@@ -790,7 +913,8 @@ def compile_upscale_2k_prompt(
             style_family,
             _STYLIZED_2K_QUALITY_DIRECTIVES["anime_2d"],
         )
-        positive_prompt = f"{UPSCALE_2K_LOCK_PREFIX} {fam_directive} {base_positive_prompt.strip()}".strip()
+        parts = [UPSCALE_2K_LOCK_PREFIX, composite_lock, fam_directive, base_positive_prompt.strip()]
+        positive_prompt = " ".join(p for p in parts if p).strip()
         negative_prompt = base_negative_prompt
         layers_applied = ["upscale_2k_lock", f"style_family_{style_family}"]
 

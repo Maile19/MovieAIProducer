@@ -792,3 +792,164 @@ def test_seedream_5_5_payload_and_misconfigured_endpoint_guard(tmp_path):
         assert len(seen_payloads) == 2
 
 
+def test_ping_connection_google_flow_and_seedream_validation(tmp_path):
+    """Verify google-flow ping handles synchronous check_socks5_health dict and seedream rejects aliyuncs."""
+    adapter = UniversalImageAdapter(storage_path=tmp_path)
+
+    with patch("backend.app.core.proxy_health.check_socks5_health", return_value={"healthy": False, "detail": "Proxy offline"}):
+        res_off = asyncio.run(adapter.ping_connection("google-flow", "https://labs.google/fx/api", ""))
+        assert res_off["ok"] is False
+        assert "Proxy offline" in res_off["message"]
+
+    with patch("backend.app.core.proxy_health.check_socks5_health", return_value={"healthy": True, "detail": "SOCKS5 handshake ok"}):
+        res_on = asyncio.run(adapter.ping_connection("google_flow", "https://labs.google/fx/api", ""))
+        assert res_on["ok"] is True
+        assert "SOCKS5" in res_on["message"]
+
+    res_seed = asyncio.run(
+        adapter.ping_connection(
+            "seedream-5-5",
+            "https://ws-os66oybk9aerfdmb.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+            "sk-test",
+            model_id="seedream-5.5",
+        )
+    )
+    assert res_seed["ok"] is False
+    assert "aliyuncs.com" in res_seed["message"]
+
+
+def test_9router_uses_effective_key_and_preserves_primary_errors(tmp_path):
+    """Verify 9router uses effective_ninerouter_api_key when DB key is empty, and primary errors aren't masked."""
+    adapter = UniversalImageAdapter(storage_path=tmp_path)
+    seen_auth_headers = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_auth_headers.append(request.headers.get("Authorization"))
+        if "dashscope" in str(request.url):
+            return httpx.Response(403, json={"code": "AccessDenied.Unpurchased", "message": "Access denied"})
+        if "127.0.0.1:8080" in str(request.url):
+            if request.headers.get("Authorization"):
+                return httpx.Response(200, json={"data": [{"b64_json": TINY_PNG_B64}]})
+            return httpx.Response(401, json={"error": {"message": "Missing API key"}})
+        return httpx.Response(500)
+
+    with patch(
+        "backend.app.infrastructure.universal_image_adapter.httpx.AsyncClient",
+        side_effect=lambda **kwargs: REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)),
+    ):
+        # 1. Empty api_key_override on 9router must still attach effective_ninerouter_api_key
+        res_nr = asyncio.run(
+            adapter.generate_image(
+                UniversalImageRequest(
+                    provider_id="9router",
+                    model_id="gemini-3.1-flash-image",
+                    prompt="Portrait",
+                    api_key_override="",
+                    enable_fallback=False,
+                )
+            )
+        )
+        assert res_nr.provider_id == "9router"
+        assert seen_auth_headers[-1] and seen_auth_headers[-1].startswith("Bearer ")
+
+        # 2. Non-retryable 403 on qwen-image-3 must surface DashScope 403 directly without masking via 9Router
+        with pytest.raises(RuntimeError) as exc_403:
+            asyncio.run(
+                adapter.generate_image(
+                    UniversalImageRequest(
+                        provider_id="qwen-image-3",
+                        model_id="qwen-image-3.0",
+                        prompt="Portrait",
+                        aspect_ratio="16:9",
+                        api_key_override="sk-dash-test",
+                        enable_fallback=True,
+                    )
+                )
+            )
+        assert "403" in str(exc_403.value)
+        assert "AccessDenied.Unpurchased" in str(exc_403.value)
+
+    # 3. Transient failure where 9Router fallback also fails must preserve both primary and fallback errors
+    async def fail_primary(req, w, h):
+        raise RuntimeError("Upstream 503 temporary outage")
+
+    async def fail_fallback(req, w, h, reason):
+        raise TimeoutError("9router read timeout")
+
+    with patch.object(adapter, "_generate_ideogram", side_effect=fail_primary), patch.object(
+        adapter, "_execute_9router_fallback", side_effect=fail_fallback
+    ):
+        with pytest.raises(RuntimeError) as exc_both:
+            asyncio.run(
+                adapter.generate_image(
+                    UniversalImageRequest(
+                        provider_id="ideogram-4-0",
+                        prompt="Portrait",
+                        api_key_override="ideo-key",
+                        enable_fallback=True,
+                    )
+                )
+            )
+        assert "Upstream 503 temporary outage" in str(exc_both.value)
+        assert "Auto-fallback 9Router also failed" in str(exc_both.value)
+
+
+def test_oversized_2k_anchor_compressed_without_modifying_disk_file(tmp_path):
+    """Oversized >1.5MB 2K PNG anchors are safely downscaled/compressed in memory without modifying disk originals."""
+    import random
+    from PIL import Image
+    from backend.app.infrastructure.universal_image_adapter import _prepare_reference_bytes
+
+    rng = random.Random(42)
+    img = Image.new("RGB", (2048, 2048))
+    # High-entropy noise guarantees raw PNG > 1.5MB
+    raw_rgb = rng.randbytes(2048 * 2048 * 3)
+    img = Image.frombytes("RGB", (2048, 2048), raw_rgb)
+    big_png = tmp_path / "card1_2k.png"
+    img.save(big_png, format="PNG")
+    orig_bytes = big_png.read_bytes()
+    assert len(orig_bytes) > 1_500_000
+
+    prepared = _prepare_reference_bytes(str(big_png), max_bytes=1_500_000, max_dim=1280)
+    assert prepared is not None
+    comp_bytes, mime, fname = prepared
+    assert mime == "image/jpeg"
+    assert fname.endswith(".jpg")
+    assert len(comp_bytes) <= 1_500_000
+    # Original 2K file on disk must remain 100% untouched
+    assert big_png.read_bytes() == orig_bytes
+
+
+def test_dashscope_aspect_ratio_mapping_and_modal_override(client):
+    """Verify qwen-image-3 maps 16:9/3:4/1:1 to DashScope-safe sizes and respect_request_provider honors modal override."""
+    from backend.app.api.v1.render_settings import resolve_effective_render_provider
+
+    assert UniversalImageAdapter._resolve_dashscope_size(1344, 768, "16:9", "qwen-image-3.0") == "1664*928"
+    assert UniversalImageAdapter._resolve_dashscope_size(768, 1024, "3:4", "qwen-image-3.0") == "1140*1472"
+    assert UniversalImageAdapter._resolve_dashscope_size(1024, 1024, "1:1", "qwen-image-3.0") == "1328*1328"
+
+    proj_id = "test-modal-override-proj"
+    client.put(
+        f"/api/v1/projects/{proj_id}/render-provider",
+        json={
+            "activeProviderId": "seedream-5-5",
+            "applyToAllScenes": True,
+            "configs": {
+                "seedream-5-5": {"baseUrl": "https://ark.ap-southeast.bytepluses.com/api/v3", "apiKey": "sk-s", "modelId": "seedream-5.5"},
+                "gemini-direct": {"baseUrl": "https://generativelanguage.googleapis.com/v1beta", "apiKey": "AIza-modal", "modelId": "gemini-3.8-flash"},
+            },
+            "freePortals": [],
+        },
+    )
+    resolved = resolve_effective_render_provider(
+        project_id=proj_id,
+        requested_provider="gemini-direct",
+        requested_model=None,
+        ignored_override_values=("ag_gemini_flash", "default", None),
+        respect_request_provider=True,
+    )
+    assert resolved["provider_id"] == "gemini-direct"
+    assert resolved["api_key"] == "AIza-modal"
+
+
+

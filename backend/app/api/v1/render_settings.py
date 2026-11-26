@@ -157,12 +157,14 @@ def resolve_effective_render_provider(
     ignored_override_values: tuple[Optional[str], ...] = ("default", None),
     default_provider: str = "9router",
     default_model: Optional[str] = None,
+    respect_request_provider: bool = False,
 ) -> dict[str, Any]:
     """Resolve effective render provider & model respecting global apply_to_all_scenes precedence.
 
     When project_render_settings has apply_to_all_scenes=True and an active_provider_id,
     the saved global provider takes precedence over stale/implicit per-request provider values
-    (e.g. a frontend sending '9router' with 'ag/gemini-3.8-flash').
+    (e.g. a frontend sending '9router' with 'ag/gemini-3.8-flash'), unless
+    ``respect_request_provider=True`` is explicitly requested (e.g. Add Character modal selector).
     """
     render_cfg = get_project_render_config(str(project_id)) if project_id else None
     active_prov_id = render_cfg.get("active_provider_id") if render_cfg else None
@@ -172,6 +174,30 @@ def resolve_effective_render_provider(
     ignored_norms = {normalize_provider_id(v) for v in ignored_override_values if v is not None}
     req_prov_norm = normalize_provider_id(req_prov_clean)
     is_ignored_req = (req_prov_clean is None) or (req_prov_clean in ignored_override_values) or (req_prov_norm in ignored_norms)
+
+    if respect_request_provider and not is_ignored_req and req_prov_clean is not None:
+        if render_cfg:
+            matched_key, cfg_override = _lookup_provider_config(render_cfg.get("configs", {}), req_prov_clean)
+            if cfg_override is not None and matched_key is not None:
+                stored_key = cfg_override.get("apiKey", "")
+                return {
+                    "provider_id": matched_key,
+                    "model_id": requested_model or cfg_override.get("modelId"),
+                    "base_url": cfg_override.get("baseUrl"),
+                    "api_key": decrypt_key(stored_key) if stored_key else "",
+                    "use_universal_adapter": True,
+                    "render_cfg": render_cfg,
+                    "apply_all": apply_all,
+                }
+        return {
+            "provider_id": req_prov_norm or req_prov_clean,
+            "model_id": requested_model,
+            "base_url": None,
+            "api_key": "",
+            "use_universal_adapter": True,
+            "render_cfg": render_cfg,
+            "apply_all": apply_all,
+        }
 
     if render_cfg and apply_all and active_prov_id:
         # Global Acuan is locked across the project; only reuse requested_model if the request
@@ -287,7 +313,7 @@ def save_render_settings(project_id: str, payload: RenderSettingsPayload):
         except Exception:
             existing_configs = {}
 
-    merged_configs: Dict[str, Any] = {}
+    merged_configs: Dict[str, Any] = dict(existing_configs)
     for pid, cfg in payload.configs.items():
         cfg_dict = cfg.model_dump()
         input_key = cfg_dict.get("apiKey", "").strip()
@@ -303,6 +329,8 @@ def save_render_settings(project_id: str, payload: RenderSettingsPayload):
 
         merged_configs[pid] = cfg_dict
 
+    canonical_active_provider = normalize_provider_id(payload.activeProviderId) or payload.activeProviderId
+
     conn.execute(
         """
         INSERT INTO project_render_settings
@@ -317,7 +345,7 @@ def save_render_settings(project_id: str, payload: RenderSettingsPayload):
         """,
         (
             project_id,
-            payload.activeProviderId,
+            canonical_active_provider,
             int(payload.applyToAllScenes),
             json.dumps(merged_configs),
             json.dumps([p.model_dump() for p in payload.freePortals]),
@@ -329,7 +357,7 @@ def save_render_settings(project_id: str, payload: RenderSettingsPayload):
     return {
         "status": "saved",
         "projectId": project_id,
-        "activeProviderId": payload.activeProviderId,
+        "activeProviderId": canonical_active_provider,
         "applyToAllScenes": payload.applyToAllScenes,
     }
 
@@ -395,7 +423,8 @@ async def test_render_provider_key(project_id: str, payload: TestKeyPayload):
         if row and row["provider_configs_json"]:
             try:
                 configs = json.loads(row["provider_configs_json"])
-                stored_key = configs.get(payload.providerId, {}).get("apiKey", "")
+                _, matched_cfg = _lookup_provider_config(configs, payload.providerId)
+                stored_key = (matched_cfg or {}).get("apiKey", "")
                 key_to_use = decrypt_key(stored_key)
             except Exception:
                 pass

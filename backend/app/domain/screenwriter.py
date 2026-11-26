@@ -110,6 +110,8 @@ def sanitize_negative_prompts_for_style(
                 if fb in t_lower:
                     if family == "anime_2d" and fb == "cartoon" and "3d" in t_lower:
                         continue
+                    if family == "photorealistic" and fb == "photo" and t_lower in ("passport photo", "id photo"):
+                        continue
                     has_conflict = True
                     break
             if not has_conflict:

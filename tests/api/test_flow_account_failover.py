@@ -8,8 +8,15 @@ import uuid
 
 from PIL import Image
 import pytest
+from sqlalchemy import create_engine
 
 from backend.app.infrastructure import universal_image_adapter as uia
+from backend.app.infrastructure.database.base import Base
+from backend.app.infrastructure.database.models.flow import (
+    FlowAccountModel,
+    FlowImageJobModel,
+    FlowSettingModel,
+)
 from backend.workers import flow_image_worker as fiw
 
 
@@ -20,63 +27,19 @@ def _tiny_png_bytes() -> bytes:
 
 
 def _init_temp_flow_db(db_path: Path, profile_root: Path, account_statuses: dict[int, str] | None = None) -> None:
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(
+        bind=engine,
+        tables=[
+            FlowAccountModel.__table__,
+            FlowImageJobModel.__table__,
+            FlowSettingModel.__table__,
+        ],
+    )
+    engine.dispose()
+
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute(
-        """
-        CREATE TABLE flow_accounts (
-            id INTEGER PRIMARY KEY,
-            label VARCHAR(64) NOT NULL,
-            profile_dir VARCHAR(255) NOT NULL,
-            status VARCHAR(32) NOT NULL DEFAULT 'active',
-            cooldown_until DATETIME,
-            daily_count INTEGER NOT NULL DEFAULT 0,
-            last_reset_date VARCHAR(10) NOT NULL,
-            total_count INTEGER NOT NULL DEFAULT 0,
-            consecutive_failures INTEGER NOT NULL DEFAULT 0,
-            last_error TEXT,
-            last_used_at DATETIME,
-            updated_at DATETIME NOT NULL
-        );
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE flow_image_jobs (
-            id CHAR(36) PRIMARY KEY,
-            project_id CHAR(36),
-            scene_id CHAR(36),
-            shot_id CHAR(36),
-            character_id CHAR(36),
-            asset_slot VARCHAR(32),
-            target_type VARCHAR(32),
-            state_id CHAR(36),
-            prompt TEXT NOT NULL,
-            aspect_ratio VARCHAR(10) NOT NULL DEFAULT '16:9',
-            reference_image_paths JSON,
-            preferred_account_id INTEGER,
-            assigned_account_id INTEGER,
-            status VARCHAR(20) NOT NULL DEFAULT 'queued',
-            output_filename VARCHAR(255),
-            image_url VARCHAR(512),
-            debug_screenshot_url VARCHAR(512),
-            error_message TEXT,
-            retry_count INTEGER NOT NULL DEFAULT 0,
-            max_retries INTEGER NOT NULL DEFAULT 3,
-            created_at DATETIME NOT NULL,
-            started_at DATETIME,
-            completed_at DATETIME
-        );
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE flow_settings (
-            key VARCHAR(64) PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-        """
-    )
 
     now = datetime.now(timezone.utc)
     today_str = now.strftime("%Y-%m-%d")

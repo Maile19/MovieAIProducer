@@ -2947,6 +2947,18 @@ def _resolve_sheet_family_profile(
     }
 
 
+_SLOT_URL_ATTR_MAP: dict[str, str] = {
+    "closeup": "closeup_image_url",
+    "front": "front_image_url",
+    "side": "side_image_url",
+    "three_quarter": "three_quarter_image_url",
+    "back": "back_image_url",
+    "tpose": "tpose_image_url",
+    "action": "action_image_url",
+    "expression": "expression_image_url",
+}
+
+
 def compile_sheet_prompt(
     character: CharacterModel,
     project: ProjectModel | None,
@@ -2959,25 +2971,7 @@ def compile_sheet_prompt(
     director_slots: DirectorCharacterDynamicSlots | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Pure compiler producing project-synced, 4-family style-authentic prompts for Cards 1-8 and dynamic states."""
-    norm_slot = (slot or "closeup").lower().strip()
-    if norm_slot in ("closeup", "close_up", "headshot", "portrait", "master_closeup", "slot_1"):
-        slot_key = "closeup"
-    elif norm_slot in ("three_quarter", "3/4", "threequarter", "turnaround_three_quarter"):
-        slot_key = "three_quarter"
-    elif norm_slot in ("tpose", "sheet_tpose", "t_pose"):
-        slot_key = "tpose"
-    elif norm_slot in ("action", "sheet_action"):
-        slot_key = "action"
-    elif norm_slot in ("expression", "sheet_expression", "slot_2"):
-        slot_key = "expression"
-    elif norm_slot in ("back", "turnaround_back"):
-        slot_key = "back"
-    elif norm_slot in ("side", "turnaround_side"):
-        slot_key = "side"
-    elif norm_slot == "state":
-        slot_key = "state"
-    else:
-        slot_key = "front"
+    slot_key = _normalize_sheet_slot(slot or "closeup", default="front")
 
     # Deterministic DNA Seed
     dna_seed = character.dna_seed or (int(hashlib.sha256(str(character.id).encode()).hexdigest()[:8], 16) % 900000 + 100000)
@@ -4293,6 +4287,10 @@ class CharacterAssetGenerateRequest(BaseModel):
     prompt_override: str | None = Field(default=None, description="Optional custom prompt")
     aspect_ratio: str | None = Field(default=None, description="Aspect ratio ('3:4', '16:9', '1:1')")
     character_id: str | None = Field(default=None, description="Optional character ID if called via project-level endpoint")
+    skip_existing: bool = Field(
+        default=False,
+        description="If true, skip generation and return the existing photo when the target slot already has a non-empty image URL.",
+    )
 
 
 class CharacterAttachJobRequest(BaseModel):
@@ -4326,16 +4324,6 @@ async def generate_character_asset(
         await session.commit()
     dna_seed = char.dna_seed
 
-    # 2. Upstream Project Database Synchronization
-    proj = (await session.execute(select(ProjectModel).where(ProjectModel.id == char.project_id))).scalar_one_or_none()
-    mpb_stmt = (
-        select(MasterProductionBibleModel)
-        .where(MasterProductionBibleModel.project_id == char.project_id)
-        .order_by(MasterProductionBibleModel.version.desc())
-        .limit(1)
-    )
-    mpb = (await session.execute(mpb_stmt)).scalar_one_or_none()
-
     target_state = None
     if payload.target_type == "state":
         if not payload.state_id:
@@ -4348,6 +4336,38 @@ async def generate_character_asset(
             raise HTTPException(status_code=404, detail="Character state not found")
 
     slot_to_compile = "state" if payload.target_type == "state" else (payload.angle or "front")
+    normalized_slot = _normalize_sheet_slot(slot_to_compile)
+
+    if payload.skip_existing:
+        if payload.target_type == "state":
+            existing_url = (target_state.image_url or "").strip() if target_state else ""
+        else:
+            attr_name = _SLOT_URL_ATTR_MAP.get(normalized_slot)
+            existing_url = (getattr(char, attr_name, None) or "").strip() if attr_name else ""
+
+        if existing_url:
+            return {
+                "status": "skipped",
+                "skipped": True,
+                "image_url": existing_url,
+                "provider": "skipped",
+                "model": None,
+                "target_type": payload.target_type,
+                "angle": normalized_slot,
+                "state_id": payload.state_id,
+                "dna_seed": dna_seed,
+                "message": "Slot already has an existing photo; skipped because skip_existing=True.",
+            }
+
+    # 2. Upstream Project Database Synchronization
+    proj = (await session.execute(select(ProjectModel).where(ProjectModel.id == char.project_id))).scalar_one_or_none()
+    mpb_stmt = (
+        select(MasterProductionBibleModel)
+        .where(MasterProductionBibleModel.project_id == char.project_id)
+        .order_by(MasterProductionBibleModel.version.desc())
+        .limit(1)
+    )
+    mpb = (await session.execute(mpb_stmt)).scalar_one_or_none()
     active_style_code = (
         (mpb.style_parameters.get("master_style_code") if mpb and mpb.style_parameters else None)
         or (proj.target_style_code if proj else None)
@@ -5559,18 +5579,6 @@ class CharacterPreviewUpscaleRequest(BaseModel):
 class CharacterPreviewRevertRequest(BaseModel):
     preview_token: str = Field(description="Active pre-creation staging preview token")
     slot: Literal["closeup", "expression", "front"] = Field(default="closeup")
-
-
-_SLOT_URL_ATTR_MAP: dict[str, str] = {
-    "closeup": "closeup_image_url",
-    "front": "front_image_url",
-    "side": "side_image_url",
-    "three_quarter": "three_quarter_image_url",
-    "back": "back_image_url",
-    "tpose": "tpose_image_url",
-    "action": "action_image_url",
-    "expression": "expression_image_url",
-}
 
 
 @router.post("/bible/characters/{character_id}/upscale-asset", status_code=status.HTTP_200_OK)

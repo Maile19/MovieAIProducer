@@ -34,6 +34,7 @@ from backend.app.infrastructure.sd35_client import (
 from backend.app.api.v1.render_settings import (
     get_project_render_config,
     decrypt_key,
+    normalize_provider_id,
     resolve_effective_render_provider,
 )
 from backend.app.infrastructure.universal_image_adapter import (
@@ -322,7 +323,7 @@ async def generate_scene_preview(
         char_front_path=front_cand,
     )
 
-    if effective_provider in ("google_flow", "google-flow"):
+    if normalize_provider_id(effective_provider) == "google-flow":
         flow_job = FlowImageJobModel(
             id=uuid.uuid4(),
             project_id=scene.project_id,
@@ -852,7 +853,7 @@ async def generate_shot_preview(
         char_front_path=front_cand,
     )
 
-    if effective_provider in ("google_flow", "google-flow"):
+    if normalize_provider_id(effective_provider) == "google-flow":
         flow_job = FlowImageJobModel(
             id=uuid.uuid4(),
             project_id=scene.project_id if scene else None,

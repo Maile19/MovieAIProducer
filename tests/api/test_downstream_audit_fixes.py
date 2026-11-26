@@ -6,12 +6,12 @@
 5. Card 5 (3/4 Hero Angle) enforces 45-degree shoulder/torso turn and non-frontal directives.
 """
 
+from datetime import datetime
+from pathlib import Path
 import sqlite3
-import tempfile
 import uuid
-from unittest.mock import MagicMock
 
-import pytest
+from sqlalchemy import create_engine
 
 from backend.app.api.v1.bible import (
     _extract_biometric_and_collar,
@@ -22,6 +22,7 @@ from backend.app.infrastructure.database.models.character import (
     CharacterModel,
     CharacterStateModel,
 )
+from backend.app.infrastructure.database.models.flow import FlowAccountModel
 from backend.app.infrastructure.database.models.project import (
     MasterProductionBibleModel,
     ProjectModel,
@@ -29,48 +30,93 @@ from backend.app.infrastructure.database.models.project import (
 from backend.workers.flow_image_worker import record_account_failure
 
 
-def test_record_account_failure_resets_to_active_when_under_threshold():
-    """Ensure accounts do not stay locked in 'busy' status on transient failures (<3 fails)."""
-    with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
-        conn = sqlite3.connect(tmp.name)
+def test_record_account_failure_resets_to_active_when_under_threshold(tmp_path: Path):
+    """Ensure accounts reset to 'active' under 3 fails, enter 'cooldown' at 3, and move to back of LRU."""
+    db_path = tmp_path / "test_flow_accounts.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    FlowAccountModel.__table__.create(bind=engine)
+    engine.dispose()
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
         cursor = conn.cursor()
-        cursor.execute(
+        cursor.executemany(
             """
-            CREATE TABLE flow_accounts (
-                id INTEGER PRIMARY KEY,
-                email TEXT,
-                status TEXT,
-                consecutive_failures INTEGER,
-                last_error TEXT,
-                cooldown_until TIMESTAMP,
-                updated_at TIMESTAMP
-            )
-            """
-        )
-        cursor.execute(
-            "INSERT INTO flow_accounts (id, email, status, consecutive_failures, updated_at) VALUES (1, 'pro1@flow.local', 'busy', 0, '2026-11-23T00:00:00Z')"
+            INSERT INTO flow_accounts (
+                id, label, profile_dir, status, daily_count, last_reset_date,
+                total_count, consecutive_failures, last_used_at, updated_at
+            ) VALUES (?, ?, ?, ?, 0, '2026-11-23', 0, 0, ?, ?)
+            """,
+            [
+                (1, "Akun Pro 1", "flow_profile_1", "busy", None, "2026-11-23T00:00:00+00:00"),
+                (2, "Akun Pro 2", "flow_profile_2", "active", "2026-11-23T01:00:00+00:00", "2026-11-23T01:00:00+00:00"),
+                (3, "Akun Pro 3", "flow_profile_3", "active", "2026-11-23T02:00:00+00:00", "2026-11-23T02:00:00+00:00"),
+            ],
         )
         conn.commit()
 
-        # 1st failure: should reset status to 'active'
+        def _active_lru_order() -> list[int]:
+            rows = cursor.execute(
+                """
+                SELECT id FROM flow_accounts
+                WHERE status = 'active'
+                ORDER BY
+                    CASE WHEN last_used_at IS NULL THEN 0 ELSE 1 END ASC,
+                    last_used_at ASC,
+                    id ASC
+                """
+            ).fetchall()
+            return [int(r["id"]) for r in rows]
+
+        assert _active_lru_order() == [2, 3]
+
+        # 1st failure: should reset status to 'active' and move account #1 to back of LRU
         record_account_failure(conn, 1, "Temporary canvas timeout")
-        row = cursor.execute("SELECT status, consecutive_failures, last_error FROM flow_accounts WHERE id = 1").fetchone()
-        assert row[0] == "active", f"Expected status 'active' but got {row[0]}"
-        assert row[1] == 1
-        assert "timeout" in row[2]
+        row = cursor.execute(
+            "SELECT status, consecutive_failures, last_error, last_used_at, cooldown_until "
+            "FROM flow_accounts WHERE id = 1"
+        ).fetchone()
+        assert row["status"] == "active", f"Expected status 'active' but got {row['status']}"
+        assert row["consecutive_failures"] == 1
+        assert "timeout" in row["last_error"]
+        assert row["cooldown_until"] is None
+        assert row["last_used_at"] is not None
+        fail1_used_at = datetime.fromisoformat(row["last_used_at"])
+        assert fail1_used_at > datetime.fromisoformat("2026-11-23T02:00:00+00:00")
+        assert _active_lru_order() == [2, 3, 1]
 
-        # 2nd failure: should still reset status to 'active'
+        # 2nd failure: should still reset status to 'active' and keep account #1 at back of LRU
         record_account_failure(conn, 1, "Network glitch")
-        row = cursor.execute("SELECT status, consecutive_failures FROM flow_accounts WHERE id = 1").fetchone()
-        assert row[0] == "active", f"Expected status 'active' but got {row[0]}"
-        assert row[1] == 2
+        row = cursor.execute(
+            "SELECT status, consecutive_failures, last_error, last_used_at, cooldown_until "
+            "FROM flow_accounts WHERE id = 1"
+        ).fetchone()
+        assert row["status"] == "active", f"Expected status 'active' but got {row['status']}"
+        assert row["consecutive_failures"] == 2
+        assert "Network glitch" in row["last_error"]
+        assert row["cooldown_until"] is None
+        assert row["last_used_at"] is not None
+        fail2_used_at = datetime.fromisoformat(row["last_used_at"])
+        assert fail2_used_at >= fail1_used_at
+        assert _active_lru_order() == [2, 3, 1]
 
-        # 3rd failure: threshold reached, should enter 'cooldown'
+        # 3rd failure: threshold reached, should enter 'cooldown' and exit active LRU queue
         record_account_failure(conn, 1, "Repeated crash")
-        row = cursor.execute("SELECT status, consecutive_failures, cooldown_until FROM flow_accounts WHERE id = 1").fetchone()
-        assert row[0] == "cooldown", f"Expected status 'cooldown' but got {row[0]}"
-        assert row[1] == 3
-        assert row[2] is not None
+        row = cursor.execute(
+            "SELECT status, consecutive_failures, last_error, last_used_at, cooldown_until "
+            "FROM flow_accounts WHERE id = 1"
+        ).fetchone()
+        assert row["status"] == "cooldown", f"Expected status 'cooldown' but got {row['status']}"
+        assert row["consecutive_failures"] == 3
+        assert "Repeated crash" in row["last_error"]
+        assert row["cooldown_until"] is not None
+        assert row["last_used_at"] is not None
+        fail3_used_at = datetime.fromisoformat(row["last_used_at"])
+        assert fail3_used_at >= fail2_used_at
+        assert datetime.fromisoformat(row["cooldown_until"]) > fail3_used_at
+        assert _active_lru_order() == [2, 3]
+    finally:
         conn.close()
 
 
@@ -176,11 +222,15 @@ def test_strict_production_constraints_card_2_vs_downstream():
     assert "3x2 grid" in c2["positive_prompt"]
     assert "Zero grids" not in c2["positive_prompt"], "Card 2 must NOT prohibit grids!"
 
-    # Card 3 (Full Body Front)
+    # Card 3 (4-Panel Character & Wardrobe Composite) — must allow 4-panel grid without 'zero grids'
     c3 = compile_sheet_prompt(character=char, project=proj, bible=mpb, slot="front")
     assert "[Strict Production Constraints:" in c3["positive_prompt"]
-    assert "zero grids" in c3["positive_prompt"].lower()
-    assert "zero collages" in c3["positive_prompt"].lower()
+    assert c3["recommended_aspect_ratio"] == "16:9"
+    assert c3["width"] == 1344 and c3["height"] == 768
+    assert "4-panel" in c3["positive_prompt"].lower()
+    assert "1-2px clean white" in c3["positive_prompt"].lower()
+    assert "no head shown" in c3["positive_prompt"].lower()
+    assert "zero grids" not in c3["positive_prompt"].lower(), "Card 3 4-panel composite must NOT prohibit grids!"
 
     # Card 5 (3/4 Hero Angle)
     c5 = compile_sheet_prompt(character=char, project=proj, bible=mpb, slot="three_quarter")

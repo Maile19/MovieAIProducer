@@ -148,10 +148,10 @@ PROVIDER_2K_CAPABILITIES: dict[str, dict[str, Any]] = {
     },
     "gpt-2-6": {
         "native_2k": False,
-        "image_reference": False,
-        "separate_negative": True,
+        "image_reference": True,
+        "separate_negative": False,
         "direct_http_api": True,
-        "notes": "OpenAI /images/generations capped at 1K square and no image_reference wiring.",
+        "notes": "OpenAI /images/generations & /images/edits capped at 1K/1536px with multipart image reference.",
     },
 }
 
@@ -257,28 +257,71 @@ def _resolve_dimensions(
     return w, h
 
 
+def _detect_raster_mime(raw: bytes, fallback_suffix: str = ".png") -> str:
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw.startswith(b"RIFF") and len(raw) >= 12 and raw[8:12] == b"WEBP":
+        return "image/webp"
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    suf = fallback_suffix.lower()
+    if suf in (".jpg", ".jpeg"):
+        return "image/jpeg"
+    if suf == ".webp":
+        return "image/webp"
+    return "image/png"
+
+
+def _prepare_reference_bytes(
+    ref_path: str,
+    max_bytes: int = 1_500_000,
+    max_dim: int = 1280,
+) -> Optional[tuple[bytes, str, str]]:
+    """Load reference image bytes, safely downscaling/compressing oversized 2K files without altering disk originals."""
+    if not ref_path:
+        return None
+    p = Path(ref_path)
+    if not (p.exists() and p.is_file() and p.stat().st_size > 0):
+        return None
+    raw = p.read_bytes()
+    mime = _detect_raster_mime(raw, p.suffix)
+    if len(raw) <= max_bytes:
+        return raw, mime, p.name
+
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
+            rgb_img = img.convert("RGB")
+            orig_w, orig_h = rgb_img.size
+            if max(orig_w, orig_h) > max_dim:
+                scale = max_dim / float(max(orig_w, orig_h))
+                new_w = max(1, int(orig_w * scale))
+                new_h = max(1, int(orig_h * scale))
+                rgb_img = rgb_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+            for quality in (92, 85, 76):
+                buf = io.BytesIO()
+                rgb_img.save(buf, format="JPEG", quality=quality, optimize=True)
+                compressed = buf.getvalue()
+                if len(compressed) <= max_bytes or quality == 76:
+                    return compressed, "image/jpeg", f"{p.stem}.jpg"
+    except Exception as exc:
+        logger.warning("reference_image_compress_failed", path=str(p), error=str(exc))
+
+    return raw, mime, p.name
+
+
 def _encode_first_reference(
     reference_image_paths: Optional[List[str]],
+    max_dim: int = 1280,
 ) -> Optional[tuple[str, str, str]]:
     """Return (base64_str, mime_type, data_uri) for the first valid reference image on disk."""
     if not reference_image_paths:
         return None
     for ref_path in reference_image_paths:
-        if not ref_path:
+        prepared = _prepare_reference_bytes(ref_path, max_dim=max_dim)
+        if not prepared:
             continue
-        p = Path(ref_path)
-        if not (p.exists() and p.is_file() and p.stat().st_size > 0):
-            continue
-        raw = p.read_bytes()
-        mime = "image/png"
-        if raw.startswith(b"\xff\xd8\xff"):
-            mime = "image/jpeg"
-        elif raw.startswith(b"RIFF") and len(raw) >= 12 and raw[8:12] == b"WEBP":
-            mime = "image/webp"
-        elif p.suffix.lower() in (".jpg", ".jpeg"):
-            mime = "image/jpeg"
-        elif p.suffix.lower() == ".webp":
-            mime = "image/webp"
+        raw, mime, _ = prepared
         b64 = base64.b64encode(raw).decode("utf-8")
         return b64, mime, f"data:{mime};base64,{b64}"
     return None
@@ -412,7 +455,8 @@ class UniversalImageAdapter:
                 # 2. 9Router Local VPS
                 elif provider_id == "9router":
                     probe_url = f"{clean_url}/models"
-                    headers = {"Authorization": f"Bearer {clean_key}"} if clean_key else {}
+                    eff_key = clean_key or (self.settings.effective_ninerouter_api_key or "").strip()
+                    headers = {"Authorization": f"Bearer {eff_key}"} if eff_key else {}
                     res = await client.get(probe_url, headers=headers)
                     if res.status_code == 200:
                         return {"ok": True, "message": "✓ 9Router: Local router gateway online & reachable (200 OK)"}
@@ -441,12 +485,12 @@ class UniversalImageAdapter:
                     return {"ok": False, "message": f"HTTP {res.status_code}: {res.text[:120]}"}
 
                 # 5. Google Flow (Proxy check)
-                elif provider_id == "google-flow":
+                elif provider_id in ("google-flow", "google_flow"):
                     from backend.app.core.proxy_health import check_socks5_health
-                    is_online = await check_socks5_health()
-                    if is_online:
-                        return {"ok": True, "message": "✓ Google Flow: SOCKS5 Android proxy tunnel is ONLINE"}
-                    return {"ok": False, "message": "Google Flow SOCKS5 proxy is OFFLINE"}
+                    health = check_socks5_health()
+                    if health.get("healthy"):
+                        return {"ok": True, "message": f"✓ Google Flow: {health.get('detail', 'SOCKS5 Android proxy tunnel is ONLINE')}"}
+                    return {"ok": False, "message": health.get("detail") or "Google Flow SOCKS5 proxy is OFFLINE"}
 
                 # 6. Ideogram 4.0
                 elif provider_id == "ideogram-4-0":
@@ -507,10 +551,31 @@ class UniversalImageAdapter:
 
                 # 11. Standard OpenAI-compatible (GPT 2.6, Seedream BytePlus, Grok, etc.)
                 else:
+                    if provider_id == "seedream-5-5" and "aliyuncs.com" in clean_url.lower() and (
+                        not model_id or model_id.strip().lower().startswith("seedream")
+                    ):
+                        return {
+                            "ok": False,
+                            "message": (
+                                "Seedream 5.5 endpoint salah: Alibaba Cloud (aliyuncs.com) tidak menyediakan model 'seedream-5.5'. "
+                                "Gunakan endpoint BytePlus ModelArk (https://ark.ap-southeast.bytepluses.com/api/v3)."
+                            ),
+                        }
                     probe_url = f"{clean_url}/models"
                     headers = {"Authorization": f"Bearer {clean_key}"} if clean_key else {}
                     res = await client.get(probe_url, headers=headers)
                     if res.status_code == 200:
+                        if provider_id == "seedream-5-5" and model_id:
+                            try:
+                                models_data = res.json().get("data") or []
+                                model_ids = {str(m.get("id", "")).lower() for m in models_data if isinstance(m, dict)}
+                                if model_ids and model_id.strip().lower() not in model_ids:
+                                    return {
+                                        "ok": False,
+                                        "message": f"Endpoint reachable (200 OK), tetapi model '{model_id}' tidak ditemukan pada endpoint {clean_url}.",
+                                    }
+                            except Exception:
+                                pass
                         return {"ok": True, "message": f"✓ {provider_id}: OpenAI-compatible endpoint authenticated (200 OK)"}
                     elif res.status_code in (401, 403):
                         return {"ok": False, "message": f"Auth error ({res.status_code}): Invalid API Key"}
@@ -522,15 +587,43 @@ class UniversalImageAdapter:
             except Exception as e:
                 return {"ok": False, "message": f"Connection failed: {str(e)}"}
 
+    @staticmethod
+    def _is_non_retryable_provider_error(exc: Exception) -> bool:
+        """Return True for config/auth/billing errors that should surface directly without masking via fallback."""
+        if isinstance(exc, ValueError):
+            return True
+        msg = str(exc).lower()
+        return any(
+            marker in msg
+            for marker in (
+                "api key is required",
+                "endpoint misconfigured",
+                "aliyuncs.com",
+                "(401)",
+                "(403)",
+                "invalid_api_key",
+                "accessdenied",
+                "unpurchased",
+                "no credits remaining",
+                "insufficient_quota",
+                "billing",
+            )
+        )
+
     async def generate_image(self, request: UniversalImageRequest) -> UniversalImageResult:
-        """Route generation request to appropriate protocol handler with auto-fallback to 9Router."""
-        provider_id = (request.provider_id or "gemini-direct").strip()
+        """Route generation request to appropriate protocol handler with safe auto-fallback to 9Router."""
+        provider_id = (request.provider_id or "gemini-direct").strip().lower()
+        if provider_id == "google_flow":
+            provider_id = "google-flow"
+        elif provider_id == "nano-banana-2.1":
+            provider_id = "nano-banana-2-1"
+
         width, height = _resolve_dimensions(
             request.aspect_ratio, request.width, request.height, provider_id=provider_id
         )
 
         try:
-            if provider_id in ("gemini-direct", "nano-banana-2-1", "nano-banana-2.1"):
+            if provider_id in ("gemini-direct", "nano-banana-2-1"):
                 return await self._generate_gemini_direct(request, width, height)
             elif provider_id == "qwen-image-3":
                 return await self._generate_dashscope(request, width, height)
@@ -559,13 +652,21 @@ class UniversalImageAdapter:
                 error=str(primary_error),
                 prompt=request.prompt[:60],
             )
-            if not request.enable_fallback or provider_id == "9router":
+            if (
+                not request.enable_fallback
+                or provider_id in ("9router", "ag_gemini_flash", "nine_router", "antigravity")
+                or self._is_non_retryable_provider_error(primary_error)
+            ):
                 raise primary_error
 
             # Execute automatic fallback to 9Router
             logger.info("initiating_auto_fallback_to_9router", reason=str(primary_error))
-            fallback_res = await self._execute_9router_fallback(request, width, height, str(primary_error))
-            return fallback_res
+            try:
+                fallback_res = await self._execute_9router_fallback(request, width, height, str(primary_error))
+                return fallback_res
+            except Exception as fallback_error:
+                fb_detail = str(fallback_error).strip() or type(fallback_error).__name__
+                raise RuntimeError(f"{primary_error} | Auto-fallback 9Router also failed: {fb_detail}") from primary_error
 
     async def _generate_gemini_direct(
         self, req: UniversalImageRequest, width: int, height: int
@@ -611,15 +712,17 @@ class UniversalImageAdapter:
                 gen_url = f"{base_url}/models/{model_id}:generateContent?key={api_key}"
                 parts: list[dict[str, Any]] = [{"text": effective_prompt}]
 
-                # Include visual anchor reference images if provided
+                # Include visual anchor reference images if provided (safely compressed if >1.5MB)
+                ref_max_dim = 1536 if req.filename_suffix else 1280
                 if req.reference_image_paths:
                     for ref_path in req.reference_image_paths[:3]:
-                        p = Path(ref_path)
-                        if p.exists() and p.is_file():
-                            ref_b64 = base64.b64encode(p.read_bytes()).decode("utf-8")
+                        prepared = _prepare_reference_bytes(ref_path, max_dim=ref_max_dim)
+                        if prepared:
+                            ref_raw, ref_mime, _ = prepared
+                            ref_b64 = base64.b64encode(ref_raw).decode("utf-8")
                             parts.append({
                                 "inlineData": {
-                                    "mimeType": "image/jpeg" if p.suffix.lower() in (".jpg", ".jpeg") else "image/png",
+                                    "mimeType": ref_mime,
                                     "data": ref_b64,
                                 }
                             })
@@ -627,11 +730,15 @@ class UniversalImageAdapter:
                 gen_config: dict[str, Any] = {
                     "responseModalities": ["TEXT", "IMAGE"],
                 }
+                ar = req.aspect_ratio if req.aspect_ratio in ("1:1", "16:9", "3:4", "9:16", "4:3") else None
                 if max(width, height) >= 1536:
-                    ar = req.aspect_ratio if req.aspect_ratio in ("1:1", "16:9", "3:4", "9:16", "4:3") else "1:1"
+                    gen_config["imageConfig"] = {
+                        "aspectRatio": ar or "1:1",
+                        "imageSize": "2K",
+                    }
+                elif ar:
                     gen_config["imageConfig"] = {
                         "aspectRatio": ar,
-                        "imageSize": "2K",
                     }
 
                 payload = {
@@ -640,11 +747,13 @@ class UniversalImageAdapter:
                 }
                 res = await client.post(gen_url, json=payload)
                 if res.status_code != 200:
-                    raise RuntimeError(f"Gemini API failed ({res.status_code}): {res.text[:200]}")
+                    raise RuntimeError(f"Gemini API failed ({res.status_code}): {res.text[:240]}")
                 data = res.json()
                 candidates = data.get("candidates") or []
                 text_messages: list[str] = []
+                finish_reason = ""
                 if candidates:
+                    finish_reason = str(candidates[0].get("finishReason") or "")
                     for part in candidates[0].get("content", {}).get("parts", []):
                         if "text" in part:
                             text_messages.append(part["text"])
@@ -654,10 +763,12 @@ class UniversalImageAdapter:
                             break
 
                 if not raw_bytes:
+                    block_reason = str((data.get("promptFeedback") or {}).get("blockReason") or "")
                     text_summary = " ".join(text_messages).strip()
+                    reason_note = f" (blockReason={block_reason})" if block_reason else (f" (finishReason={finish_reason})" if finish_reason and finish_reason != "STOP" else "")
                     detail = f": {text_summary[:200]}" if text_summary else ""
                     raise RuntimeError(
-                        f"Gemini model '{model_id}' returned text only without image data{detail}. Falling back."
+                        f"Gemini model '{model_id}' returned text only without image data{reason_note}{detail}."
                     )
 
         local_path, local_url, mime_type, actual_w, actual_h = _save_raw_image(
@@ -1090,28 +1201,19 @@ class UniversalImageAdapter:
         return candidates
 
     @staticmethod
-    def _collect_reference_files(reference_image_paths: Optional[List[str]]) -> list[tuple[str, bytes, str]]:
-        """Read valid reference image files from disk for multipart upload."""
+    def _collect_reference_files(
+        reference_image_paths: Optional[List[str]],
+        max_dim: int = 1280,
+    ) -> list[tuple[str, bytes, str]]:
+        """Read valid reference image files from disk for multipart upload, safely compressing oversized 2K anchors."""
         files_out: list[tuple[str, bytes, str]] = []
         if not reference_image_paths:
             return files_out
         for ref_path in reference_image_paths[:4]:
-            if not ref_path:
-                continue
-            p = Path(ref_path)
-            if not (p.exists() and p.is_file() and p.stat().st_size > 0):
-                continue
-            raw = p.read_bytes()
-            mime = "image/png"
-            if raw.startswith(b"\xff\xd8\xff"):
-                mime = "image/jpeg"
-            elif raw.startswith(b"RIFF") and len(raw) >= 12 and raw[8:12] == b"WEBP":
-                mime = "image/webp"
-            elif p.suffix.lower() in (".jpg", ".jpeg"):
-                mime = "image/jpeg"
-            elif p.suffix.lower() == ".webp":
-                mime = "image/webp"
-            files_out.append((p.name, raw, mime))
+            prepared = _prepare_reference_bytes(ref_path, max_dim=max_dim)
+            if prepared:
+                raw, mime, fname = prepared
+                files_out.append((fname, raw, mime))
         return files_out
 
     async def _extract_openai_image_bytes(
@@ -1214,16 +1316,22 @@ class UniversalImageAdapter:
     ) -> UniversalImageResult:
         """Execute generation using standard /images/generations endpoint."""
         prov_norm = (req.provider_id or "").strip().lower()
+        is_ninerouter = prov_norm in ("9router", "ag_gemini_flash", "nine_router", "antigravity")
         default_base_url = (
             "https://api.openai.com/v1"
             if prov_norm == "gpt-2-6"
             else "https://ark.ap-southeast.bytepluses.com/api/v3"
             if prov_norm == "seedream-5-5"
-            else "http://127.0.0.1:8080/v1"
+            else self.settings.effective_ninerouter_base_url
         )
         base_url = (req.base_url_override or default_base_url).rstrip("/")
         api_key = (req.api_key_override or "").strip()
-        model_id = (req.model_id or "ag/gemini-3.8-flash").strip()
+        if is_ninerouter and not api_key:
+            api_key = (self.settings.effective_ninerouter_api_key or "").strip()
+        default_nr_model = (self.settings.ninerouter_default_model or "gemini-3.1-flash-image").strip()
+        model_id = (req.model_id or default_nr_model).strip()
+        if is_ninerouter and model_id == "ag/gemini-3.8-flash" and default_nr_model and default_nr_model != "ag/gemini-3.8-flash":
+            model_id = default_nr_model
 
         raw_bytes: Optional[bytes] = None
         used_model_id = model_id
@@ -1258,7 +1366,8 @@ class UniversalImageAdapter:
                 payload["seed"] = req.seed
 
             # Attach reference image for BytePlus Seedream 5.5 / reference-capable OpenAI-compatible models
-            ref_data = _encode_first_reference(req.reference_image_paths)
+            ref_max_dim = 1536 if req.filename_suffix else 1280
+            ref_data = _encode_first_reference(req.reference_image_paths, max_dim=ref_max_dim)
             if ref_data and prov_norm == "seedream-5-5":
                 _, _, data_uri = ref_data
                 payload["image"] = data_uri
@@ -1266,7 +1375,12 @@ class UniversalImageAdapter:
                 if any(v in model_id.lower() for v in ("4-0", "4.0", "4-5", "4.5", "lite")):
                     payload["sequential_image_generation"] = "disabled"
 
-            async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_seconds)) as client:
+            eff_timeout = (
+                min(self.timeout_seconds, float(self.settings.ninerouter_timeout_seconds or 45.0))
+                if is_ninerouter
+                else self.timeout_seconds
+            )
+            async with httpx.AsyncClient(timeout=httpx.Timeout(eff_timeout)) as client:
                 res = await client.post(call_url, headers=headers, json=payload)
 
                 # Retry once on BytePlus Seedream 400 size/parameter rejection using safe presets
@@ -1319,6 +1433,25 @@ class UniversalImageAdapter:
             mime_type=mime_type,
         )
 
+    @staticmethod
+    def _resolve_dashscope_size(width: int, height: int, aspect_ratio: str, model_id: str) -> str:
+        """Map requested aspect ratio to DashScope supported size strings."""
+        ar = (aspect_ratio or "").strip()
+        is_qwen_image = "qwen-image" in (model_id or "").lower()
+        if is_qwen_image:
+            if ar == "16:9" or width > height:
+                return "1664*928"
+            if ar == "3:4":
+                return "1140*1472"
+            if ar == "9:16":
+                return "928*1664"
+            return "1328*1328"
+        if ar == "16:9" or width > height:
+            return "1280*720"
+        if ar in ("3:4", "9:16") or height > width:
+            return "720*1280"
+        return "1024*1024"
+
     async def _generate_dashscope(
         self, req: UniversalImageRequest, width: int, height: int
     ) -> UniversalImageResult:
@@ -1336,6 +1469,7 @@ class UniversalImageAdapter:
             "Content-Type": "application/json",
             "X-DashScope-Async": "enable",
         }
+        dash_size = self._resolve_dashscope_size(width, height, req.aspect_ratio, model_id)
         payload = {
             "model": model_id,
             "input": {
@@ -1343,7 +1477,7 @@ class UniversalImageAdapter:
                 "negative_prompt": req.negative_prompt or "",
             },
             "parameters": {
-                "size": f"{width}*{height}",
+                "size": dash_size,
                 "n": 1,
             },
         }
@@ -1498,9 +1632,11 @@ class UniversalImageAdapter:
     ) -> UniversalImageResult:
         """Trigger generation through Google Flow SOCKS5 client or queue."""
         from backend.app.core.proxy_health import check_socks5_health
-        is_healthy = await check_socks5_health()
-        if not is_healthy:
-            raise RuntimeError("Google Flow SOCKS5 tunnel is offline. Please check Android proxy.")
+        health = check_socks5_health()
+        if not health.get("healthy"):
+            raise RuntimeError(
+                f"Google Flow SOCKS5 tunnel is offline ({health.get('detail', 'Please check Android proxy')})."
+            )
 
         # Fallback to local 9Router with note if direct interactive flow requires browser queue
         return await self._execute_9router_fallback(
@@ -1514,17 +1650,21 @@ class UniversalImageAdapter:
         height: int,
         reason: str,
     ) -> UniversalImageResult:
-        """Automated failover to 9Router when primary provider hits rate limit or errors."""
+        """Automated failover to 9Router when primary provider hits transient errors."""
         safe_w, safe_h = resolve_provider_dimensions("9router", width, height, req.aspect_ratio)
+        fallback_model = (self.settings.ninerouter_default_model or "gemini-3.1-flash-image").strip()
+        if fallback_model == "ag/gemini-3.8-flash":
+            fallback_model = "gemini-3.1-flash-image"
         fallback_req = UniversalImageRequest(
             provider_id="9router",
-            model_id="ag/gemini-3.8-flash",
+            model_id=fallback_model,
             prompt=req.prompt,
             negative_prompt=req.negative_prompt,
             aspect_ratio=req.aspect_ratio,
             width=safe_w,
             height=safe_h,
             seed=req.seed,
+            reference_image_paths=req.reference_image_paths,
             base_url_override=self.settings.effective_ninerouter_base_url,
             api_key_override=self.settings.effective_ninerouter_api_key,
             enable_fallback=False,
