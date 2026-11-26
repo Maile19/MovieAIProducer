@@ -34,9 +34,12 @@ from backend.app.domain.character_prompt_compiler import (
     DirectorCharacterDynamicSlots,
     UPSCALE_2K_LOCK_PREFIX,
     build_deterministic_dynamic_slots,
+    build_downstream_anchor_directives,
     compile_casting_closeup_prompt,
     compile_upscale_2k_prompt,
+    fold_negative_bans_into_positive,
     get_downstream_frozen_layers,
+    get_slot_negative_prefix,
     resolve_provider_dimensions,
     resolve_style_gate,
     resolve_upscale_2k_target_dimensions,
@@ -56,7 +59,7 @@ from backend.app.domain.screenwriter import (
     sanitize_negative_prompts_for_style,
 )
 from backend.app.core.proxy_health import DEFAULT_SOCKS5_URL, check_socks5_health, get_cached_socks5_health
-from backend.app.infrastructure.database.models.flow import FlowImageJobModel, FlowSettingModel
+from backend.app.infrastructure.database.models.flow import FlowAccountModel, FlowImageJobModel, FlowSettingModel
 from backend.app.infrastructure.database.models.project import (
     MasterProductionBibleModel,
     ProjectModel,
@@ -72,6 +75,7 @@ from backend.app.api.v1.render_settings import (
     _lookup_provider_config,
     get_project_render_config,
     decrypt_key,
+    normalize_provider_id,
     resolve_effective_render_provider,
 )
 from backend.app.infrastructure.universal_image_adapter import (
@@ -89,7 +93,7 @@ logger = logging.getLogger(__name__)
 
 
 async def _assert_socks5_healthy_for_flow(session: AsyncSession) -> None:
-    """Pre-flight check: Verifies Android SOCKS5 proxy handshake before accepting Google Flow jobs."""
+    """Pre-flight check: Verifies Android SOCKS5 proxy handshake and active Flow accounts before accepting Google Flow jobs."""
     stmt = select(FlowSettingModel).where(FlowSettingModel.key == "socks5_proxy")
     res = await session.execute(stmt)
     setting = res.scalar_one_or_none()
@@ -102,6 +106,17 @@ async def _assert_socks5_healthy_for_flow(session: AsyncSession) -> None:
                 "error_code": "SOCKS5_PROXY_OFFLINE",
                 "message": f"Proxy SOCKS5 Android ({health['proxy_url']}) sedang offline. Pastikan aplikasi SOCKS5 / reverse tunnel di HP Android sudah aktif.",
                 "proxy_detail": health["detail"],
+            },
+        )
+
+    acc_stmt = select(FlowAccountModel).where(FlowAccountModel.status.in_(["active", "busy", "cooldown"]))
+    accounts = (await session.execute(acc_stmt)).scalars().all()
+    if not accounts:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error_code": "FLOW_NO_ACTIVE_ACCOUNTS",
+                "message": "Belum ada akun Google Flow aktif/terdaftar di server. Tambahkan atau aktifkan akun Google Flow terlebih dahulu atau pilih provider AI lain di Render Provider.",
             },
         )
 
@@ -204,6 +219,7 @@ class CharacterPreviewRequest(BaseModel):
     target: str = Field(default="closeup", description="'closeup', 'expression', 'front', 'both', or 'all'")
     aspect_ratio: str | None = Field(default=None, description="Aspect ratio override, e.g. '3:4', '16:9', '1:1'")
     preview_token: str | None = None
+    respect_provider_override: bool = False
 
 
 class CharacterPreviewAttachRequest(BaseModel):
@@ -2298,7 +2314,7 @@ def _normalize_sheet_slot(slot: str | None, default: str = "front") -> str:
         return "tpose"
     if norm in ("action", "sheet_action"):
         return "action"
-    if norm in ("expression", "sheet_expression"):
+    if norm in ("expression", "sheet_expression", "slot_2"):
         return "expression"
     if norm in ("back", "turnaround_back"):
         return "back"
@@ -2952,7 +2968,7 @@ def compile_sheet_prompt(
         slot_key = "tpose"
     elif norm_slot in ("action", "sheet_action"):
         slot_key = "action"
-    elif norm_slot in ("expression", "sheet_expression"):
+    elif norm_slot in ("expression", "sheet_expression", "slot_2"):
         slot_key = "expression"
     elif norm_slot in ("back", "turnaround_back"):
         slot_key = "back"
@@ -3125,18 +3141,24 @@ def compile_sheet_prompt(
         if getattr(character, "front_image_url", None):
             ref_candidates.append(("Card 3 Full Body Front", character.front_image_url))
 
-        ref_note = f"Capturing the exact same {fam_spec['ref_noun']} from the reference Card 1 close-up and Card 3 front view. " if ref_candidates else ""
+        ref_labels = [lbl for lbl, u in ref_candidates if u]
+        anchor_directives = build_downstream_anchor_directives(
+            slot_key="side",
+            ref_labels=ref_labels,
+            ref_noun=fam_spec["ref_noun"],
+        )
+        ref_note = f"{anchor_directives} " if anchor_directives else ""
         lighting_segment = f"{eff_lighting} with a soft ground contact shadow." if is_frozen_active else f"illuminated by {eff_lighting} against a {eff_backdrop} with a soft ground contact shadow."
         positive_prompt = (
             f"Full-body {fam_spec['sheet_header']} 90-degree lateral side profile portrait of {char_name}, {biometric_profile}. {ref_note}"
-            "Full-length strict 90-degree lateral side-profile orthogonal view framed cleanly from top of head down to the soles of the footwear touching the ground with comfortable margins. "
-            "Standing upright in a natural, balanced neutral profile standing posture revealing precise lateral proportions and complete side costume construction matching "
+            "Full-length strict 90-degree lateral side-profile orthogonal view framed cleanly from top of head down to the soles of the footwear touching the studio floor with generous top and bottom margins. "
+            "Standing upright in a natural, balanced neutral profile standing posture revealing precise lateral proportions and 100% consistent side costume construction matching "
             f"{full_body_costume}. {eff_medium_desc} "
             f"Captured via {fam_spec['optics']}. {lighting_segment}"
         )
 
     elif slot_key == "three_quarter":
-        card_title = "Card 5: 3/4 Hero Angle (Oblique 45° • Hero Perspective)"
+        card_title = "Card 5: 3/4 Hero Angle (Oblique 45° • Full-Body Hero Perspective)"
         card_aspect = aspect_ratio or "3:4"
         width, height = (768, 1024)
         ref_candidates = []
@@ -3145,32 +3167,47 @@ def compile_sheet_prompt(
         if getattr(character, "front_image_url", None):
             ref_candidates.append(("Card 3 Full Body Front", character.front_image_url))
 
-        ref_note = f"Capturing the exact same {fam_spec['ref_noun']} from the reference Card 1 and Card 3 anchors. " if ref_candidates else ""
+        ref_labels = [lbl for lbl, u in ref_candidates if u]
+        anchor_directives = build_downstream_anchor_directives(
+            slot_key="three_quarter",
+            ref_labels=ref_labels,
+            ref_noun=fam_spec["ref_noun"],
+        )
+        ref_note = f"{anchor_directives} " if anchor_directives else ""
         lighting_segment = f"{eff_lighting} with soft ground contact shadow." if is_frozen_active else f"illuminated by {eff_lighting} against a {eff_backdrop} with soft ground contact shadow."
         positive_prompt = (
-            f"Full-body {fam_spec['sheet_header']} 45-degree three-quarter hero angle portrait of {char_name}, {biometric_profile}. {ref_note}"
-            "Full-length distinct 45-degree three-quarter oblique standing perspective framed cleanly from top of head down to the soles of the footwear with comfortable margins. "
-            "The subject's torso and shoulders are distinctly turned 45 degrees away from the optical axis with one shoulder forward toward the camera, breaking frontal symmetry and revealing volumetric depth and side garment drapery. "
-            "The head turns gently toward the viewer while the body maintains a strict 45-degree three-quarter oblique orientation. Strictly avoid flat orthogonal front-facing orientation (0-degree front view) or camera-parallel torso alignment. "
-            f"Standing in a confident three-quarter stance wearing complete consistent costume design matching {full_body_costume}. "
+            f"Full-body heroic three-quarter medium-full portrait ({fam_spec['sheet_header']}) at a 45-degree oblique angle of {char_name}, {biometric_profile}. {ref_note}"
+            "MANDATORY CAMERA FRAMING: Full-body 3/4 heroic view (head-to-toe or full-length down to the boots/footwear touching the studio floor with generous headroom and margin below the feet) — NEVER a close-up, headshot, or shoulder-cropped portrait. "
+            "The subject's torso and shoulders are distinctly turned 45 degrees away from the optical axis with one shoulder angled forward toward the camera, breaking frontal symmetry and displaying the complete jacket/coat, inner layers, belt/straps, trousers, and footwear from Card 3. "
+            "The head turns gently toward the viewer while the body maintains a strict 45-degree three-quarter oblique standing stance. Strictly avoid flat orthogonal front-facing orientation (0-degree front view) or camera-parallel torso alignment. "
+            f"Wearing complete 100% consistent costume design matching {full_body_costume}. "
             f"{eff_medium_desc} Captured via {fam_spec['optics']}. {lighting_segment}"
         )
 
     elif slot_key == "back":
-        card_title = "Card 6: Back View (Orthogonal 180° • Rear Anatomy & Gear)"
+        card_title = "Card 6: Back View (Orthogonal 180° • Rear Wardrobe & Anatomy)"
         card_aspect = aspect_ratio or "3:4"
         width, height = (768, 1024)
+        # Card 6 faces 180 degrees away (no front face visible): Card 3 MUST be Image 1 (Primary Anchor)
+        # so Panel 4 (right-hand column rear wardrobe view) dominates 100%, with Card 1 demoted to Image 2 (hair/age only).
         ref_candidates = []
-        if getattr(character, "closeup_image_url", None):
-            ref_candidates.append(("Card 1 Character Close-Up", character.closeup_image_url))
         if getattr(character, "front_image_url", None):
             ref_candidates.append(("Card 3 Full Body Front", character.front_image_url))
+        if getattr(character, "closeup_image_url", None):
+            ref_candidates.append(("Card 1 Character Close-Up", character.closeup_image_url))
 
-        ref_note = f"Capturing the exact same {fam_spec['ref_noun']} from the reference anchors in a direct 180-degree rear orthogonal view. " if ref_candidates else ""
+        ref_labels = [lbl for lbl, u in ref_candidates if u]
+        anchor_directives = build_downstream_anchor_directives(
+            slot_key="back",
+            ref_labels=ref_labels,
+            ref_noun=fam_spec["ref_noun"],
+        )
+        ref_note = f"{anchor_directives} " if anchor_directives else ""
         lighting_segment = f"{eff_lighting} with soft ground contact shadow." if is_frozen_active else f"illuminated by {eff_lighting} against a {eff_backdrop} with soft ground contact shadow."
         positive_prompt = (
-            f"Full-body {fam_spec['sheet_header']} 180-degree rear turnaround portrait of {char_name}, {biometric_profile}. {ref_note}"
-            "Full-length head-to-toe framing facing squarely away from the camera, capturing rear hair silhouette, shoulder anatomy, and complete back costume construction: "
+            f"Full-body {fam_spec['sheet_header']} 180-degree rear turnaround view of {char_name}, {biometric_profile}. {ref_note}"
+            "MANDATORY REAR POSE & WARDROBE LOCK: Full-length head-to-toe framing facing squarely 180 degrees away from the camera (only the back of the head, rear hair silhouette, and back of the body visible — NO front face). "
+            "Strictly reproduce 100% of the jacket/coat, coat length, upper-shoulder fur/collar distribution, back seams and straps, fabric texture, color palette, trousers, and boots exactly as depicted in the right-hand rear wardrobe panel of Card 3, without altering garment cut, shortening the coat, or substituting a cloak/capelet/robe: "
             f"{full_body_costume}. {eff_medium_desc} Captured via {fam_spec['optics']}. {lighting_segment}"
         )
 
@@ -3184,13 +3221,19 @@ def compile_sheet_prompt(
         if getattr(character, "front_image_url", None):
             ref_candidates.append(("Card 3 Full Body Front", character.front_image_url))
 
-        ref_note = f"Capturing the exact same {fam_spec['ref_noun']} from the reference anchors in a strict orthopedic calibration T-pose. " if ref_candidates else ""
+        ref_labels = [lbl for lbl, u in ref_candidates if u]
+        anchor_directives = build_downstream_anchor_directives(
+            slot_key="tpose",
+            ref_labels=ref_labels,
+            ref_noun=fam_spec["ref_noun"],
+        )
+        ref_note = f"{anchor_directives} " if anchor_directives else ""
         lighting_segment = eff_lighting if is_frozen_active else f"illuminated by {eff_lighting} against a {eff_backdrop}."
         positive_prompt = (
             f"Full-body {fam_spec['sheet_header']} technical T-pose calibration sheet of {char_name}, {biometric_profile}. {ref_note}"
-            "Full-length direct frontal view framed cleanly from top of head down to footwear with comfortable margins. "
+            "Full-length direct frontal view framed cleanly from top of head down to footwear touching the studio floor with generous margins (NEVER a close-up or waist-up crop). "
             "Standing upright with head level facing straight forward, arms extended horizontally to each side at exact 90-degree shoulder height, palms open facing forward, feet shoulder-width apart. "
-            f"Wearing complete consistent costume construction: {full_body_costume}. "
+            f"Wearing complete 100% consistent costume construction: {full_body_costume}. "
             f"{eff_medium_desc} Captured via {fam_spec['optics']}. {lighting_segment}"
         )
 
@@ -3204,12 +3247,18 @@ def compile_sheet_prompt(
         if getattr(character, "front_image_url", None):
             ref_candidates.append(("Card 3 Full Body Front", character.front_image_url))
 
-        ref_note = f"Capturing the exact same {fam_spec['ref_noun']} from the reference anchors in a dynamic narrative signature action pose. " if ref_candidates else ""
+        ref_labels = [lbl for lbl, u in ref_candidates if u]
+        anchor_directives = build_downstream_anchor_directives(
+            slot_key="action",
+            ref_labels=ref_labels,
+            ref_noun=fam_spec["ref_noun"],
+        )
+        ref_note = f"{anchor_directives} " if anchor_directives else ""
         lighting_segment = f"{eff_lighting} with dynamic ground contact shadow." if is_frozen_active else f"illuminated by {eff_lighting} against a {eff_backdrop} with dynamic ground contact shadow."
         positive_prompt = (
             f"Full-body {fam_spec['sheet_header']} dynamic action-stance portrait of {char_name}, {biometric_profile}. {ref_note}"
-            "Full-length head-to-toe framing with athletic weight distribution, expressive silhouette, and dynamic garment drapery. "
-            f"Wearing complete consistent costume design under dynamic motion matching {full_body_costume}. "
+            "Full-length head-to-toe framing with athletic weight distribution, expressive silhouette, and dynamic garment drapery, keeping full head and footwear cleanly inside the frame (NEVER a close-up crop). "
+            f"Wearing complete 100% consistent costume design under dynamic motion matching {full_body_costume}. "
             f"{eff_medium_desc} Captured via {fam_spec['optics']}. {lighting_segment}"
         )
 
@@ -3243,31 +3292,56 @@ def compile_sheet_prompt(
             f"{eff_medium_desc} Captured via {fam_spec['optics']}. {lighting_segment}"
         )
 
-    else:  # front fallback (Card 3)
-        card_title = "Card 3: Full Body (Front View • Orthogonal 0° • Primary Body Anchor)"
-        card_aspect = aspect_ratio or "3:4"
-        width, height = (768, 1024)
+    else:  # front fallback (Card 3 — 4-Panel Composite Character & Wardrobe Reference)
+        card_title = "Card 3: Character & Wardrobe Master Reference (4-Panel Composite)"
+        card_aspect = aspect_ratio or "16:9"
+        if card_aspect == "16:9":
+            width, height = (1344, 768)
+        elif card_aspect == "3:4":
+            width, height = (768, 1024)
+        else:
+            width, height = (1024, 1024)
         ref_candidates = []
         if getattr(character, "closeup_image_url", None):
             ref_candidates.append(("Card 1 Character Close-Up", character.closeup_image_url))
 
-        ref_note = f"Capturing the exact same {fam_spec['ref_noun']} from the reference close-up in a complete head-to-toe standing view. " if ref_candidates else ""
-        pose_phrase = "studio A-pose" if style_family == "photorealistic" else "model sheet A-pose"
-        lighting_segment = f"{eff_lighting} with a soft natural ground contact shadow." if is_frozen_active else f"illuminated by {eff_lighting} against a {eff_backdrop} with a soft natural ground contact shadow."
+        ref_note = (
+            f"Anchored strictly to the exact {fam_spec['ref_noun']} from reference Card 1 close-up. "
+            if ref_candidates else ""
+        )
+        sheet_lead = (
+            "Photographic 4-panel studio character and wardrobe composite reference sheet"
+            if style_family == "photorealistic"
+            else f"{fam_spec['sheet_header']} 4-panel character and wardrobe composite sheet"
+        )
+        lighting_segment = (
+            f"{eff_lighting} Uniform seamless neutral light-grey studio backdrop across every panel."
+            if is_frozen_active
+            else f"illuminated by {eff_lighting} against a uniform seamless neutral light-grey studio backdrop across every panel."
+        )
         positive_prompt = (
-            f"Full-body {fam_spec['sheet_header']} full-length turnaround portrait of {char_name}, {biometric_profile}. {ref_note}"
-            "The camera is pulled back at neutral chest height to capture the full standing figure unobstructed from the crown of the hair down to the soles of the footwear touching the ground, "
-            f"with comfortable visible margins above and below. Standing centered upright in a relaxed neutral {pose_phrase}, arms hanging naturally slightly away from the torso, "
-            "hands open and relaxed, feet planted shoulder-width apart, looking straight ahead at orthogonal 0-degree angle. "
-            f"Wearing complete, consistent costume design: {full_body_costume}. "
+            f"{sheet_lead} in horizontal 16:9 landscape orientation, featuring {char_name}, {biometric_profile}. {ref_note}"
+            "Structured as a rigid asymmetric 3-column, 4-panel layout separated by crisp, thin 1-2px clean white grid divider lines. "
+            "Left column stacked vertically into two equal head-and-shoulders panels: "
+            "Panel 1 (Top-Left) is a straight-on frontal head-and-shoulders portrait at eye level matching the exact facial bone structure, "
+            f"eyes, hair silhouette, expression, and {wardrobe_collar} from reference Card 1; "
+            "Panel 2 (Bottom-Left) is a strict 90-degree lateral side-profile head-and-shoulders portrait of the exact same subject showing cranial depth, "
+            "nose bridge, jawline, ear, and rear hair contour consistent with reference Card 1. "
+            "Center full-height column (Panel 3) shows the full-body front wardrobe view standing in a straight neutral 0-degree posture with arms relaxed slightly away from the torso "
+            "and feet shoulder-width apart, cropped cleanly at the neck and collar down to the soles of the shoes with NO head shown (strictly headless neck-to-shoes wardrobe view), "
+            f"displaying complete front construction of {full_body_costume}. "
+            "Right full-height column (Panel 4) shows the full-body 180-degree rear back wardrobe view standing in a straight neutral rear posture facing squarely away, "
+            "cropped cleanly at the neck and collar down to the soles of the shoes with NO head shown (strictly headless neck-to-shoes rear wardrobe view), "
+            f"displaying complete rear seams, back silhouette, hardware, and footwear of {full_body_costume}. "
             f"{eff_medium_desc} Captured via {fam_spec['optics']}. {lighting_segment}"
         )
 
     if prompt_override and prompt_override.strip():
         positive_prompt = prompt_override.strip()
 
-    # Never inject scene/shot RAG cues into Card 1 when CASTING_CLOSEUP_REALISTIC_V1 is active
-    if director_rag_cues and director_rag_cues.strip() and not (slot_key == "closeup" and is_frozen_active):
+    # Never inject scene/shot RAG cues into studio character model sheets when CASTING_CLOSEUP_REALISTIC_V1 is active
+    # (prevents unrelated scene character/wardrobe/aspect-ratio contamination like 'cloaked rangers' or '2.39:1').
+    if director_rag_cues and director_rag_cues.strip() and not is_frozen_active:
         positive_prompt = f"{positive_prompt.rstrip('. ')}. Director look-dev style cues: {director_rag_cues.strip()}."
 
     if fam_spec["inline_guardrail"] and fam_spec["inline_guardrail"] not in positive_prompt:
@@ -3285,6 +3359,16 @@ def compile_sheet_prompt(
             "[Strict Production Constraints: Single unified close-up portrait frame only. Zero grids, zero collages, zero split frames. "
             "Strictly preserve authentic biometric identity, cranial bone structure, eye shape and color, hair silhouette, and surface texture from visual reference. "
             "Zero text, zero watermarks, zero artifacts.]"
+        )
+    elif slot_key == "front":
+        strict_constraints = (
+            "[Strict Production Constraints: Single unified 16:9 landscape composite image divided by crisp, thin 1-2px clean white divider lines into an asymmetric 3-column, 4-panel grid over a uniform seamless neutral light-grey studio backdrop. "
+            "Panel 1 (Top-Left): straight-on frontal head-and-shoulders portrait anchored to reference Card 1. "
+            "Panel 2 (Bottom-Left): 90-degree lateral side-profile head-and-shoulders portrait anchored to reference Card 1. "
+            "Panel 3 (Center full-height column): full-body front wardrobe view cropped cleanly at the neck/collar down to the shoes with NO head shown. "
+            "Panel 4 (Right full-height column): full-body 180-degree rear wardrobe view cropped cleanly at the neck/collar down to the shoes with NO head shown. "
+            "Strictly preserve 100% facial biometric identity from reference Card 1 in Panels 1 and 2, and consistent wardrobe construction across Panels 3 and 4. "
+            "Zero text, zero labels, zero panel numbers, zero typography, zero watermarks, zero extra limbs.]"
         )
     else:
         costume_lower = full_body_costume.lower()
@@ -3305,10 +3389,22 @@ def compile_sheet_prompt(
         else:
             sleeve_invariance = "Sleeve construction and shoulder coverage must strictly match reference Card 3"
 
+        if slot_key == "back":
+            anchor_constraint_line = (
+                "Card 3 (Primary Anchor) wardrobe invariance: reproduce 100% of the rear jacket/coat, coat length, upper fur/collar, back seams/straps, "
+                "trousers, and boots from the right-hand rear panel of Card 3 without altering garment type, length, or colors; "
+                "Card 1 is restricted strictly to hair color/texture and age consistency ONLY (zero front face, zero close-up crop). "
+            )
+        else:
+            anchor_constraint_line = (
+                "Strictly preserve character facial biometric identity and cranial structure from reference Card 1 ONLY — DO NOT copy Card 1's tight close-up crop or shoulder framing. "
+                "Full-body wardrobe invariance from reference Card 3: "
+            )
+
         strict_constraints = (
-            f"[Strict Production Constraints: Single unified frame only. Zero grids, zero collages, zero multi-panel splits, zero side-by-side duplicates. "
-            f"Strictly preserve character facial identity and cranial structure from reference Card 1. "
-            f"Wardrobe invariance from reference Card 3: {garment_invariance}. {sleeve_invariance}. "
+            f"[Strict Production Constraints: Single unified full-body frame only (head-to-toe with full footwear visible). Zero grids, zero collages, zero multi-panel splits, zero side-by-side duplicates, zero close-up or headshot crops. "
+            f"{anchor_constraint_line}"
+            f"{garment_invariance}. {sleeve_invariance}. "
             f"Zero text, zero watermarks, zero typography, zero UI overlay, zero extra limbs, zero distorted hands.]"
         )
 
@@ -3330,7 +3426,9 @@ def compile_sheet_prompt(
         )
         negative_prompt = ", ".join(sanitized_negs)
     else:
-        sanitized_negs = sanitize_negative_prompts_for_style([fam_spec["base_negative"]], style_code)
+        slot_neg_prefix = get_slot_negative_prefix(slot_key)
+        raw_neg = f"{slot_neg_prefix}, {fam_spec['base_negative']}" if slot_neg_prefix else fam_spec["base_negative"]
+        sanitized_negs = sanitize_negative_prompts_for_style([raw_neg], style_code)
         negative_prompt = ", ".join(sanitized_negs)
 
     copy_ready_text = (
@@ -3424,16 +3522,81 @@ async def _fetch_character_sheet_rag_cues(
         return ""
 
 
+_UPSCALE_2K_SLOT_ALIASES: dict[str, str] = {
+    "closeup": "closeup",
+    "close_up": "closeup",
+    "headshot": "closeup",
+    "portrait": "closeup",
+    "master_closeup": "closeup",
+    "slot_1": "closeup",
+    "expression": "expression",
+    "sheet_expression": "expression",
+    "slot_2": "expression",
+    "front": "front",
+    "turnaround_front": "front",
+    "side": "side",
+    "turnaround_side": "side",
+    "three_quarter": "three_quarter",
+    "3/4": "three_quarter",
+    "threequarter": "three_quarter",
+    "turnaround_three_quarter": "three_quarter",
+    "back": "back",
+    "turnaround_back": "back",
+    "tpose": "tpose",
+    "sheet_tpose": "tpose",
+    "t_pose": "tpose",
+    "action": "action",
+    "sheet_action": "action",
+}
+
+
 def _resolve_upscale_2k_slot(slot_key: str | None) -> str:
-    """Strictly validate Upscale 2K Kit slot scope: ONLY 'closeup' and 'front' are allowed."""
+    """Validate Upscale 2K Kit slot key across all 8 Character Matrix cards (Cards 1-8)."""
     norm = (slot_key or "").strip().lower()
-    if norm in ("closeup", "close_up", "headshot", "portrait", "master_closeup", "slot_1"):
-        return "closeup"
-    if norm in ("front", "turnaround_front"):
-        return "front"
+    canonical = _UPSCALE_2K_SLOT_ALIASES.get(norm)
+    if canonical:
+        return canonical
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
-        detail=f"Upscale 2K Kit is only available for 'closeup' (Card 1) and 'front' (Card 3). Invalid slot_key: '{slot_key}'.",
+        detail=(
+            "Invalid slot_key for Upscale 2K Kit: "
+            f"'{slot_key}'. Must be one of: closeup, expression, front, side, three_quarter, back, tpose, action."
+        ),
+    )
+
+
+def _resolve_legacy_front_aspect_ratio(
+    character: CharacterModel,
+    slot_key: str,
+    current_url: str | None = None,
+) -> str | None:
+    """Preserve 3:4 aspect ratio when upscaling a previously generated portrait Card 3 asset."""
+    if slot_key != "front":
+        return None
+    meta = character.sheet_metadata if isinstance(character.sheet_metadata, dict) else {}
+    front_meta = meta.get("front") if isinstance(meta.get("front"), dict) else {}
+    w = front_meta.get("resolution_width") or front_meta.get("width")
+    h = front_meta.get("resolution_height") or front_meta.get("height")
+    if isinstance(w, int) and isinstance(h, int) and w > 0 and h > 0:
+        return "3:4" if h > w else None
+    url_to_check = current_url or getattr(character, "front_image_url", None)
+    if url_to_check:
+        dims = _read_image_dimensions_from_url(url_to_check)
+        if dims and dims[1] > dims[0]:
+            return "3:4"
+    if front_meta.get("aspect_ratio") == "3:4":
+        return "3:4"
+    return None
+
+
+def _state_has_injuries_or_wear(state: CharacterStateModel | None) -> bool:
+    """Return True when a dynamic state carries non-baseline wear/injury cues."""
+    if state is None:
+        return False
+    wear_str = (state.injuries_and_wear or "").strip().lower()
+    return bool(
+        wear_str
+        and wear_str not in ("none", "zero defects", "immaculate, zero defects, pristine garment condition")
     )
 
 
@@ -3446,17 +3609,22 @@ def _build_slot_upscale_2k_payload(
     active_style_code: str,
     compiled: dict[str, Any] | None = None,
     effective: dict[str, Any] | None = None,
+    target_state: CharacterStateModel | None = None,
 ) -> dict[str, Any]:
-    """Deterministically compile Frozen Upscale 2K prompt payload for closeup/front without calling AI providers."""
+    """Deterministically compile Frozen Upscale 2K prompt payload for Cards 1-8 or Dynamic States without AI calls."""
+    legacy_ar = _resolve_legacy_front_aspect_ratio(character, slot_key)
     if compiled is None:
         compiled = compile_sheet_prompt(
             character=character,
             project=project,
             bible=bible,
             slot=slot_key,
+            target_state=target_state,
+            aspect_ratio=legacy_ar,
         )
     if effective is None:
-        override = _resolve_sheet_override(character, [slot_key])
+        override_keys = [target_state.state_code, "state"] if target_state is not None else [slot_key]
+        override = _resolve_sheet_override(character, override_keys)
         effective = _apply_sheet_overrides(compiled, override, active_style_code)
 
     upscale_compiled = compile_upscale_2k_prompt(
@@ -3466,6 +3634,8 @@ def _build_slot_upscale_2k_payload(
         base_negative_prompt=effective["effective_negative_prompt"],
         style_family=compiled.get("style_family", "photorealistic"),
         has_override=effective["has_override"],
+        has_injuries_or_wear=_state_has_injuries_or_wear(target_state),
+        aspect_ratio=legacy_ar,
     )
     return {
         "upscale_2k_prompt": upscale_compiled["positive_prompt"],
@@ -3481,19 +3651,19 @@ def _build_slot_upscale_2k_payload(
     }
 
 
-@router.get("/bible/characters/{character_id}/sheet-prompts", status_code=status.HTTP_200_OK)
-@router.get("/characters/{character_id}/sheet-prompts", status_code=status.HTTP_200_OK)
-async def get_character_sheet_prompts(
+async def _load_character_and_style_context(
+    session: AsyncSession,
     character_id: str,
-    current_user: UserModel = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-) -> dict[str, Any]:
+    *,
+    ensure_dna_seed: bool = True,
+) -> tuple[CharacterModel, ProjectModel | None, MasterProductionBibleModel | None, str]:
+    """Load character, owning project, latest MPB, and active style code."""
     c_uuid = _parse_uuid(character_id, "character_id")
     char = (await session.execute(select(CharacterModel).where(CharacterModel.id == c_uuid))).scalar_one_or_none()
     if not char:
         raise HTTPException(status_code=404, detail="Character not found")
 
-    if not char.dna_seed:
+    if ensure_dna_seed and not char.dna_seed:
         char.dna_seed = int(hashlib.sha256(str(char.id).encode()).hexdigest()[:8], 16) % 900000 + 100000
         await session.commit()
 
@@ -3511,12 +3681,305 @@ async def get_character_sheet_prompts(
         or (proj.target_style_code if proj else None)
         or "#Style 01"
     )
-    active_gate = resolve_style_gate(active_style_code)
-    rag_cues = await _fetch_character_sheet_rag_cues(
-        style_code=active_style_code,
-        character_name=char.name or "Character",
-        slot_label="character sheet turnaround look-dev",
+    return char, proj, mpb, active_style_code
+
+
+async def _get_character_state_or_404(
+    session: AsyncSession,
+    character_id: uuid.UUID,
+    state_id: str,
+) -> CharacterStateModel:
+    """Resolve a CharacterStateModel scoped to character_id or raise 404."""
+    s_uuid = _parse_uuid(state_id, "state_id")
+    state = (
+        await session.execute(
+            select(CharacterStateModel).where(
+                CharacterStateModel.id == s_uuid,
+                CharacterStateModel.character_id == character_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not state:
+        raise HTTPException(status_code=404, detail="Character state not found")
+    return state
+
+
+async def _build_upscale_prompt_response(
+    *,
+    session: AsyncSession,
+    character_id: str,
+    slot_key: str | None = None,
+    state_id: str | None = None,
+) -> dict[str, Any]:
+    """Shared deterministic Frozen Upscale 2K Prompt builder for Cards 1-8 and Dynamic States."""
+    is_state = bool(state_id) or (slot_key or "").strip().lower() == "state"
+    if is_state:
+        if not state_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="state_id is required when slot_key is 'state'.",
+            )
+        char, proj, mpb, active_style_code = await _load_character_and_style_context(session, character_id)
+        target_state = await _get_character_state_or_404(session, char.id, state_id)
+        payload = _build_slot_upscale_2k_payload(
+            character=char,
+            project=proj,
+            bible=mpb,
+            slot_key="state",
+            active_style_code=active_style_code,
+            target_state=target_state,
+        )
+        return {
+            "status": "ok",
+            "character_id": str(char.id),
+            "character_name": char.name,
+            "slot_key": "state",
+            "state_id": str(target_state.id),
+            "state_code": target_state.state_code,
+            "state_label": target_state.state_label or target_state.state_code,
+            "dna_seed": char.dna_seed,
+            **payload,
+        }
+
+    if not slot_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Either slot_key or state_id must be provided.",
+        )
+    norm_slot = _resolve_upscale_2k_slot(slot_key)
+    char, proj, mpb, active_style_code = await _load_character_and_style_context(session, character_id)
+    payload = _build_slot_upscale_2k_payload(
+        character=char,
+        project=proj,
+        bible=mpb,
+        slot_key=norm_slot,
+        active_style_code=active_style_code,
     )
+    return {
+        "status": "ok",
+        "character_id": str(char.id),
+        "character_name": char.name,
+        "slot_key": norm_slot,
+        "dna_seed": char.dna_seed,
+        **payload,
+    }
+
+
+def _build_attachment_file_response(
+    *,
+    char: CharacterModel,
+    current_url: str | None,
+    asset_label: str,
+    filename_token: str,
+) -> FileResponse:
+    """Validate local image file and return mobile-safe FileResponse attachment."""
+    if not current_url:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"{asset_label} does not have an image yet.",
+        )
+
+    local_path = _url_to_local_path(current_url)
+    if not local_path or not os.path.exists(local_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Image file for {asset_label} could not be located on disk.",
+        )
+
+    char_slug = re.sub(r"[^a-z0-9]+", "-", (char.name or "character").lower()).strip("-") or "character"
+    ext = Path(local_path).suffix.lstrip(".").lower() or "png"
+    media_type_map = {
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "webp": "image/webp",
+    }
+    media_type = media_type_map.get(ext, "application/octet-stream")
+    download_filename = f"{char_slug}_{filename_token}_1k.{ext}"
+    return FileResponse(
+        path=local_path,
+        media_type=media_type,
+        filename=download_filename,
+        headers={
+            "Content-Disposition": f'attachment; filename="{download_filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+async def _build_download_asset_response(
+    *,
+    session: AsyncSession,
+    character_id: str,
+    slot_key: str | None = None,
+    state_id: str | None = None,
+) -> FileResponse:
+    """Shared attachment download helper for Cards 1-8 and Dynamic States."""
+    is_state = bool(state_id) or (slot_key or "").strip().lower() == "state"
+    if is_state:
+        if not state_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="state_id is required when slot_key is 'state'.",
+            )
+        c_uuid = _parse_uuid(character_id, "character_id")
+        char = (await session.execute(select(CharacterModel).where(CharacterModel.id == c_uuid))).scalar_one_or_none()
+        if not char:
+            raise HTTPException(status_code=404, detail="Character not found")
+        target_state = await _get_character_state_or_404(session, char.id, state_id)
+        num_match = re.search(r"(\d+)", target_state.state_code or "")
+        state_token = f"state_{num_match.group(1)}" if num_match else f"state_{str(target_state.id)[:8]}"
+        return _build_attachment_file_response(
+            char=char,
+            current_url=target_state.image_url,
+            asset_label=f"State '{target_state.state_code}'",
+            filename_token=state_token,
+        )
+
+    if not slot_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Either slot_key or state_id must be provided.",
+        )
+    norm_slot = _resolve_upscale_2k_slot(slot_key)
+    c_uuid = _parse_uuid(character_id, "character_id")
+    char = (await session.execute(select(CharacterModel).where(CharacterModel.id == c_uuid))).scalar_one_or_none()
+    if not char:
+        raise HTTPException(status_code=404, detail="Character not found")
+
+    current_url = getattr(char, _SLOT_URL_ATTR_MAP[norm_slot], None)
+    return _build_attachment_file_response(
+        char=char,
+        current_url=current_url,
+        asset_label=f"Slot '{norm_slot}'",
+        filename_token=norm_slot,
+    )
+
+
+async def _process_and_store_uploaded_image(
+    file: UploadFile,
+    *,
+    filename_prefix: str,
+) -> tuple[str, int, int, bool, int]:
+    """Validate, normalize, persist unique preview PNG, and measure pixel dimensions via PIL."""
+    MAX_FILE_SIZE = 20 * 1024 * 1024
+    content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File exceeds maximum allowed size of 20MB (Received {len(content) / (1024*1024):.1f}MB).",
+        )
+    if len(content) == 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
+
+    processed_bytes, width, height = process_uploaded_image(content, max_dimension=2048)
+
+    settings = get_settings()
+    storage_dir = settings.effective_preview_storage_path
+    storage_dir.mkdir(parents=True, exist_ok=True)
+
+    file_uuid = uuid.uuid4().hex[:8]
+    ts_ms = int(time.time() * 1000)
+    filename = f"{filename_prefix}_{ts_ms}_{file_uuid}.png"
+    target_path = storage_dir / filename
+    target_path.write_bytes(processed_bytes)
+
+    with Image.open(target_path) as img:
+        width, height = img.size
+    is_2k = bool(max(width, height) >= 1920)
+    new_url = f"/api/v1/assets/previews/{filename}"
+    return new_url, width, height, is_2k, len(processed_bytes)
+
+
+async def _save_uploaded_state_image(
+    *,
+    session: AsyncSession,
+    character_id: str,
+    state_id: str,
+    file: UploadFile,
+) -> dict[str, Any]:
+    """Upload or replace a Dynamic State image with 2K detection and previous_1k_url tracking."""
+    char, proj, mpb, _ = await _load_character_and_style_context(session, character_id)
+    target_state = await _get_character_state_or_404(session, char.id, state_id)
+
+    new_url, width, height, is_2k, file_size = await _process_and_store_uploaded_image(
+        file,
+        filename_prefix=f"char_{str(char.id)[:8]}_state_{str(target_state.id)[:8]}",
+    )
+
+    meta_key = f"state_{target_state.id}"
+    meta = dict(char.sheet_metadata or {})
+    prev_entry = meta.get(meta_key) if isinstance(meta.get(meta_key), dict) else {}
+    prev_active_url = target_state.image_url
+    previous_1k_url = prev_entry.get("previous_1k_url")
+    if prev_active_url and not prev_entry.get("is_2k"):
+        previous_1k_url = prev_active_url
+
+    target_state.image_url = new_url
+
+    compiled = compile_sheet_prompt(
+        character=char,
+        project=proj,
+        bible=mpb,
+        slot="state",
+        target_state=target_state,
+    )
+    meta[meta_key] = {
+        "image_url": new_url,
+        "previous_1k_url": previous_1k_url,
+        "source": "manual_upload",
+        "original_filename": file.filename,
+        "content_type": file.content_type or "image/png",
+        "file_size": file_size,
+        "width": width,
+        "height": height,
+        "resolution_width": width,
+        "resolution_height": height,
+        "is_2k": is_2k,
+        "prompt": compiled["positive_prompt"],
+        "negative_prompt": compiled["negative_prompt"],
+        "anchors_used": compiled["anchors_used"],
+        "seed": char.dna_seed,
+        "aspect_ratio": compiled["recommended_aspect_ratio"],
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "status": "completed",
+    }
+    char.sheet_metadata = meta
+    flag_modified(char, "sheet_metadata")
+
+    await session.commit()
+    await session.refresh(char)
+    await session.refresh(target_state)
+
+    return {
+        "status": "completed",
+        "message": f"Successfully uploaded and synced {target_state.state_code} image",
+        "image_url": new_url,
+        "previous_1k_url": previous_1k_url,
+        "slot": "state",
+        "state_id": str(target_state.id),
+        "state_code": target_state.state_code,
+        "character_id": str(char.id),
+        "width": width,
+        "height": height,
+        "resolution_width": width,
+        "resolution_height": height,
+        "is_2k": is_2k,
+        "sheet_metadata": char.sheet_metadata[meta_key],
+    }
+
+
+@router.get("/bible/characters/{character_id}/sheet-prompts", status_code=status.HTTP_200_OK)
+@router.get("/characters/{character_id}/sheet-prompts", status_code=status.HTTP_200_OK)
+async def get_character_sheet_prompts(
+    character_id: str,
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    char, proj, mpb, active_style_code = await _load_character_and_style_context(session, character_id)
+    active_gate = resolve_style_gate(active_style_code)
+    # Studio character model sheets must remain pure studio references without unrelated scene-shot RAG cues
+    rag_cues = ""
 
     slots = ["closeup", "expression", "front", "side", "three_quarter", "back", "tpose", "action"]
     prompts_map = {}
@@ -3536,23 +3999,15 @@ async def get_character_sheet_prompts(
             f"--aspect_ratio: {compiled['recommended_aspect_ratio']}\n"
             f"--seed: {compiled['dna_seed']}"
         )
-        upscale_fields: dict[str, Any] = {}
-        if s in ("closeup", "front"):
-            up_payload = _build_slot_upscale_2k_payload(
-                character=char,
-                project=proj,
-                bible=mpb,
-                slot_key=s,
-                active_style_code=active_style_code,
-                compiled=compiled,
-                effective=effective,
-            )
-            upscale_fields = {
-                "upscale_2k_prompt": up_payload["upscale_2k_prompt"],
-                "upscale_2k_negative_prompt": up_payload["upscale_2k_negative_prompt"],
-                "upscale_2k_target": up_payload["upscale_2k_target"],
-                "style_gate_mode": up_payload["style_gate_mode"],
-            }
+        up_payload = _build_slot_upscale_2k_payload(
+            character=char,
+            project=proj,
+            bible=mpb,
+            slot_key=s,
+            active_style_code=active_style_code,
+            compiled=compiled,
+            effective=effective,
+        )
         prompts_map[s] = {
             "slot": s,
             "card_title": compiled["card_title"],
@@ -3568,10 +4023,13 @@ async def get_character_sheet_prompts(
             "routing_mode": compiled.get("routing_mode"),
             "layers_applied": compiled.get("layers_applied", []),
             **effective,
-            **upscale_fields,
+            "upscale_2k_prompt": up_payload["upscale_2k_prompt"],
+            "upscale_2k_negative_prompt": up_payload["upscale_2k_negative_prompt"],
+            "upscale_2k_target": up_payload["upscale_2k_target"],
+            "style_gate_mode": up_payload["style_gate_mode"],
         }
 
-    # Also compile prompts for character dynamic states (#State 01 - #State 05)
+    # Also compile prompts + Frozen Upscale 2K payloads for character dynamic states (#State 01 - #State 05+)
     states_stmt = (
         select(CharacterStateModel)
         .where(CharacterStateModel.character_id == char.id)
@@ -3596,6 +4054,16 @@ async def get_character_sheet_prompts(
             f"--aspect_ratio: {compiled_st['recommended_aspect_ratio']}\n"
             f"--seed: {compiled_st['dna_seed']}"
         )
+        st_up_payload = _build_slot_upscale_2k_payload(
+            character=char,
+            project=proj,
+            bible=mpb,
+            slot_key="state",
+            active_style_code=active_style_code,
+            compiled=compiled_st,
+            effective=state_effective,
+            target_state=st,
+        )
         states_prompts_map[st.state_code] = {
             "state_id": str(st.id),
             "state_code": st.state_code,
@@ -3612,6 +4080,10 @@ async def get_character_sheet_prompts(
             "routing_mode": compiled_st.get("routing_mode"),
             "layers_applied": compiled_st.get("layers_applied", []),
             **state_effective,
+            "upscale_2k_prompt": st_up_payload["upscale_2k_prompt"],
+            "upscale_2k_negative_prompt": st_up_payload["upscale_2k_negative_prompt"],
+            "upscale_2k_target": st_up_payload["upscale_2k_target"],
+            "style_gate_mode": st_up_payload["style_gate_mode"],
         }
 
     return {
@@ -3629,99 +4101,87 @@ async def get_character_sheet_prompts(
 @router.get("/characters/{character_id}/upscale-prompt", status_code=status.HTTP_200_OK)
 async def get_character_upscale_2k_prompt(
     character_id: str,
-    slot_key: str = Query(..., description="Must be 'closeup' or 'front'"),
+    slot_key: str | None = Query(default=None, description="Cards 1-8 slot_key or 'state' when state_id is provided"),
+    state_id: str | None = Query(default=None, description="Dynamic State ID"),
     current_user: UserModel = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """Read-only deterministic Frozen Upscale 2K Prompt endpoint for Card 1 (closeup) & Card 3 (front)."""
-    norm_slot = _resolve_upscale_2k_slot(slot_key)
-    c_uuid = _parse_uuid(character_id, "character_id")
-    char = (await session.execute(select(CharacterModel).where(CharacterModel.id == c_uuid))).scalar_one_or_none()
-    if not char:
-        raise HTTPException(status_code=404, detail="Character not found")
-
-    if not char.dna_seed:
-        char.dna_seed = int(hashlib.sha256(str(char.id).encode()).hexdigest()[:8], 16) % 900000 + 100000
-        await session.commit()
-
-    proj = (await session.execute(select(ProjectModel).where(ProjectModel.id == char.project_id))).scalar_one_or_none()
-    mpb_stmt = (
-        select(MasterProductionBibleModel)
-        .where(MasterProductionBibleModel.project_id == char.project_id)
-        .order_by(MasterProductionBibleModel.version.desc())
-        .limit(1)
+    """Read-only deterministic Frozen Upscale 2K Prompt endpoint for all Cards 1-8 and Dynamic States."""
+    return await _build_upscale_prompt_response(
+        session=session,
+        character_id=character_id,
+        slot_key=slot_key,
+        state_id=state_id,
     )
-    mpb = (await session.execute(mpb_stmt)).scalar_one_or_none()
 
-    active_style_code = (
-        (mpb.style_parameters.get("master_style_code") if mpb and mpb.style_parameters else None)
-        or (proj.target_style_code if proj else None)
-        or "#Style 01"
+
+@router.get("/bible/characters/{character_id}/states/{state_id}/upscale-prompt", status_code=status.HTTP_200_OK)
+@router.get("/characters/{character_id}/states/{state_id}/upscale-prompt", status_code=status.HTTP_200_OK)
+async def get_character_state_upscale_2k_prompt(
+    character_id: str,
+    state_id: str,
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Read-only deterministic Frozen Upscale 2K Prompt endpoint dedicated to a Dynamic State."""
+    return await _build_upscale_prompt_response(
+        session=session,
+        character_id=character_id,
+        slot_key="state",
+        state_id=state_id,
     )
-    payload = _build_slot_upscale_2k_payload(
-        character=char,
-        project=proj,
-        bible=mpb,
-        slot_key=norm_slot,
-        active_style_code=active_style_code,
-    )
-    return {
-        "status": "ok",
-        "character_id": str(char.id),
-        "character_name": char.name,
-        "slot_key": norm_slot,
-        "dna_seed": char.dna_seed,
-        **payload,
-    }
 
 
 @router.get("/bible/characters/{character_id}/download-asset", status_code=status.HTTP_200_OK)
 @router.get("/characters/{character_id}/download-asset", status_code=status.HTTP_200_OK)
 async def download_character_asset(
     character_id: str,
-    slot_key: str = Query(..., description="Must be 'closeup' or 'front'"),
+    slot_key: str | None = Query(default=None, description="Cards 1-8 slot_key or 'state' when state_id is provided"),
+    state_id: str | None = Query(default=None, description="Dynamic State ID"),
     current_user: UserModel = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> FileResponse:
-    """Download Card 1 (closeup) or Card 3 (front) image as an attachment (Chrome Android safe)."""
-    norm_slot = _resolve_upscale_2k_slot(slot_key)
-    c_uuid = _parse_uuid(character_id, "character_id")
-    char = (await session.execute(select(CharacterModel).where(CharacterModel.id == c_uuid))).scalar_one_or_none()
-    if not char:
-        raise HTTPException(status_code=404, detail="Character not found")
+    """Download any Card 1-8 or Dynamic State image as an attachment (Chrome Android safe)."""
+    return await _build_download_asset_response(
+        session=session,
+        character_id=character_id,
+        slot_key=slot_key,
+        state_id=state_id,
+    )
 
-    current_url = getattr(char, _SLOT_URL_ATTR_MAP[norm_slot], None)
-    if not current_url:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Slot '{norm_slot}' does not have an image yet.",
-        )
 
-    local_path = _url_to_local_path(current_url)
-    if not local_path or not os.path.exists(local_path):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Image file for '{norm_slot}' could not be located on disk.",
-        )
+@router.get("/bible/characters/{character_id}/states/{state_id}/download-asset", status_code=status.HTTP_200_OK)
+@router.get("/characters/{character_id}/states/{state_id}/download-asset", status_code=status.HTTP_200_OK)
+async def download_character_state_asset(
+    character_id: str,
+    state_id: str,
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> FileResponse:
+    """Download a Dynamic State image as an attachment (Chrome Android safe)."""
+    return await _build_download_asset_response(
+        session=session,
+        character_id=character_id,
+        slot_key="state",
+        state_id=state_id,
+    )
 
-    char_slug = re.sub(r"[^a-z0-9]+", "-", (char.name or "character").lower()).strip("-") or "character"
-    ext = Path(local_path).suffix.lstrip(".").lower() or "png"
-    media_type_map = {
-        "png": "image/png",
-        "jpg": "image/jpeg",
-        "jpeg": "image/jpeg",
-        "webp": "image/webp",
-    }
-    media_type = media_type_map.get(ext, "application/octet-stream")
-    download_filename = f"{char_slug}_{norm_slot}_1k.{ext}"
-    return FileResponse(
-        path=local_path,
-        media_type=media_type,
-        filename=download_filename,
-        headers={
-            "Content-Disposition": f'attachment; filename="{download_filename}"',
-            "Cache-Control": "no-store",
-        },
+
+@router.post("/bible/characters/{character_id}/states/{state_id}/upload-image", status_code=status.HTTP_200_OK)
+@router.post("/characters/{character_id}/states/{state_id}/upload-image", status_code=status.HTTP_200_OK)
+async def upload_character_state_image(
+    character_id: str,
+    state_id: str,
+    file: UploadFile = File(...),
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Upload or replace photo for a Dynamic State with PIL 2K/1K detection & previous_1k_url tracking."""
+    return await _save_uploaded_state_image(
+        session=session,
+        character_id=character_id,
+        state_id=state_id,
+        file=file,
     )
 
 
@@ -3729,75 +4189,40 @@ async def download_character_asset(
 @router.post("/characters/{character_id}/upload-sheet", status_code=status.HTTP_200_OK)
 async def upload_character_sheet(
     character_id: str,
-    slot: str = Form(..., description="'closeup', 'front', 'side', 'three_quarter', 'back', 'tpose', 'action', 'expression'"),
+    slot: str = Form(..., description="'closeup', 'front', 'side', 'three_quarter', 'back', 'tpose', 'action', 'expression', or 'state'"),
     file: UploadFile = File(...),
+    state_id: str | None = Form(default=None, description="Required when slot='state'"),
     current_user: UserModel = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """Upload or replace photo for any of the 8 character matrix cards with high-res normalization & anchor sync."""
-    c_uuid = _parse_uuid(character_id, "character_id")
-    char = (await session.execute(select(CharacterModel).where(CharacterModel.id == c_uuid))).scalar_one_or_none()
-    if not char:
-        raise HTTPException(status_code=404, detail="Character not found")
-
-    if not char.dna_seed:
-        char.dna_seed = int(hashlib.sha256(str(char.id).encode()).hexdigest()[:8], 16) % 900000 + 100000
-        await session.commit()
-
+    """Upload or replace photo for any of the 8 character matrix cards or a Dynamic State with high-res normalization & anchor sync."""
     norm_slot = (slot or "").lower().strip()
-    if norm_slot in ("closeup", "close_up", "headshot", "portrait", "master_closeup", "slot_1"):
-        slot_key = "closeup"
-    elif norm_slot in ("front", "turnaround_front"):
-        slot_key = "front"
-    elif norm_slot in ("side", "turnaround_side"):
-        slot_key = "side"
-    elif norm_slot in ("three_quarter", "3/4", "threequarter", "turnaround_three_quarter"):
-        slot_key = "three_quarter"
-    elif norm_slot in ("back", "turnaround_back"):
-        slot_key = "back"
-    elif norm_slot in ("tpose", "sheet_tpose", "t_pose"):
-        slot_key = "tpose"
-    elif norm_slot in ("action", "sheet_action"):
-        slot_key = "action"
-    elif norm_slot in ("expression", "sheet_expression"):
-        slot_key = "expression"
-    else:
+    if norm_slot == "state" or state_id:
+        if not state_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="state_id is required when uploading a Dynamic State image.",
+            )
+        return await _save_uploaded_state_image(
+            session=session,
+            character_id=character_id,
+            state_id=state_id,
+            file=file,
+        )
+
+    char, proj, mpb, _ = await _load_character_and_style_context(session, character_id)
+
+    slot_key = _UPSCALE_2K_SLOT_ALIASES.get(norm_slot)
+    if not slot_key:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid slot '{slot}'. Must be one of: closeup, front, side, three_quarter, back, tpose, action, expression.",
         )
 
-    # Enforce safe 20MB limit
-    MAX_FILE_SIZE = 20 * 1024 * 1024
-    content = await file.read()
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File exceeds maximum allowed size of 20MB (Received {len(content) / (1024*1024):.1f}MB).",
-        )
-    if len(content) == 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
-
-    # Process and normalize image (EXIF transpose, RGB conversion, downscale if > 2048px)
-    processed_bytes, width, height = process_uploaded_image(content, max_dimension=2048)
-
-    # Save to effective preview storage path
-    settings = get_settings()
-    storage_dir = settings.effective_preview_storage_path
-    storage_dir.mkdir(parents=True, exist_ok=True)
-
-    file_uuid = uuid.uuid4().hex[:8]
-    ts_ms = int(time.time() * 1000)
-    filename = f"char_{str(char.id)[:8]}_{slot_key}_{ts_ms}_{file_uuid}.png"
-    target_path = storage_dir / filename
-    target_path.write_bytes(processed_bytes)
-
-    real_dims = _read_image_dimensions_from_path(target_path)
-    if real_dims:
-        width, height = real_dims
-    is_2k = bool(max(width, height) >= 1920)
-
-    new_url = f"/api/v1/assets/previews/{filename}"
+    new_url, width, height, is_2k, file_size = await _process_and_store_uploaded_image(
+        file,
+        filename_prefix=f"char_{str(char.id)[:8]}_{slot_key}",
+    )
 
     meta = dict(char.sheet_metadata or {})
     prev_entry = meta.get(slot_key) if isinstance(meta.get(slot_key), dict) else {}
@@ -3810,14 +4235,6 @@ async def upload_character_sheet(
     setattr(char, _SLOT_URL_ATTR_MAP[slot_key], new_url)
 
     # Compile prompt for metadata persistence
-    proj = (await session.execute(select(ProjectModel).where(ProjectModel.id == char.project_id))).scalar_one_or_none()
-    mpb_stmt = (
-        select(MasterProductionBibleModel)
-        .where(MasterProductionBibleModel.project_id == char.project_id)
-        .order_by(MasterProductionBibleModel.version.desc())
-        .limit(1)
-    )
-    mpb = (await session.execute(mpb_stmt)).scalar_one_or_none()
     compiled = compile_sheet_prompt(character=char, project=proj, bible=mpb, slot=slot_key)
 
     meta[slot_key] = {
@@ -3826,7 +4243,7 @@ async def upload_character_sheet(
         "source": "manual_upload",
         "original_filename": file.filename,
         "content_type": file.content_type or "image/png",
-        "file_size": len(processed_bytes),
+        "file_size": file_size,
         "width": width,
         "height": height,
         "resolution_width": width,
@@ -3956,15 +4373,8 @@ async def generate_character_asset(
             narrative_summary=char.narrative_summary or "",
         )
 
-    rag_cues = (
-        await _fetch_character_sheet_rag_cues(
-            style_code=active_style_code,
-            character_name=char.name or "Character",
-            slot_label=f"character {slot_to_compile} look-dev",
-        )
-        if (not has_prompt_override and not is_frozen_closeup)
-        else ""
-    )
+    # Studio character model sheets must never inject scene-shot RAG descriptions
+    rag_cues = ""
     compiled = compile_sheet_prompt(
         character=char,
         project=proj,
@@ -4008,9 +4418,23 @@ async def generate_character_asset(
     width, height = resolve_provider_dimensions(prov, width, height, card_aspect)
 
     # 3. Google Flow Asynchronous Queue
-    if prov in ("google_flow", "google-flow"):
+    if normalize_provider_id(prov) == "google-flow":
         await _assert_socks5_healthy_for_flow(session)
         parsed_state_id = _parse_uuid(payload.state_id, "state_id") if payload.state_id else None
+        flow_prompt = prompt
+        if angle_key in ("side", "three_quarter", "back", "tpose", "action") and negative_prompt:
+            flow_prompt = fold_negative_bans_into_positive(
+                prompt,
+                negative_prompt,
+                style_code=active_style_code,
+            )
+        if len(ref_candidates) != len(valid_ref_paths):
+            logger.warning(
+                "character_flow_anchor_resolution_mismatch slot=%s expected_refs=%s resolved_paths=%s",
+                angle_key,
+                [u for _, u in ref_candidates],
+                valid_ref_paths,
+            )
         flow_job = FlowImageJobModel(
             id=uuid.uuid4(),
             project_id=char.project_id,
@@ -4018,7 +4442,7 @@ async def generate_character_asset(
             asset_slot=angle_key,
             target_type=payload.target_type,
             state_id=parsed_state_id,
-            prompt=prompt,
+            prompt=flow_prompt,
             aspect_ratio=card_aspect,
             reference_image_paths=valid_ref_paths if valid_ref_paths else None,
             status="queued",
@@ -4652,6 +5076,7 @@ async def generate_character_preview(
         ignored_override_values=("ag_gemini_flash", "default", None),
         default_provider="9router",
         default_model="gemini-3.1-flash-image",
+        respect_request_provider=payload.respect_provider_override,
     )
     prov = resolved_render["provider_id"]
     resolved_model_id = resolved_render["model_id"]
@@ -4777,7 +5202,7 @@ async def generate_character_preview(
             aspect_ratio=aspect_to_use,
             director_slots=preview_director_slots,
         )
-        if prov in ("google_flow", "google-flow"):
+        if normalize_provider_id(prov) == "google-flow":
             await _assert_socks5_healthy_for_flow(session)
             flow_job = FlowImageJobModel(
                 id=uuid.uuid4(),
@@ -4849,7 +5274,7 @@ async def generate_character_preview(
         if closeup_file.exists() and closeup_file.stat().st_size > 2048:
             ref_paths_expr = [str(closeup_file.resolve())]
 
-        if prov in ("google_flow", "google-flow"):
+        if normalize_provider_id(prov) == "google-flow":
             await _assert_socks5_healthy_for_flow(session)
             flow_job = FlowImageJobModel(
                 id=uuid.uuid4(),
@@ -4894,7 +5319,7 @@ async def generate_character_preview(
         if expression_url:
             dummy_char.expression_image_url = expression_url
 
-        aspect_to_use_front = "3:4"
+        aspect_to_use_front = "16:9"
         compiled_front = compile_sheet_prompt(
             character=dummy_char,
             project=project,
@@ -4907,7 +5332,7 @@ async def generate_character_preview(
         if closeup_file.exists() and closeup_file.stat().st_size > 2048:
             ref_paths.append(str(closeup_file.resolve()))
 
-        if prov in ("google_flow", "google-flow"):
+        if normalize_provider_id(prov) == "google-flow":
             await _assert_socks5_healthy_for_flow(session)
             flow_job = FlowImageJobModel(
                 id=uuid.uuid4(),
@@ -5020,7 +5445,7 @@ def _format_concise_provider_error(exc: Exception) -> str:
     msg = str(exc).strip()
     if not msg:
         return f"{type(exc).__name__} (upstream request timed out or failed)"
-    return msg[:280]
+    return msg[:420]
 
 
 def _resolve_upscale_2k_provider(
@@ -5237,12 +5662,14 @@ async def upscale_character_asset_2k(
             narrative_summary=char.narrative_summary or "",
         )
 
+    legacy_ar = _resolve_legacy_front_aspect_ratio(char, slot_key, current_url=current_url)
     compiled = compile_sheet_prompt(
         character=char,
         project=proj,
         bible=mpb,
         slot=slot_key,
         target_state=target_state,
+        aspect_ratio=legacy_ar,
         director_slots=director_slots_dict,
     )
     effective = _apply_sheet_overrides(compiled, stored_override, active_style_code)
@@ -5260,6 +5687,7 @@ async def upscale_character_asset_2k(
         style_family=compiled.get("style_family", "photorealistic"),
         has_override=effective["has_override"],
         has_injuries_or_wear=has_state_wear,
+        aspect_ratio=legacy_ar,
     )
 
     adapter = UniversalImageAdapter()
@@ -5364,15 +5792,14 @@ async def upscale_character_asset_2k(
     }
 
 
-@router.post("/bible/characters/{character_id}/revert-asset", status_code=status.HTTP_200_OK)
-@router.post("/characters/{character_id}/revert-asset", status_code=status.HTTP_200_OK)
-async def revert_character_asset_1k(
+async def _revert_character_asset_impl(
+    *,
+    session: AsyncSession,
     character_id: str,
-    payload: CharacterAssetRevertRequest,
-    current_user: UserModel = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
+    slot_key_raw: str | None = None,
+    state_id: str | None = None,
 ) -> dict[str, Any]:
-    """Revert an upscaled character asset or dynamic state back to its stored 1K image."""
+    """Shared implementation to revert a Card 1-8 asset or Dynamic State back to its stored 1K image."""
     c_uuid = _parse_uuid(character_id, "character_id")
     char = (await session.execute(select(CharacterModel).where(CharacterModel.id == c_uuid))).scalar_one_or_none()
     if not char:
@@ -5380,28 +5807,18 @@ async def revert_character_asset_1k(
 
     meta = dict(char.sheet_metadata or {})
     target_state: CharacterStateModel | None = None
-    is_state = bool(payload.state_id) or (payload.slot_key or "").strip().lower() == "state"
+    is_state = bool(state_id) or (slot_key_raw or "").strip().lower() == "state"
 
     if is_state:
-        if not payload.state_id:
+        if not state_id:
             raise HTTPException(status_code=400, detail="state_id is required when reverting a Dynamic State")
-        s_uuid = _parse_uuid(payload.state_id, "state_id")
-        target_state = (
-            await session.execute(
-                select(CharacterStateModel).where(
-                    CharacterStateModel.id == s_uuid,
-                    CharacterStateModel.character_id == char.id,
-                )
-            )
-        ).scalar_one_or_none()
-        if not target_state:
-            raise HTTPException(status_code=404, detail="Character state not found")
+        target_state = await _get_character_state_or_404(session, char.id, state_id)
         slot_key = "state"
         meta_key = f"state_{target_state.id}"
     else:
-        slot_key = _normalize_sheet_slot(payload.slot_key, default="closeup")
+        slot_key = _normalize_sheet_slot(slot_key_raw, default="closeup")
         if slot_key not in _SLOT_URL_ATTR_MAP:
-            raise HTTPException(status_code=400, detail=f"Invalid slot_key '{payload.slot_key}'")
+            raise HTTPException(status_code=400, detail=f"Invalid slot_key '{slot_key_raw}'")
         meta_key = slot_key
 
     slot_entry = dict(meta.get(meta_key) or {})
@@ -5418,7 +5835,8 @@ async def revert_character_asset_1k(
         setattr(char, _SLOT_URL_ATTR_MAP[slot_key], prev_1k_url)
 
     dims = _read_image_dimensions_from_url(prev_1k_url)
-    actual_w, actual_h = dims if dims else (1024, 1024)
+    fallback_1k = (1344, 768) if slot_key in ("expression", "front") else ((768, 1024) if slot_key in ("side", "three_quarter", "back", "tpose", "action") else (1024, 1024))
+    actual_w, actual_h = dims if dims else fallback_1k
     is_2k = max(actual_w, actual_h) >= 1920
 
     slot_entry["image_url"] = prev_1k_url
@@ -5439,13 +5857,47 @@ async def revert_character_asset_1k(
         "status": "reverted",
         "character_id": str(char.id),
         "slot_key": slot_key,
-        "state_id": payload.state_id,
+        "state_id": state_id,
         "image_url": prev_1k_url,
         "resolution_width": actual_w,
         "resolution_height": actual_h,
         "is_2k": is_2k,
         "message": f"Reverted {meta_key} back to 1K ({actual_w}×{actual_h})",
     }
+
+
+@router.post("/bible/characters/{character_id}/revert-asset", status_code=status.HTTP_200_OK)
+@router.post("/characters/{character_id}/revert-asset", status_code=status.HTTP_200_OK)
+async def revert_character_asset_1k(
+    character_id: str,
+    payload: CharacterAssetRevertRequest,
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Revert an upscaled character asset or dynamic state back to its stored 1K image."""
+    return await _revert_character_asset_impl(
+        session=session,
+        character_id=character_id,
+        slot_key_raw=payload.slot_key,
+        state_id=payload.state_id,
+    )
+
+
+@router.post("/bible/characters/{character_id}/states/{state_id}/revert-asset", status_code=status.HTTP_200_OK)
+@router.post("/characters/{character_id}/states/{state_id}/revert-asset", status_code=status.HTTP_200_OK)
+async def revert_character_state_asset_1k(
+    character_id: str,
+    state_id: str,
+    current_user: UserModel = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Revert an upscaled Dynamic State back to its stored 1K image."""
+    return await _revert_character_asset_impl(
+        session=session,
+        character_id=character_id,
+        slot_key_raw="state",
+        state_id=state_id,
+    )
 
 
 @router.post("/projects/{project_id}/characters/preview/upscale", status_code=status.HTTP_200_OK)

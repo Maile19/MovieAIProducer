@@ -33,7 +33,15 @@ import {
   AlertCircle,
   Download,
 } from "lucide-react";
-import { Character, SheetPromptItem, Project, api, FlowProxyStatus } from "@/lib/api";
+import {
+  Character,
+  CharacterMatrixSlotKey,
+  CharacterSheetUploadResponse,
+  SheetPromptItem,
+  Project,
+  api,
+  FlowProxyStatus,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
 import ObsidianDropdown from "@/components/ui/ObsidianDropdown";
 import AIRenderProviderCard from "@/components/AIRenderProviderCard";
@@ -530,7 +538,10 @@ export default function CharacterMatrixTab({
   // Per-card Upscale 2K Kit modal, revert locking, preview dimensions, and toast feedback
   const [upscalingSlots, setUpscalingSlots] = useState<Record<string, boolean>>({});
   const [upscaleKitModal, setUpscaleKitModal] = useState<{
-    slotKey: "closeup" | "expression" | "front";
+    slotKey: CharacterMatrixSlotKey | "state";
+    stateId?: string;
+    stateCode?: string;
+    stateLabel?: string | null;
     positivePrompt: string;
     negativePrompt: string;
     target: { width: number; height: number; aspect_ratio: string };
@@ -1638,48 +1649,57 @@ export default function CharacterMatrixTab({
     return success;
   };
 
-  // Per-Card Manual Photo Upload / Replace Handler
-  const handleUploadSheet = async (slot: string, file: File) => {
+  const SHEET_SLOT_LABELS: Record<string, string> = {
+    closeup: "Card 1 (Close-Up)",
+    expression: "Card 2 (Expression Sheet 3x2)",
+    front: "Card 3 (4-Panel Master Reference)",
+    side: "Card 4 (Side Profile)",
+    three_quarter: "Card 5 (3/4 Hero Angle)",
+    back: "Card 6 (Back View)",
+    tpose: "Card 7 (T-Pose Sheet)",
+    action: "Card 8 (Dynamic Action)",
+  };
+
+  // Shared Manual Upload / Replace Handler for Cards 1-8 & Dynamic States
+  const executeManualImageUpload = async (params: {
+    uploadKey: string;
+    label: string;
+    file: File;
+    performUpload: (effectiveCharId: string) => Promise<CharacterSheetUploadResponse>;
+    onSuccessPatch: (
+      effectiveCharId: string,
+      res: CharacterSheetUploadResponse,
+      dims: { resW: number; resH: number; is2k: boolean; prev1k: string | null }
+    ) => void;
+    shouldCloseModal: (
+      prevModal: NonNullable<typeof upscaleKitModal>
+    ) => boolean;
+  }) => {
+    const { uploadKey, label, file, performUpload, onSuccessPatch, shouldCloseModal } = params;
     if (!selectedChar?.id || !file) return;
     if (file.size > 20 * 1024 * 1024) {
       setUploadErrors((prev) => ({
         ...prev,
-        [slot]: "File exceeds maximum 20MB limit.",
+        [uploadKey]: "File exceeds maximum 20MB limit.",
       }));
       return;
     }
-    setUploadingSlots((prev) => ({ ...prev, [slot]: true }));
-    setUploadErrors((prev) => ({ ...prev, [slot]: null }));
+    setUploadingSlots((prev) => ({ ...prev, [uploadKey]: true }));
+    setUploadErrors((prev) => ({ ...prev, [uploadKey]: null }));
     try {
       const effectiveCharId = await ensurePersistedCharacter(selectedChar);
-      const res = await api.bible.uploadCharacterSheet(effectiveCharId, slot, file);
+      const res = await performUpload(effectiveCharId);
       const resW = res.resolution_width ?? res.width;
       const resH = res.resolution_height ?? res.height;
       const is2k = !!res.is_2k || (!!resW && !!resH && Math.max(resW, resH) >= 1920);
-      onPatchCharacterAsset?.(effectiveCharId, slot, res.image_url, {
-        ...(res.sheet_metadata || {}),
-        resolution_width: resW,
-        resolution_height: resH,
-        width: resW,
-        height: resH,
-        is_2k: is2k,
-        previous_1k_url: res.previous_1k_url ?? res.sheet_metadata?.previous_1k_url ?? null,
-        source: "manual_upload",
-      });
-      setUpscaleKitModal((prev) => (prev && prev.slotKey === slot ? null : prev));
-      const slotLabel =
-        slot === "closeup"
-          ? "Card 1 (Close-Up)"
-          : slot === "expression"
-          ? "Card 2 (Expression Sheet 3x2)"
-          : slot === "front"
-          ? "Card 3 (4-Panel Master Reference)"
-          : slot;
+      const prev1k = res.previous_1k_url ?? res.sheet_metadata?.previous_1k_url ?? null;
+      onSuccessPatch(effectiveCharId, res, { resW, resH, is2k, prev1k });
+      setUpscaleKitModal((prev) => (prev && shouldCloseModal(prev) ? null : prev));
       showUpscaleToast(
         is2k ? "2K Ready Terpasang" : "Foto Diperbarui",
         is2k
-          ? `Aset ${slotLabel} terpasang pada ${resW}×${resH} (2K Ready).`
-          : `Aset ${slotLabel} diperbarui (${resW}×${resH}).`
+          ? `Aset ${label} terpasang pada ${resW}×${resH} (2K Ready).`
+          : `Aset ${label} diperbarui (${resW}×${resH}).`
       );
       if (onSilentRefresh) {
         await onSilentRefresh();
@@ -1691,11 +1711,61 @@ export default function CharacterMatrixTab({
       console.error("Upload sheet error:", err);
       setUploadErrors((prev) => ({
         ...prev,
-        [slot]: err?.message || "Gagal mengunggah foto aset.",
+        [uploadKey]: err?.message || "Gagal mengunggah foto aset.",
       }));
     } finally {
-      setUploadingSlots((prev) => ({ ...prev, [slot]: false }));
+      setUploadingSlots((prev) => ({ ...prev, [uploadKey]: false }));
     }
+  };
+
+  // Per-Card Manual Photo Upload / Replace Handler (Cards 1-8)
+  const handleUploadSheet = async (slot: string, file: File) => {
+    await executeManualImageUpload({
+      uploadKey: slot,
+      label: SHEET_SLOT_LABELS[slot] || slot,
+      file,
+      performUpload: (effectiveCharId) => api.bible.uploadCharacterSheet(effectiveCharId, slot, file),
+      onSuccessPatch: (effectiveCharId, res, { resW, resH, is2k, prev1k }) => {
+        onPatchCharacterAsset?.(effectiveCharId, slot, res.image_url, {
+          ...(res.sheet_metadata || {}),
+          resolution_width: resW,
+          resolution_height: resH,
+          width: resW,
+          height: resH,
+          is_2k: is2k,
+          previous_1k_url: prev1k,
+          source: "manual_upload",
+        });
+      },
+      shouldCloseModal: (prev) => prev.slotKey === slot && !prev.stateId,
+    });
+  };
+
+  // Per-State Manual Photo Upload / Replace Handler (Dynamic States #State 01-05+)
+  const handleUploadStateImage = async (
+    stateId: string,
+    stateCode: string,
+    file: File
+  ) => {
+    await executeManualImageUpload({
+      uploadKey: `state_${stateId}`,
+      label: stateCode || "Dynamic State",
+      file,
+      performUpload: (effectiveCharId) =>
+        api.bible.uploadCharacterStateImage(effectiveCharId, stateId, file),
+      onSuccessPatch: (effectiveCharId, res, { resW, resH, is2k, prev1k }) => {
+        onPatchCharacterStateAsset?.(effectiveCharId, stateId, res.image_url, {
+          resolution_width: resW,
+          resolution_height: resH,
+          width: resW,
+          height: resH,
+          is_2k: is2k,
+          previous_1k_url: prev1k,
+          source: "manual_upload",
+        });
+      },
+      shouldCloseModal: (prev) => prev.slotKey === "state" && prev.stateId === stateId,
+    });
   };
 
   // Render Visual Asset for Character Turnaround, 7-Sheet, or State
@@ -2376,13 +2446,17 @@ export default function CharacterMatrixTab({
     return `${pos}\n\nNegative prompt: ${neg}`;
   };
 
-  const handleOpenUpscale2kKit = async (slotKey: "closeup" | "expression" | "front") => {
+  const handleOpenUpscale2kKit = async (
+    slotKey: CharacterMatrixSlotKey | "state",
+    stateInfo?: { stateId: string; stateCode: string; stateLabel?: string | null }
+  ) => {
     if (!selectedChar?.id || isLocked) return;
+    const actionLabel = stateInfo ? stateInfo.stateCode : slotKey;
     if (isBatchActive) {
-      showBatchLockNotification(`Upscale 2K Kit (${slotKey})`);
+      showBatchLockNotification(`Upscale 2K Kit (${actionLabel})`);
       return;
     }
-    const cached = sheetPrompts[slotKey];
+    const cached = stateInfo ? sheetPrompts[stateInfo.stateCode] : sheetPrompts[slotKey];
     const existingFrontMeta = selectedChar?.sheet_metadata?.front;
     const isLegacyPortraitFront =
       slotKey === "front" &&
@@ -2390,13 +2464,15 @@ export default function CharacterMatrixTab({
       !!existingFrontMeta?.resolution_height &&
       existingFrontMeta.resolution_height > existingFrontMeta.resolution_width;
     const defaultTarget =
-      slotKey === "closeup"
+      slotKey === "closeup" || slotKey === "state"
         ? { width: 2048, height: 2048, aspect_ratio: "1:1" }
         : slotKey === "expression"
         ? { width: 2048, height: 1152, aspect_ratio: "16:9" }
-        : isLegacyPortraitFront
-        ? { width: 1536, height: 2048, aspect_ratio: "3:4" }
-        : { width: 2048, height: 1152, aspect_ratio: "16:9" };
+        : slotKey === "front"
+        ? isLegacyPortraitFront
+          ? { width: 1536, height: 2048, aspect_ratio: "3:4" }
+          : { width: 2048, height: 1152, aspect_ratio: "16:9" }
+        : { width: 1536, height: 2048, aspect_ratio: "3:4" };
 
     let positivePrompt = cached?.upscale_2k_prompt || "";
     let negativePrompt = cached?.upscale_2k_negative_prompt || "";
@@ -2411,6 +2487,9 @@ export default function CharacterMatrixTab({
 
     setUpscaleKitModal({
       slotKey,
+      stateId: stateInfo?.stateId,
+      stateCode: stateInfo?.stateCode,
+      stateLabel: stateInfo?.stateLabel,
       positivePrompt,
       negativePrompt,
       target,
@@ -2424,13 +2503,13 @@ export default function CharacterMatrixTab({
     });
 
     const downloadPromise = api.bible
-      .downloadCharacterAsset(selectedChar.id, slotKey, selectedChar.name)
+      .downloadCharacterAsset(selectedChar.id, slotKey, selectedChar.name, stateInfo?.stateId)
       .then((filename) => ({ ok: true as const, filename }))
       .catch((err: any) => ({ ok: false as const, error: err?.message || "Gagal mengunduh file gambar." }));
 
     const promptPromise = positivePrompt
       ? Promise.resolve(null)
-      : api.bible.getUpscalePrompt(selectedChar.id, slotKey).catch(() => null);
+      : api.bible.getUpscalePrompt(selectedChar.id, slotKey, stateInfo?.stateId).catch(() => null);
 
     const [copiedFromCache, downloadRes, fetchedPrompt] = await Promise.all([
       copyPromise,
@@ -2451,7 +2530,7 @@ export default function CharacterMatrixTab({
     }
 
     setUpscaleKitModal((prev) =>
-      prev && prev.slotKey === slotKey
+      prev && prev.slotKey === slotKey && prev.stateId === stateInfo?.stateId
         ? {
             ...prev,
             positivePrompt,
@@ -2484,23 +2563,31 @@ export default function CharacterMatrixTab({
     }
   };
 
-  const handleRetryKitDownload = async (slotKey: "closeup" | "expression" | "front") => {
+  const handleRetryKitDownload = async (
+    slotKey: CharacterMatrixSlotKey | "state",
+    stateId?: string
+  ) => {
     if (!selectedChar?.id) return;
     setUpscaleKitModal((prev) =>
-      prev && prev.slotKey === slotKey
+      prev && prev.slotKey === slotKey && prev.stateId === stateId
         ? { ...prev, downloadStatus: "downloading", downloadError: null }
         : prev
     );
     try {
-      const filename = await api.bible.downloadCharacterAsset(selectedChar.id, slotKey, selectedChar.name);
+      const filename = await api.bible.downloadCharacterAsset(
+        selectedChar.id,
+        slotKey,
+        selectedChar.name,
+        stateId
+      );
       setUpscaleKitModal((prev) =>
-        prev && prev.slotKey === slotKey
+        prev && prev.slotKey === slotKey && prev.stateId === stateId
           ? { ...prev, downloadStatus: "downloaded", downloadFilename: filename, downloadError: null }
           : prev
       );
     } catch (err: any) {
       setUpscaleKitModal((prev) =>
-        prev && prev.slotKey === slotKey
+        prev && prev.slotKey === slotKey && prev.stateId === stateId
           ? { ...prev, downloadStatus: "error", downloadError: err?.message || "Gagal mengunduh file gambar." }
           : prev
       );
@@ -2567,8 +2654,6 @@ export default function CharacterMatrixTab({
     const isRendering = !!renderingTargets[targetKey];
     const isUploading = !!uploadingSlots[cfg.slot];
     const isUpscaling = !!upscalingSlots[cfg.slot];
-    const isUpscale2kSupportedSlot =
-      cfg.slot === "closeup" || cfg.slot === "expression" || cfg.slot === "front";
     const statusText = pollStatus[targetKey];
     const errorMsg = uploadErrors[cfg.slot] || targetErrors[targetKey];
     const imageUrl = cfg.imageUrl;
@@ -2858,14 +2943,14 @@ export default function CharacterMatrixTab({
             </button>
           </div>
 
-          {/* Row 3: Manual Upscale 2K Kit & Revert 1K Controls (Row 1 Master Anchors: Card 1, Card 2, Card 3 ONLY) */}
-          {!isLocked && imageUrl && isUpscale2kSupportedSlot && (
+          {/* Row 3: Manual Upscale 2K Kit & Revert 1K Controls (All Cards 1-8) */}
+          {!isLocked && imageUrl && (
             <div className="flex items-center gap-1.5">
               <button
                 type="button"
                 onClick={() => {
                   if (is2k) return;
-                  handleOpenUpscale2kKit(cfg.slot as "closeup" | "expression" | "front");
+                  handleOpenUpscale2kKit(cfg.slot);
                 }}
                 disabled={isBatchActive || isRendering || isUploading || isUpscaling || is2k}
                 className={cn(
@@ -3713,25 +3798,41 @@ export default function CharacterMatrixTab({
           {(selectedChar.states || []).map((st) => {
             const targetKey = `state_${st.id}`;
             const isRendering = renderingTargets[targetKey];
+            const isStateUploading = !!uploadingSlots[targetKey];
             const isStateUpscaling = !!upscalingSlots[targetKey];
             const stateMeta = selectedChar?.sheet_metadata?.[targetKey];
             const stW = st.resolution_width ?? stateMeta?.resolution_width ?? stateMeta?.width;
             const stH = st.resolution_height ?? stateMeta?.resolution_height ?? stateMeta?.height;
             const stIs2k = !!(st.is_2k ?? stateMeta?.is_2k) || (!!stW && !!stH && Math.max(stW, stH) >= 1920);
-            const stPrev1k = st.previous_1k_url ?? stateMeta?.previous_1k_url;
+            const stPrev1k =
+              st.previous_1k_url === null
+                ? null
+                : st.previous_1k_url ?? stateMeta?.previous_1k_url;
             const stBadge = stIs2k
               ? `2K Ready • ${stW || 2048}×${stH || 2048}`
               : stW && stH
               ? `1K • ${stW}×${stH}`
               : "1K • 1024×1024";
             const statusText = pollStatus[targetKey];
-            const errorMsg = targetErrors[targetKey];
+            const errorMsg = uploadErrors[targetKey] || targetErrors[targetKey];
 
             return (
               <div
                 key={st.id || st.state_code}
                 className="p-3.5 rounded-xl bg-canvas border border-border hover:border-amber-500/40 transition-all space-y-3 font-mono text-xs flex flex-col justify-between"
               >
+                {/* Hidden File Input for Dynamic State Upload / Replace Hasil 2K */}
+                <input
+                  type="file"
+                  id={`upload-state-${st.id}`}
+                  className="hidden"
+                  accept="image/*,.heic,.heif"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = "";
+                    if (f && st.id) handleUploadStateImage(st.id, st.state_code, f);
+                  }}
+                />
                 <div>
                   <div className="flex items-center justify-between border-b border-border/80 pb-2 mb-2">
                     <div className="flex items-center gap-2">
@@ -3787,7 +3888,12 @@ export default function CharacterMatrixTab({
                   </div>
 
                   {/* State Image Preview */}
-                  {st.image_url ? (
+                  {isStateUploading ? (
+                    <div className="aspect-video w-full rounded-lg bg-panel border border-border/80 flex flex-col items-center justify-center p-3 mb-2.5 text-center space-y-1.5">
+                      <Loader2 className="w-5 h-5 text-amber-500 animate-spin" />
+                      <span className="text-[10px] text-amber-300">Mengunggah &amp; normalisasi foto...</span>
+                    </div>
+                  ) : st.image_url ? (
                     <div className="space-y-1.5 mb-2.5">
                       <div className="relative aspect-video w-full rounded-lg overflow-hidden border border-border group/stateimg">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -3803,6 +3909,7 @@ export default function CharacterMatrixTab({
                               ? "bg-emerald-950/85 text-emerald-300 border-emerald-500/50"
                               : "bg-black/75 text-amber-300 border-amber-500/30"
                           )}
+                          title={stIs2k ? "Native 2K Verified" : "Standard 1K Render"}
                         >
                           {stBadge}
                         </span>
@@ -3845,17 +3952,113 @@ export default function CharacterMatrixTab({
                           )}
                         </div>
                       </div>
-                      {!isLocked && stPrev1k && (
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => handleRevertAsset("state", st.id)}
-                            disabled={isBatchActive || isStateUpscaling || isRendering}
-                            className="py-1 px-2 rounded-lg bg-panel hover:bg-elevated border border-border text-[10px] font-semibold text-obsidian-secondary hover:text-amber-300 flex items-center gap-1"
-                          >
-                            <RotateCcw className="w-3 h-3" />
-                            <span>Revert 1K</span>
-                          </button>
+                      {!isLocked && (
+                        <div className="space-y-1.5 pt-1 text-[10px]">
+                          <div className="grid grid-cols-2 gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (isBatchActive) {
+                                  showBatchLockNotification(`Render Ulang State ${st.state_code}`);
+                                  return;
+                                }
+                                if (isRendering || isStateUploading) return;
+                                handleRenderAsset("state", undefined, st.id);
+                              }}
+                              disabled={isRendering || isStateUploading}
+                              aria-disabled={isBatchActive || isRendering || isStateUploading}
+                              className={cn(
+                                "py-1.5 px-2 rounded-lg font-bold flex items-center justify-center gap-1 transition-colors border",
+                                isBatchActive
+                                  ? "opacity-60 cursor-not-allowed border-amber-500/40 text-amber-300 bg-panel"
+                                  : "bg-panel hover:bg-elevated border-border hover:border-amber-500/50 text-obsidian-primary"
+                              )}
+                              title={`Render Ulang ${st.state_code}`}
+                            >
+                              <RefreshCw className="w-3 h-3 text-amber-400" />
+                              <span>Re-render</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (isBatchActive) {
+                                  showBatchLockNotification(`Upload ${st.state_code}`);
+                                  return;
+                                }
+                                if (isRendering || isStateUploading) return;
+                                document.getElementById(`upload-state-${st.id}`)?.click();
+                              }}
+                              disabled={isRendering || isStateUploading}
+                              aria-disabled={isBatchActive || isRendering || isStateUploading}
+                              className={cn(
+                                "py-1.5 px-2 rounded-lg border font-semibold flex items-center justify-center gap-1 transition-colors disabled:opacity-50",
+                                isBatchActive
+                                  ? "opacity-60 cursor-not-allowed bg-panel border-border text-obsidian-muted"
+                                  : "bg-panel hover:bg-elevated border-border hover:border-emerald-500/50 text-obsidian-secondary hover:text-obsidian-primary"
+                              )}
+                              title={`Replace photo for ${st.state_code}`}
+                            >
+                              <Upload className="w-3 h-3 text-emerald-400 shrink-0" />
+                              <span>Replace</span>
+                            </button>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (stIs2k) return;
+                                handleOpenUpscale2kKit("state", {
+                                  stateId: st.id,
+                                  stateCode: st.state_code,
+                                  stateLabel: st.state_label,
+                                });
+                              }}
+                              disabled={isBatchActive || isRendering || isStateUploading || isStateUpscaling || stIs2k}
+                              className={cn(
+                                "flex-1 py-1.5 px-2 rounded-lg border font-bold flex items-center justify-center gap-1 transition-colors disabled:opacity-60",
+                                stIs2k
+                                  ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300 cursor-default"
+                                  : isBatchActive
+                                  ? "bg-canvas border-border text-obsidian-muted cursor-not-allowed"
+                                  : "bg-indigo-500/15 hover:bg-indigo-500/25 border-indigo-400/40 text-indigo-300 hover:text-indigo-200"
+                              )}
+                              title={
+                                stIs2k
+                                  ? `Sudah 2K (${stBadge})`
+                                  : isBatchActive
+                                  ? "Dinonaktifkan saat Batch Orchestrator sedang aktif"
+                                  : "Download foto 1K, copy Frozen Prompt 2K, & buka Upscale 2K Kit"
+                              }
+                            >
+                              {stIs2k ? (
+                                <>
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                                  <span>2K Ready ({stW || 2048}×{stH || 2048})</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Sparkles className="w-3 h-3 text-indigo-300" />
+                                  <span>Upscale 2K</span>
+                                </>
+                              )}
+                            </button>
+                            {stPrev1k && (
+                              <button
+                                type="button"
+                                onClick={() => handleRevertAsset("state", st.id)}
+                                disabled={isBatchActive || isStateUpscaling || isRendering || isStateUploading}
+                                className="py-1.5 px-2 rounded-lg bg-panel hover:bg-elevated border border-border hover:border-amber-500/40 text-[10px] font-semibold text-obsidian-secondary hover:text-amber-300 flex items-center gap-1 disabled:opacity-50"
+                                title="Kembalikan ke versi 1K sebelumnya"
+                              >
+                                {isStateUpscaling ? (
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                ) : (
+                                  <RotateCcw className="w-3 h-3" />
+                                )}
+                                <span>Revert 1K</span>
+                              </button>
+                            )}
+                          </div>
                         </div>
                       )}
                     </div>
@@ -3873,7 +4076,10 @@ export default function CharacterMatrixTab({
                       </span>
                       <button
                         type="button"
-                        onClick={() => setTargetErrors((prev) => ({ ...prev, [targetKey]: null }))}
+                        onClick={() => {
+                          setUploadErrors((prev) => ({ ...prev, [targetKey]: null }));
+                          setTargetErrors((prev) => ({ ...prev, [targetKey]: null }));
+                        }}
                         className="text-rose-300/80 hover:text-rose-100 shrink-0"
                         title="Tutup pesan error"
                       >
@@ -3908,33 +4114,56 @@ export default function CharacterMatrixTab({
                   )}
                 </div>
 
-                {/* Render Button for State if not rendered yet */}
-                {!isLocked && !st.image_url && !isRendering && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (isBatchActive) {
-                        showBatchLockNotification(`Render Visual State ${st.state_code}`);
-                        return;
+                {/* Render & Upload Buttons for State if not rendered yet */}
+                {!isLocked && !st.image_url && !isRendering && !isStateUploading && (
+                  <div className="grid grid-cols-2 gap-1.5 mt-2.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (isBatchActive) {
+                          showBatchLockNotification(`Render Visual State ${st.state_code}`);
+                          return;
+                        }
+                        handleRenderAsset("state", undefined, st.id);
+                      }}
+                      aria-disabled={isBatchActive}
+                      className={cn(
+                        "flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg border text-[10px] font-bold transition-all shadow-sm",
+                        isBatchActive
+                          ? "bg-elevated opacity-60 cursor-not-allowed border-amber-500/30 text-amber-300"
+                          : "bg-elevated hover:bg-amber-500 hover:text-canvas border-border text-obsidian-secondary"
+                      )}
+                      title={
+                        isBatchActive
+                          ? "Terkunci: Proses batch sedang berlangsung"
+                          : `Render Visual State ${st.state_code}`
                       }
-                      handleRenderAsset("state", undefined, st.id);
-                    }}
-                    aria-disabled={isBatchActive}
-                    className={cn(
-                      "w-full mt-2.5 flex items-center justify-center gap-1.5 py-1.5 rounded-lg border text-[10px] font-bold transition-all shadow-sm",
-                      isBatchActive
-                        ? "bg-elevated opacity-60 cursor-not-allowed border-amber-500/30 text-amber-300"
-                        : "bg-elevated hover:bg-amber-500 hover:text-canvas border-border text-obsidian-secondary"
-                    )}
-                    title={
-                      isBatchActive
-                        ? "Terkunci: Proses batch sedang berlangsung"
-                        : `Render Visual State ${st.state_code}`
-                    }
-                  >
-                    <Sparkles className="w-3 h-3 text-amber-400" />
-                    <span>Render Visual State</span>
-                  </button>
+                    >
+                      <Sparkles className="w-3 h-3 text-amber-400" />
+                      <span>Render Visual State</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (isBatchActive) {
+                          showBatchLockNotification(`Upload ${st.state_code}`);
+                          return;
+                        }
+                        document.getElementById(`upload-state-${st.id}`)?.click();
+                      }}
+                      aria-disabled={isBatchActive}
+                      className={cn(
+                        "flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg border text-[10px] font-semibold transition-all shadow-sm",
+                        isBatchActive
+                          ? "bg-elevated opacity-60 cursor-not-allowed border-border text-obsidian-muted"
+                          : "bg-panel hover:bg-elevated border-border hover:border-emerald-500/50 text-obsidian-secondary hover:text-obsidian-primary"
+                      )}
+                      title={`Upload photo for ${st.state_code}`}
+                    >
+                      <Upload className="w-3 h-3 text-emerald-400" />
+                      <span>Upload</span>
+                    </button>
+                  </div>
                 )}
               </div>
             );
@@ -5861,8 +6090,33 @@ export default function CharacterMatrixTab({
         </div>
       )}
 
-      {/* Manual Upscale 2K Kit Modal (Row 1 Master Anchors: Card 1, Card 2, Card 3) */}
-      {upscaleKitModal && (
+      {/* Manual Upscale 2K Kit Modal (All Cards 1-8 & Dynamic States) */}
+      {upscaleKitModal && (() => {
+        const kitUploadKey =
+          upscaleKitModal.slotKey === "state" && upscaleKitModal.stateId
+            ? `state_${upscaleKitModal.stateId}`
+            : upscaleKitModal.slotKey;
+        const kitCardBadgeTitle =
+          upscaleKitModal.slotKey === "state"
+            ? `${upscaleKitModal.stateCode || "Dynamic State"}${
+                upscaleKitModal.stateLabel ? ` (${upscaleKitModal.stateLabel})` : ""
+              }`
+            : upscaleKitModal.slotKey === "closeup"
+            ? "Card 1: Close-Up"
+            : upscaleKitModal.slotKey === "expression"
+            ? "Card 2: Expression Sheet (3x2)"
+            : upscaleKitModal.slotKey === "front"
+            ? "Card 3: 4-Panel Reference"
+            : upscaleKitModal.slotKey === "side"
+            ? "Card 4: Side Profile"
+            : upscaleKitModal.slotKey === "three_quarter"
+            ? "Card 5: 3/4 Hero Angle"
+            : upscaleKitModal.slotKey === "back"
+            ? "Card 6: Back View"
+            : upscaleKitModal.slotKey === "tpose"
+            ? "Card 7: T-Pose Sheet"
+            : "Card 8: Dynamic Action";
+        return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="w-full max-w-xl max-h-[92vh] flex flex-col rounded-2xl bg-panel border border-indigo-500/40 shadow-2xl text-obsidian-primary font-mono text-xs overflow-hidden">
             {/* Modal Header */}
@@ -5874,11 +6128,7 @@ export default function CharacterMatrixTab({
                     <span>Upscale 2K Kit</span>
                   </span>
                   <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-500/15 text-indigo-200 border border-indigo-400/30">
-                    {upscaleKitModal.slotKey === "closeup"
-                      ? `Card 1: Close-Up • ${upscaleKitModal.target.width}×${upscaleKitModal.target.height} (${upscaleKitModal.target.aspect_ratio})`
-                      : upscaleKitModal.slotKey === "expression"
-                      ? `Card 2: Expression Sheet (3x2) • ${upscaleKitModal.target.width}×${upscaleKitModal.target.height} (${upscaleKitModal.target.aspect_ratio})`
-                      : `Card 3: 4-Panel Reference • ${upscaleKitModal.target.width}×${upscaleKitModal.target.height} (${upscaleKitModal.target.aspect_ratio})`}
+                    {`${kitCardBadgeTitle} • ${upscaleKitModal.target.width}×${upscaleKitModal.target.height} (${upscaleKitModal.target.aspect_ratio})`}
                   </span>
                   <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 uppercase">
                     {(upscaleKitModal.styleGateMode || "full").toUpperCase()}
@@ -5942,7 +6192,7 @@ export default function CharacterMatrixTab({
 
                 <button
                   type="button"
-                  onClick={() => handleRetryKitDownload(upscaleKitModal.slotKey)}
+                  onClick={() => handleRetryKitDownload(upscaleKitModal.slotKey, upscaleKitModal.stateId)}
                   disabled={upscaleKitModal.downloadStatus === "downloading"}
                   className="px-3 py-1.5 rounded-lg bg-panel hover:bg-elevated border border-border hover:border-indigo-400/50 text-obsidian-primary text-[11px] font-bold flex items-center justify-center gap-1.5 shrink-0 transition-colors disabled:opacity-50"
                 >
@@ -6048,13 +6298,16 @@ export default function CharacterMatrixTab({
               <button
                 type="button"
                 onClick={() => {
-                  const slot = upscaleKitModal.slotKey;
-                  document.getElementById(`upload-sheet-${slot}`)?.click();
+                  const targetInputId =
+                    upscaleKitModal.slotKey === "state" && upscaleKitModal.stateId
+                      ? `upload-state-${upscaleKitModal.stateId}`
+                      : `upload-sheet-${upscaleKitModal.slotKey}`;
+                  document.getElementById(targetInputId)?.click();
                 }}
-                disabled={!!uploadingSlots[upscaleKitModal.slotKey]}
+                disabled={!!uploadingSlots[kitUploadKey]}
                 className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-canvas font-bold text-xs flex items-center gap-2 shadow-lg transition-colors disabled:opacity-50"
               >
-                {uploadingSlots[upscaleKitModal.slotKey] ? (
+                {uploadingSlots[kitUploadKey] ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
                     <span>Mengunggah Hasil 2K...</span>
@@ -6069,7 +6322,8 @@ export default function CharacterMatrixTab({
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* Upscale 2K / Revert 1K Toast Notification */}
       {upscaleToast?.isOpen && (

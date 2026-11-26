@@ -458,12 +458,23 @@ export interface CharacterState {
   injuries_and_wear?: string;
   expression_anchor?: string;
   image_url?: string | null;
+  source?: string | null;
   resolution_width?: number | null;
   resolution_height?: number | null;
   is_2k?: boolean;
   previous_1k_url?: string | null;
   created_at?: string;
 }
+
+export type CharacterMatrixSlotKey =
+  | "closeup"
+  | "expression"
+  | "front"
+  | "side"
+  | "three_quarter"
+  | "back"
+  | "tpose"
+  | "action";
 
 export interface CharacterSheetMeta {
   image_url?: string;
@@ -526,7 +537,10 @@ export interface Upscale2KPromptResponse {
   status: string;
   character_id: string;
   character_name: string;
-  slot_key: "closeup" | "front";
+  slot_key: CharacterMatrixSlotKey | "state" | string;
+  state_id?: string | null;
+  state_code?: string | null;
+  state_label?: string | null;
   dna_seed: number;
   style_code: string;
   style_gate_mode: "full" | "light_override" | "strict_bypass" | string;
@@ -552,6 +566,8 @@ export interface CharacterSheetUploadResponse {
   image_url: string;
   previous_1k_url?: string | null;
   slot: string;
+  state_id?: string | null;
+  state_code?: string | null;
   character_id: string;
   width: number;
   height: number;
@@ -1010,50 +1026,67 @@ export async function apiRequest<T = unknown>(
   });
 
   if (!response.ok) {
-    let errorDetail = response.statusText;
+    const statusLabel = response.statusText ? `${response.status} ${response.statusText}` : `HTTP ${response.status}`;
+    let errorDetail =
+      response.status === 504
+        ? `Gateway Timeout (${statusLabel}): proses render upstream melebihi batas waktu.`
+        : response.status === 502
+        ? `Bad Gateway (${statusLabel}): server backend atau provider upstream gagal merespons.`
+        : statusLabel;
     let errorCode = "UNKNOWN_ERROR";
     let errorExtra: any = undefined;
     try {
-      const errJson = await response.json();
-      if (errJson?.error) {
-        if (typeof errJson.error === "string") {
-          errorDetail = errJson.error;
-        } else if (typeof errJson.error === "object" && errJson.error !== null) {
-          errorExtra = errJson.error;
-          errorCode = errJson.error.code || errJson.error.error_code || errorCode;
-          if (typeof errJson.error.message === "string") {
-            errorDetail = errJson.error.message;
-          } else if (typeof errJson.error.message === "object" && errJson.error.message !== null) {
-            const nested = errJson.error.message;
-            errorCode = nested.error_code || nested.code || errorCode;
-            errorDetail = nested.message || nested.detail || JSON.stringify(nested);
-            errorExtra = nested;
-          } else if (errJson.error.detail) {
-            errorDetail =
-              typeof errJson.error.detail === "string"
-                ? errJson.error.detail
-                : JSON.stringify(errJson.error.detail);
-          } else {
-            errorDetail = JSON.stringify(errJson.error);
+      const rawText = await response.text();
+      if (rawText) {
+        try {
+          const errJson = JSON.parse(rawText);
+          if (errJson?.error) {
+            if (typeof errJson.error === "string") {
+              errorDetail = errJson.error;
+            } else if (typeof errJson.error === "object" && errJson.error !== null) {
+              errorExtra = errJson.error;
+              errorCode = errJson.error.code || errJson.error.error_code || errorCode;
+              if (typeof errJson.error.message === "string") {
+                errorDetail = errJson.error.message;
+              } else if (typeof errJson.error.message === "object" && errJson.error.message !== null) {
+                const nested = errJson.error.message;
+                errorCode = nested.error_code || nested.code || errorCode;
+                errorDetail = nested.message || nested.detail || JSON.stringify(nested);
+                errorExtra = nested;
+              } else if (errJson.error.detail) {
+                errorDetail =
+                  typeof errJson.error.detail === "string"
+                    ? errJson.error.detail
+                    : JSON.stringify(errJson.error.detail);
+              } else {
+                errorDetail = JSON.stringify(errJson.error);
+              }
+            }
+          } else if (errJson?.detail) {
+            if (Array.isArray(errJson.detail)) {
+              errorDetail = errJson.detail.map((e: any) => e.msg || JSON.stringify(e)).join(", ");
+              errorCode = "VALIDATION_ERROR";
+            } else if (typeof errJson.detail === "object" && errJson.detail !== null) {
+              errorDetail = errJson.detail.message || errJson.detail.detail || JSON.stringify(errJson.detail);
+              errorCode = errJson.detail.error_code || errJson.detail.code || errorCode;
+              errorExtra = errJson.detail;
+            } else {
+              errorDetail = typeof errJson.detail === "string" ? errJson.detail : String(errJson.detail);
+            }
+          }
+          if (errJson?.error_code) {
+            errorCode = errJson.error_code;
+          }
+        } catch {
+          // Non-JSON error body (e.g. Nginx HTML error page)
+          const cleanText = rawText.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+          if (cleanText) {
+            errorDetail = `${statusLabel}: ${cleanText.slice(0, 180)}`;
           }
         }
-      } else if (errJson?.detail) {
-        if (Array.isArray(errJson.detail)) {
-          errorDetail = errJson.detail.map((e: any) => e.msg || JSON.stringify(e)).join(", ");
-          errorCode = "VALIDATION_ERROR";
-        } else if (typeof errJson.detail === "object" && errJson.detail !== null) {
-          errorDetail = errJson.detail.message || errJson.detail.detail || JSON.stringify(errJson.detail);
-          errorCode = errJson.detail.error_code || errJson.detail.code || errorCode;
-          errorExtra = errJson.detail;
-        } else {
-          errorDetail = typeof errJson.detail === "string" ? errJson.detail : String(errJson.detail);
-        }
-      }
-      if (errJson?.error_code) {
-        errorCode = errJson.error_code;
       }
     } catch {
-      // ignore json parse error on non-json body
+      // ignore body read error
     }
     throw new ApiError(response.status, errorDetail, errorCode, errorExtra);
   }
@@ -1406,6 +1439,7 @@ export const api = {
         target?: "closeup" | "expression" | "front" | "both" | "all";
         aspect_ratio?: string;
         preview_token?: string;
+        respect_provider_override?: boolean;
       }
     ): Promise<{
       status: "completed" | "queued";
@@ -1644,19 +1678,35 @@ export const api = {
     },
     getUpscalePrompt: async (
       characterId: string,
-      slotKey: "closeup" | "front"
+      slotKey: CharacterMatrixSlotKey | "state" | string,
+      stateId?: string
     ): Promise<Upscale2KPromptResponse> => {
+      const qs = new URLSearchParams();
+      if (stateId) {
+        qs.set("slot_key", "state");
+        qs.set("state_id", stateId);
+      } else {
+        qs.set("slot_key", slotKey);
+      }
       return apiRequest<Upscale2KPromptResponse>(
-        `/bible/characters/${characterId}/upscale-prompt?slot_key=${encodeURIComponent(slotKey)}`
+        `/bible/characters/${characterId}/upscale-prompt?${qs.toString()}`
       );
     },
     downloadCharacterAsset: async (
       characterId: string,
-      slotKey: "closeup" | "front",
-      characterName?: string
+      slotKey: CharacterMatrixSlotKey | "state" | string,
+      characterName?: string,
+      stateId?: string
     ): Promise<string> => {
       const baseUrl = getApiBaseUrl();
-      const url = `${baseUrl}/bible/characters/${characterId}/download-asset?slot_key=${encodeURIComponent(slotKey)}`;
+      const qs = new URLSearchParams();
+      if (stateId) {
+        qs.set("slot_key", "state");
+        qs.set("state_id", stateId);
+      } else {
+        qs.set("slot_key", slotKey);
+      }
+      const url = `${baseUrl}/bible/characters/${characterId}/download-asset?${qs.toString()}`;
       const response = await fetch(url, {
         method: "GET",
         credentials: "include",
@@ -1678,7 +1728,8 @@ export const api = {
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, "-")
           .replace(/^-+|-+$/g, "") || "character";
-      const filename = fnMatch?.[1]?.trim() || `${fallbackSlug}_${slotKey}_1k.png`;
+      const fallbackToken = stateId ? `state_${stateId.slice(0, 8)}` : slotKey;
+      const filename = fnMatch?.[1]?.trim() || `${fallbackSlug}_${fallbackToken}_1k.png`;
       const blob = await response.blob();
       const blobUrl = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
@@ -1703,6 +1754,21 @@ export const api = {
         method: "POST",
         body: formData,
       });
+    },
+    uploadCharacterStateImage: async (
+      characterId: string,
+      stateId: string,
+      file: File
+    ): Promise<CharacterSheetUploadResponse> => {
+      const formData = new FormData();
+      formData.append("file", file);
+      return apiRequest<CharacterSheetUploadResponse>(
+        `/bible/characters/${characterId}/states/${stateId}/upload-image`,
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
     },
     upscaleCharacterAsset: async (
       characterId: string,
