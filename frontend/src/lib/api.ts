@@ -1613,9 +1613,11 @@ export const api = {
         model?: string;
         prompt_override?: string;
         aspect_ratio?: string;
+        skip_existing?: boolean;
       }
     ): Promise<{
-      status: "completed" | "queued";
+      status: "completed" | "queued" | "skipped";
+      skipped?: boolean;
       job_id?: string;
       image_url?: string;
       provider: string;

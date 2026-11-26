@@ -8,6 +8,10 @@ import {
   ProviderCategory,
   UserProviderConfig,
 } from '@/config/aiProviders';
+import FreeGeneratePortals, {
+  FREE_PORTALS_UPDATED_EVENT,
+  emitFreePortalsUpdated,
+} from './FreeGeneratePortals';
 
 interface Props {
   projectId: string;
@@ -33,6 +37,8 @@ export default function AIRenderProviderCard({
 }: Props) {
   const [activeTab, setActiveTab] = useState<ProviderCategory>('core');
   const [selectedId, setSelectedId] = useState<string>(initialProviderId);
+  const [savedProviderId, setSavedProviderId] = useState<string>(initialProviderId);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState<boolean>(false);
   const [applyToAllScenes, setApplyToAllScenes] = useState<boolean>(true);
   const [showKey, setShowKey] = useState<boolean>(false);
   const [saving, setSaving] = useState<boolean>(false);
@@ -58,12 +64,8 @@ export default function AIRenderProviderCard({
     return map;
   });
 
-  // Spoiler Free Generate Portals
-  const [freeOpen, setFreeOpen] = useState<boolean>(false);
+  // Free Generate Portals (synced via SQLite, localStorage, & custom event)
   const [freePortals, setFreePortals] = useState<FreePortalItem[]>(DEFAULT_FREE_PORTALS);
-  const [newFreeName, setNewFreeName] = useState('');
-  const [newFreeUrl, setNewFreeUrl] = useState('');
-  const [newFreeNote, setNewFreeNote] = useState('');
 
   // Load saved state dari backend API & localStorage fallback
   useEffect(() => {
@@ -78,7 +80,11 @@ export default function AIRenderProviderCard({
         if (res.ok) {
           const data = await res.json();
           if (data.configured && isMounted) {
-            if (data.activeProviderId) setSelectedId(data.activeProviderId);
+            if (data.activeProviderId) {
+              setSelectedId(data.activeProviderId);
+              setSavedProviderId(data.activeProviderId);
+              setHasUnsavedChanges(false);
+            }
             if (typeof data.applyToAllScenes === 'boolean') {
               setApplyToAllScenes(data.applyToAllScenes);
             }
@@ -128,8 +134,18 @@ export default function AIRenderProviderCard({
     }
 
     loadSettings();
+
+    const handlePortalsSync = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ projectId?: string; freePortals?: FreePortalItem[] }>).detail;
+      if (detail?.projectId === projectId && Array.isArray(detail.freePortals) && isMounted) {
+        setFreePortals(detail.freePortals);
+      }
+    };
+
+    window.addEventListener(FREE_PORTALS_UPDATED_EVENT, handlePortalsSync);
     return () => {
       isMounted = false;
+      window.removeEventListener(FREE_PORTALS_UPDATED_EVENT, handlePortalsSync);
     };
   }, [projectId]);
 
@@ -157,6 +173,7 @@ export default function AIRenderProviderCard({
         ...patch,
       },
     }));
+    setHasUnsavedChanges(true);
     setTestResult(null); // Reset hasil ping jika config berubah
   };
 
@@ -228,6 +245,8 @@ export default function AIRenderProviderCard({
       }
 
       if (res.ok) {
+        setSavedProviderId(selectedId);
+        setHasUnsavedChanges(false);
         setStatusMsg(
           applyToAllScenes
             ? `Tersimpan & diterapkan global ke seluruh scene (${activeProvider.name})`
@@ -252,6 +271,7 @@ export default function AIRenderProviderCard({
         freePortals: updatedPortals,
       };
       localStorage.setItem(`${STORAGE_KEY}_${projectId}`, JSON.stringify(payload));
+      emitFreePortalsUpdated(projectId, updatedPortals);
       await fetch(`/api/v1/projects/${projectId}/render-provider`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -260,35 +280,6 @@ export default function AIRenderProviderCard({
     } catch (err) {
       console.warn('Auto-sync free portals to SQLite failed:', err);
     }
-  };
-
-  const handleAddFreePortal = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newFreeName.trim() || !newFreeUrl.trim()) return;
-    const normalizedUrl = newFreeUrl.startsWith('http')
-      ? newFreeUrl.trim()
-      : `https://${newFreeUrl.trim()}`;
-
-    const updated = [
-      ...freePortals,
-      {
-        id: `free-${Date.now()}`,
-        name: newFreeName.trim(),
-        url: normalizedUrl,
-        note: newFreeNote.trim() || undefined,
-      },
-    ];
-    setFreePortals(updated);
-    setNewFreeName('');
-    setNewFreeUrl('');
-    setNewFreeNote('');
-    syncFreePortalsToSQLite(updated);
-  };
-
-  const handleDeleteFreePortal = (id: string) => {
-    const updated = freePortals.filter((item) => item.id !== id);
-    setFreePortals(updated);
-    syncFreePortalsToSQLite(updated);
   };
 
   return (
@@ -350,6 +341,7 @@ export default function AIRenderProviderCard({
                 type="button"
                 onClick={() => {
                   setSelectedId(provider.id);
+                  setHasUnsavedChanges(provider.id !== savedProviderId);
                   setTestResult(null);
                 }}
                 className="flex flex-1 flex-col items-start text-left min-w-0"
@@ -552,6 +544,12 @@ export default function AIRenderProviderCard({
         )}
 
         {/* Toggle Terapkan ke Seluruh Scene + Tombol Simpan */}
+        {(hasUnsavedChanges || selectedId !== savedProviderId) && (
+          <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-[10px] text-amber-300">
+            Perubahan provider/konfigurasi (<strong>{activeProvider.name}</strong>) belum disimpan — klik{' '}
+            <strong>Save Global Provider</strong> untuk mengaktifkan saat render.
+          </div>
+        )}
         <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-800/80">
           <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer">
             <input
@@ -577,91 +575,15 @@ export default function AIRenderProviderCard({
       </div>
 
       {/* === SPOILER: FREE GENERATE PORTALS === */}
-      <div className="mt-4 rounded-lg border border-slate-800 bg-[#070a12]">
-        <button
-          type="button"
-          onClick={() => setFreeOpen((o) => !o)}
-          className="flex w-full items-center justify-between px-3 py-2.5 text-left text-xs font-bold text-emerald-400 hover:bg-slate-900/60 transition"
-        >
-          <span>🎁 Free Generate Portals ({freePortals.length} tersimpan)</span>
-          <span className="text-slate-400">{freeOpen ? '▲ Tutup' : '▼ Buka'}</span>
-        </button>
-
-        {freeOpen && (
-          <div className="border-t border-slate-800 p-3 space-y-3">
-            {/* Daftar Link Tersimpan */}
-            <div className="space-y-2">
-              {freePortals.map((item) => (
-                <div
-                  key={item.id}
-                  className="flex items-center justify-between gap-2 rounded border border-slate-800 bg-[#111827] px-2.5 py-2"
-                >
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-xs font-semibold text-slate-100">{item.name}</p>
-                    {item.note && <p className="truncate text-[10px] text-slate-400">{item.note}</p>}
-                  </div>
-                  <div className="flex shrink-0 items-center gap-1.5">
-                    <a
-                      href={item.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="rounded bg-emerald-500/20 border border-emerald-500/40 px-2.5 py-1 text-[10px] font-bold text-emerald-300 hover:bg-emerald-500/30 transition"
-                    >
-                      Buka ↗
-                    </a>
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteFreePortal(item.id)}
-                      className="rounded border border-rose-500/30 px-2 py-1 text-[10px] text-rose-400 hover:bg-rose-500/10 transition"
-                      title="Hapus link"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {/* Form Tambah Link Free Generate Baru */}
-            <form onSubmit={handleAddFreePortal} className="space-y-2 border-t border-slate-800 pt-2.5">
-              <p className="text-[10px] font-semibold text-slate-400 uppercase">
-                + Tambah Portal Free Generate
-              </p>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                <input
-                  type="text"
-                  value={newFreeName}
-                  onChange={(e) => setNewFreeName(e.target.value)}
-                  placeholder="Nama Portal (cth: Whisk / Bing)"
-                  className="rounded border border-slate-700 bg-[#0b101b] px-2.5 py-1.5 text-xs text-slate-200 focus:border-emerald-400 focus:outline-none"
-                />
-                <input
-                  type="text"
-                  value={newFreeUrl}
-                  onChange={(e) => setNewFreeUrl(e.target.value)}
-                  placeholder="https://..."
-                  className="rounded border border-slate-700 bg-[#0b101b] px-2.5 py-1.5 text-xs text-slate-200 focus:border-emerald-400 focus:outline-none"
-                />
-              </div>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={newFreeNote}
-                  onChange={(e) => setNewFreeNote(e.target.value)}
-                  placeholder="Catatan kuota gratis (opsional)"
-                  className="flex-1 rounded border border-slate-700 bg-[#0b101b] px-2.5 py-1.5 text-xs text-slate-200 focus:border-emerald-400 focus:outline-none"
-                />
-                <button
-                  type="submit"
-                  className="rounded bg-emerald-500 px-3 py-1.5 text-xs font-bold text-slate-950 hover:bg-emerald-400 transition"
-                >
-                  Simpan Link
-                </button>
-              </div>
-            </form>
-          </div>
-        )}
-      </div>
+      <FreeGeneratePortals
+        projectId={projectId}
+        portals={freePortals}
+        onPortalsChange={(updated) => {
+          setFreePortals(updated);
+          void syncFreePortalsToSQLite(updated);
+        }}
+        className="mt-4"
+      />
 
       {/* Footer Target */}
       <div className="mt-3 flex items-center justify-between text-[10px] text-slate-500">

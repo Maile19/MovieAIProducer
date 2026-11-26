@@ -220,7 +220,7 @@ export default function CharacterMatrixTab({
   const [isStoppingBatch, setIsStoppingBatch] = useState(false);
   const abortBatchRef = useRef<boolean>(false);
   const wakeLockRef = useRef<any>(null);
-  const [batchResumeMode, setBatchResumeMode] = useState<boolean>(true);
+  const batchResumeMode = true; // Locked ON: Global Batch Downstream always skips existing photos
   const [batchPreflightModalOpen, setBatchPreflightModalOpen] = useState(false);
   const [batchProgress, setBatchProgress] = useState<{
     currentCharIdx: number;
@@ -1768,12 +1768,41 @@ export default function CharacterMatrixTab({
     });
   };
 
+  const patchTargetCharAsset = (
+    targetChar: Character | undefined,
+    targetType: string,
+    angle: string | undefined,
+    stateId: string | undefined,
+    imageUrl: string
+  ) => {
+    if (!targetChar || !imageUrl) return;
+    if (targetType === "state" && stateId) {
+      const stObj = targetChar.states?.find((s: any) => s.id === stateId);
+      if (stObj) stObj.image_url = imageUrl;
+      return;
+    }
+    if (angle) {
+      const keyMap: Record<string, string> = {
+        closeup: "closeup_image_url",
+        expression: "expression_image_url",
+        front: "front_image_url",
+        side: "side_image_url",
+        three_quarter: "three_quarter_image_url",
+        back: "back_image_url",
+        tpose: "tpose_image_url",
+        action: "action_image_url",
+      };
+      const field = keyMap[angle];
+      if (field) (targetChar as any)[field] = imageUrl;
+    }
+  };
+
   // Render Visual Asset for Character Turnaround, 7-Sheet, or State
   const handleRenderAsset = async (
     targetType: "turnaround" | "sheet" | "state" | string,
     angle: "front" | "side" | "three_quarter" | "back" | "tpose" | "action" | "expression" | string = "closeup",
     stateId?: string,
-    options?: { skipRefresh?: boolean; targetChar?: Character }
+    options?: { skipRefresh?: boolean; targetChar?: Character; skipExisting?: boolean }
   ): Promise<boolean> => {
     const activeChar = options?.targetChar ?? selectedChar;
     if (!activeChar?.id) return false;
@@ -1820,7 +1849,18 @@ export default function CharacterMatrixTab({
         provider: selectedProvider,
         model: selectedModel || undefined,
         aspect_ratio,
+        skip_existing: options?.skipExisting ? true : undefined,
       });
+
+      // Backend Skip Existing Guard (Defense-in-Depth for Resume / Batch Mode)
+      if (res.status === "skipped") {
+        if (options?.targetChar && res.image_url) {
+          patchTargetCharAsset(options.targetChar, targetType, angle, stateId, res.image_url);
+        }
+        setRenderingTargets((prev) => ({ ...prev, [targetKey]: false }));
+        setPollStatus((prev) => ({ ...prev, [targetKey]: "" }));
+        return true;
+      }
 
       // Synchronous Response (AG/Gemini 3.8 Flash, 9Router, SD 3.5 Large)
       if (res.status === "completed" && res.image_url) {
@@ -1834,25 +1874,7 @@ export default function CharacterMatrixTab({
           }
         }
         // Update in-memory workingChar immediately so subsequent cards/states see fresh anchor
-        if (options?.targetChar) {
-          if (targetType === "state" && stateId) {
-            const stObj = options.targetChar.states?.find((s: any) => s.id === stateId);
-            if (stObj) stObj.image_url = res.image_url;
-          } else if (angle) {
-            const keyMap: Record<string, string> = {
-              closeup: "closeup_image_url",
-              expression: "expression_image_url",
-              front: "front_image_url",
-              side: "side_image_url",
-              three_quarter: "three_quarter_image_url",
-              back: "back_image_url",
-              tpose: "tpose_image_url",
-              action: "action_image_url",
-            };
-            const field = keyMap[angle];
-            if (field) (options.targetChar as any)[field] = res.image_url;
-          }
-        }
+        patchTargetCharAsset(options?.targetChar, targetType, angle, stateId, res.image_url);
         setRenderingTargets((prev) => ({ ...prev, [targetKey]: false }));
         setPollStatus((prev) => ({ ...prev, [targetKey]: "" }));
         if (!options?.skipRefresh) {
@@ -1904,25 +1926,7 @@ export default function CharacterMatrixTab({
                   }
                 }
                 // Update in-memory workingChar immediately so subsequent cards/states see fresh anchor
-                if (options?.targetChar) {
-                  if (targetType === "state" && stateId) {
-                    const stObj = options.targetChar.states?.find((s: any) => s.id === stateId);
-                    if (stObj) stObj.image_url = job.image_url;
-                  } else if (angle) {
-                    const keyMap: Record<string, string> = {
-                      closeup: "closeup_image_url",
-                      expression: "expression_image_url",
-                      front: "front_image_url",
-                      side: "side_image_url",
-                      three_quarter: "three_quarter_image_url",
-                      back: "back_image_url",
-                      tpose: "tpose_image_url",
-                      action: "action_image_url",
-                    };
-                    const field = keyMap[angle];
-                    if (field) (options.targetChar as any)[field] = job.image_url;
-                  }
-                }
+                patchTargetCharAsset(options?.targetChar, targetType, angle, stateId, job.image_url);
                 setRenderingTargets((prev) => ({ ...prev, [targetKey]: false }));
                 setPollStatus((prev) => ({ ...prev, [targetKey]: "" }));
                 if (!options?.skipRefresh) {
@@ -2105,12 +2109,20 @@ export default function CharacterMatrixTab({
           return { success: false, error: "Dihentikan oleh pengguna" };
         }
         currentStep++;
-        if (resumeMode && (workingChar as any)[item.key]) {
+        const existingSlotUrl =
+          typeof (workingChar as any)[item.key] === "string"
+            ? ((workingChar as any)[item.key] as string).trim()
+            : "";
+        if (resumeMode && existingSlotUrl) {
           onStepProgress(`[Step ${currentStep}/${totalSteps}] ${item.name} sudah ada, dilewati (Resume Mode)`, currentStep, totalSteps);
           continue;
         }
         onStepProgress(`[Step ${currentStep}/${totalSteps}] Merender ${item.name}...`, currentStep, totalSteps);
-        const ok = await handleRenderAsset(item.targetType, item.slot, undefined, { skipRefresh: true, targetChar: workingChar });
+        const ok = await handleRenderAsset(item.targetType, item.slot, undefined, {
+          skipRefresh: true,
+          targetChar: workingChar,
+          skipExisting: resumeMode,
+        });
         if (!ok) {
           failedSlots.push(item.name);
         }
@@ -2131,12 +2143,17 @@ export default function CharacterMatrixTab({
           }
           currentStep++;
           const label = st.state_label || st.state_code;
-          if (resumeMode && st.image_url) {
+          const existingStateUrl = typeof st.image_url === "string" ? st.image_url.trim() : "";
+          if (resumeMode && existingStateUrl) {
             onStepProgress(`[Step ${currentStep}/${totalSteps}] State ${st.state_code} (${label}) sudah ada, dilewati (Resume Mode)`, currentStep, totalSteps);
             continue;
           }
           onStepProgress(`[Step ${currentStep}/${totalSteps}] Merender State ${st.state_code} (${label})...`, currentStep, totalSteps);
-          const ok = await handleRenderAsset("state", undefined, st.id, { skipRefresh: true, targetChar: workingChar });
+          const ok = await handleRenderAsset("state", undefined, st.id, {
+            skipRefresh: true,
+            targetChar: workingChar,
+            skipExisting: resumeMode,
+          });
           if (!ok) {
             failedSlots.push(`State ${st.state_code} (${label})`);
           }
@@ -2268,13 +2285,13 @@ export default function CharacterMatrixTab({
         c.action_image_url,
       ];
       slots.forEach((url) => {
-        if (url) alreadyExists++;
+        if (typeof url === "string" && url.trim()) alreadyExists++;
         else toRender++;
       });
       const states = c.states || [];
       if (states.length > 0) {
         states.forEach((st) => {
-          if (st.image_url) alreadyExists++;
+          if (typeof st.image_url === "string" && st.image_url.trim()) alreadyExists++;
           else toRender++;
         });
       } else {
@@ -5809,36 +5826,37 @@ export default function CharacterMatrixTab({
                 </div>
               </div>
 
-              {/* Resume Mode Toggle (Refinement 1) */}
-              <div className="p-3 rounded-xl bg-canvas border border-border space-y-2">
-                <label className="flex items-center justify-between cursor-pointer select-none">
+              {/* Resume Mode Locked Active (Always Skips Existing Photos) */}
+              <div className="p-3 rounded-xl bg-canvas border border-amber-500/30 space-y-2">
+                <div className="flex items-center justify-between select-none">
                   <div className="space-y-0.5 pr-2">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs font-bold text-obsidian-primary">
                         Skip kartu &amp; state yang sudah ter-generate (Resume Mode)
                       </span>
-                      <span className="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                        Recommended
+                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                        <Lock className="w-2.5 h-2.5" />
+                        <span>Terkunci Aktif</span>
                       </span>
                     </div>
                     <p className="text-[11px] text-obsidian-muted leading-tight">
-                      Hanya me-render slot downstream (Cards 4–8 &amp; States) yang belum memiliki aset gambar. Row 1 (Cards 1–3) dan aset selesai tidak akan ditimpa.
+                      Batch ini wajib melewati slot downstream (Cards 4–8 &amp; States) yang sudah memiliki foto (terproteksi di frontend &amp; backend). Row 1 (Cards 1–3) dan aset selesai tidak akan pernah ditimpa. Gunakan tombol Re-render satuan per kartu jika ingin menimpa foto tertentu.
                     </p>
                   </div>
                   <input
                     type="checkbox"
                     checked={batchResumeMode}
-                    onChange={(e) => setBatchResumeMode(e.target.checked)}
-                    className="w-4 h-4 rounded text-amber-500 bg-panel border-border focus:ring-amber-500 cursor-pointer shrink-0"
+                    disabled
+                    readOnly
+                    aria-label="Resume Mode terkunci aktif"
+                    className="w-4 h-4 rounded text-amber-500 bg-panel border-border opacity-80 cursor-not-allowed shrink-0"
                   />
-                </label>
+                </div>
 
                 <div className="pt-2 border-t border-border/60 flex items-center justify-between text-[11px] font-mono">
                   <span className="text-obsidian-muted">Estimasi Render:</span>
                   <span className="font-bold text-amber-400">
-                    {batchResumeMode
-                      ? `${estimates.toRender} aset gambar baru (${estimates.alreadyExists} aset sudah ada & dilewati)`
-                      : `${estimates.toRender} aset gambar (seluruh Cards 4–8 + Dynamic States)`}
+                    {`${estimates.toRender} aset gambar baru (${estimates.alreadyExists} aset sudah ada & dilewati)`}
                   </span>
                 </div>
               </div>
@@ -6039,7 +6057,6 @@ export default function CharacterMatrixTab({
                   type="button"
                   onClick={() => {
                     setBatchSummaryModalOpen(false);
-                    setBatchResumeMode(true);
                     handleOpenBatchModal();
                   }}
                   className="px-4 py-2 rounded-xl bg-panel border border-amber-500/40 text-amber-300 hover:bg-elevated font-mono font-bold text-xs flex items-center gap-1.5 transition-colors shadow-sm"
